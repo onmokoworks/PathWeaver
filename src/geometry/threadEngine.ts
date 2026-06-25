@@ -263,19 +263,9 @@ function segmentCommand(segment: ThreadSegment) {
   ].join(' ')
 }
 
-function materializeContacts(_startAnchor: StartAnchor, contacts: ThreadContact[], gridSettings: GridSettings, cursor?: Point): ThreadContact[] {
+function materializeContacts(_startAnchor: StartAnchor, contacts: ThreadContact[], _gridSettings: GridSettings): ThreadContact[] {
   if (contacts.length === 0) return []
-  const next = contacts.map((contact) => normalizeContact({ ...contact }))
-
-  if (cursor) {
-    const last = next[next.length - 1]
-    const lastPin = createGridDot(gridSettings, last.row, last.col)
-    const exit = exitAngleForTarget(lastPin, last, cursor)
-    last.exitAngle = exit.angle
-    last.direction = exit.direction
-  }
-
-  return next
+  return contacts.map((contact) => normalizeContact({ ...contact }))
 }
 
 function appendContact(
@@ -325,15 +315,15 @@ function contactEnd(contact: ThreadContact, gridSettings: GridSettings) {
   return pointOnCircle(createGridDot(gridSettings, contact.row, contact.col), contact.exitAngle)
 }
 
-function ropeHead(startAnchor: StartAnchor, contacts: ThreadContact[], gridSettings: GridSettings, cursor?: Point) {
-  const materialized = materializeContacts(startAnchor, contacts, gridSettings, cursor)
+function ropeHead(startAnchor: StartAnchor, contacts: ThreadContact[], gridSettings: GridSettings) {
+  const materialized = materializeContacts(startAnchor, contacts, gridSettings)
   const last = materialized.at(-1)
   const resolvedStart = resolveStartAnchor(startAnchor, gridSettings)
   return last ? contactEnd(last, gridSettings) : { x: resolvedStart.x, y: resolvedStart.y }
 }
 
-function renderSegments(startAnchor: StartAnchor, contacts: ThreadContact[], gridSettings: GridSettings, cursor?: Point) {
-  const materialized = materializeContacts(startAnchor, contacts, gridSettings, cursor)
+function renderSegments(startAnchor: StartAnchor, contacts: ThreadContact[], gridSettings: GridSettings) {
+  const materialized = materializeContacts(startAnchor, contacts, gridSettings)
   const resolvedStart = resolveStartAnchor(startAnchor, gridSettings)
   const segments: ThreadSegment[] = []
   let head: Point = { x: resolvedStart.x, y: resolvedStart.y }
@@ -353,8 +343,16 @@ function renderSegments(startAnchor: StartAnchor, contacts: ThreadContact[], gri
 
 function renderPreviewSegment(startAnchor: StartAnchor, contacts: ThreadContact[], gridSettings: GridSettings, cursor?: Point) {
   if (!cursor) return undefined
-  const head = ropeHead(startAnchor, contacts, gridSettings, cursor)
+  const head = ropeHead(startAnchor, contacts, gridSettings)
   return makeLine(head, cursor)
+}
+
+function shouldReleaseLastContact(startAnchor: StartAnchor, contacts: ThreadContact[], pointer: Point, gridSettings: GridSettings) {
+  if (contacts.length === 0) return false
+  const last = contacts[contacts.length - 1]
+  const previousHead = ropeHead(startAnchor, contacts.slice(0, -1), gridSettings)
+  const lastPin = createGridDot(gridSettings, last.row, last.col)
+  return lineCircleIntersections(previousHead, pointer, lastPin).length === 0
 }
 
 export function renderThread(
@@ -364,15 +362,15 @@ export function renderThread(
   cursor?: Point,
 ): RenderedThread {
   const resolvedStart = resolveStartAnchor(startAnchor, gridSettings)
-  const displayContacts = materializeContacts(startAnchor, contacts, gridSettings, cursor)
-  const openSegments = renderSegments(startAnchor, displayContacts, gridSettings, cursor)
+  const displayContacts = materializeContacts(startAnchor, contacts, gridSettings)
+  const openSegments = renderSegments(startAnchor, displayContacts, gridSettings)
   const previewSegment = renderPreviewSegment(startAnchor, displayContacts, gridSettings, cursor)
   const startCommand = `M ${format(resolvedStart.x)} ${format(resolvedStart.y)}`
   const threadPathData = [startCommand, ...openSegments.map(segmentCommand)].join(' ')
   const previewPathData = previewSegment
     ? [`M ${format(previewSegment.from.x)} ${format(previewSegment.from.y)}`, segmentCommand(previewSegment)].join(' ')
     : undefined
-  const closingHead = ropeHead(startAnchor, displayContacts, gridSettings, cursor)
+  const closingHead = ropeHead(startAnchor, displayContacts, gridSettings)
   const closingLine = makeLine(closingHead, resolvedStart)
   const fillSegments = closingLine ? [...openSegments, closingLine] : openSegments
   const fillPathData = [startCommand, ...fillSegments.map(segmentCommand), 'Z'].join(' ')
@@ -395,15 +393,19 @@ export function advanceThread(
   closeRadius: number,
 ): ActiveThread {
   const threadTip = clampPointOutsidePins(pointer, gridDots)
-  let contacts = materializeContacts(active.startAnchor, active.contacts, gridSettings, threadTip)
+  let contacts = materializeContacts(active.startAnchor, active.contacts, gridSettings)
+
+  while (shouldReleaseLastContact(active.startAnchor, contacts, threadTip, gridSettings)) {
+    contacts = materializeContacts(active.startAnchor, contacts.slice(0, -1), gridSettings)
+  }
 
   for (let guard = 0; guard < 6; guard += 1) {
-    const head = ropeHead(active.startAnchor, contacts, gridSettings, threadTip)
+    const head = ropeHead(active.startAnchor, contacts, gridSettings)
     const hit = findFirstUncapturedPinHit(head, threadTip, gridDots, contacts) ?? findFirstPinHit(head, threadTip, gridDots, contacts.at(-1)?.pinId)
     if (!hit) break
     const existingIndex = contacts.findIndex((contact) => contact.pinId === hit.pin.id)
     if (existingIndex >= 0) {
-      contacts = materializeContacts(active.startAnchor, contacts.slice(0, existingIndex + 1), gridSettings, threadTip)
+      contacts = materializeContacts(active.startAnchor, contacts.slice(0, existingIndex + 1), gridSettings)
       break
     }
     contacts = appendContact(active.startAnchor, contacts, hit.pin, hit.point, gridSettings, threadTip)
