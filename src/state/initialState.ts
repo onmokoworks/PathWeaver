@@ -36,7 +36,7 @@ export function createEmptyGlyph(char = 'A'): GlyphState {
 export function createInitialProject(): ProjectState {
   return {
     version: 4,
-    fontName: 'ThreadType Hooked Study',
+    fontName: 'ThreadShape Hooked Study',
     currentGlyph: 'A',
     glyphs: {
       A: createEmptyGlyph('A'),

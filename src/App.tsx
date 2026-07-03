@@ -365,7 +365,7 @@ function App() {
   }
 
   function exportSvg() {
-    downloadTextFile(`ThreadType-${glyph.char}.svg`, buildGlyphSvg(glyph), 'image/svg+xml')
+    downloadTextFile(`ThreadShape-${glyph.char}.svg`, buildGlyphSvg(glyph), 'image/svg+xml')
   }
 
   return (
