@@ -1,5 +1,7 @@
 # ThreadShape
 
+![ThreadShape UI](public/threadshape-ui.png)
+
 糸を引くように輪郭を組み立てる、実験的なグリフエディタです。
 
 ## 要件
