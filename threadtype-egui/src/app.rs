@@ -25,6 +25,7 @@ const START_PROX: f64 = 40.0;
 const ENABLE_EXPERIMENTAL_SQUARE_PEGS: bool = false;
 const PEG_CLEARANCE: f64 = 1.0;
 const MAX_MANUAL_TURNS: u32 = 8;
+const SINGLE_CIRCLE_MIN_SWEEP: f64 = std::f64::consts::PI;
 
 /// 閉路候補の巻き方向を、ライブ描画の符号に近い順で展開する。
 /// 小規模な閉路では全組合せを調べ、三角形など複数接触の同時反転が
@@ -123,11 +124,51 @@ fn face_has_minimum_constraints(face: &Face) -> bool {
                 }
             }
         }
-        unique.len() >= 2
+        if unique.len() >= 2 {
+            true
+        } else if unique.len() == 1 {
+            face.elements.iter().any(|element| {
+                matches!(
+                    element,
+                    Element::Wrap { sweep_hint, .. }
+                        if sweep_hint.abs() >= std::f64::consts::TAU - 1e-6
+                )
+            })
+        } else {
+            false
+        }
     } else {
         // Commandで置いたPinを含む自由形状は従来どおり許可する。
         face.elements.len() >= 2
     }
+}
+
+fn intentional_single_circle_wrap(
+    thread: &Thread,
+    start: StartAnchor,
+    peg_refs: &[PegRef],
+) -> Option<Element> {
+    let wrap = thread
+        .wraps
+        .iter()
+        .filter(|wrap| peg_refs.get(wrap.peg).is_some_and(|peg| *peg == start.peg))
+        .max_by(|a, b| {
+            let a_sweep = ((a.exit - a.entry) * a.s).abs();
+            let b_sweep = ((b.exit - b.entry) * b.s).abs();
+            a_sweep
+                .partial_cmp(&b_sweep)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })?;
+    (((wrap.exit - wrap.entry) * wrap.s).abs() >= SINGLE_CIRCLE_MIN_SWEEP).then_some(
+        Element::Wrap {
+            peg: start.peg,
+            s: wrap.s,
+            turns: 0,
+            exit_offset: 0.0,
+            // 一円シェイプは操作量にかかわらず、保存時には綺麗な一周へ揃える。
+            sweep_hint: std::f64::consts::TAU,
+        },
+    )
 }
 
 fn safe_grid_radius_limits(grid: &GridSettings) -> (f64, f64) {
@@ -2348,6 +2389,7 @@ impl App {
         let mut active_has_penetration = false;
         let mut request_pin: Option<Point> = None;
         let mut request_finish = false;
+        let mut request_cancel_draw = false;
         let mut request_finish_face: Option<(Face, Vec<Seg>)> = None;
         let mut active_status: Option<String> = None;
         let mut rebuild_pegs = false;
@@ -2766,6 +2808,22 @@ impl App {
                 if let Some(seed) = variants.first() {
                     variants = winding_variants(seed);
                 }
+                let distinct_wraps = variants.first().map_or(0, |candidate| {
+                    let mut refs = Vec::new();
+                    for element in candidate {
+                        if let Element::Wrap { peg, .. } = element {
+                            if !refs.contains(peg) {
+                                refs.push(*peg);
+                            }
+                        }
+                    }
+                    refs.len()
+                });
+                if distinct_wraps == 1 {
+                    if let Some(single_circle) = intentional_single_circle_wrap(&th, start, &peg_refs) {
+                        variants = vec![vec![single_circle]];
+                    }
+                }
 
                 let ignored_refs: Vec<PegRef> = ignored
                     .iter()
@@ -2838,7 +2896,7 @@ impl App {
                     .as_ref()
                     .is_some_and(|(face, _)| !face_has_minimum_constraints(face))
                 {
-                    active_status = Some("異なる円を2個以上経由してから閉じてください".to_owned());
+                    request_cancel_draw = true;
                 } else if th.wraps.is_empty() && base_is_empty {
                             active_status = Some("ペグに引っかけてから始点に戻ると閉じられます".to_owned());
                         } else if active_has_penetration {
@@ -2853,6 +2911,11 @@ impl App {
 
         if let Some(status) = active_status {
             self.status = status;
+        }
+
+        if request_cancel_draw {
+            self.draw = None;
+            self.status = "描画をキャンセルしました".to_owned();
         }
 
         if pin_request {
@@ -4404,6 +4467,64 @@ mod tests {
             sweep_hint: std::f64::consts::PI,
         });
         assert!(face_has_minimum_constraints(&two));
+
+        let mut intentional = one.clone();
+        if let Element::Wrap { sweep_hint, .. } = &mut intentional.elements[0] {
+            *sweep_hint = std::f64::consts::TAU;
+        }
+        assert!(face_has_minimum_constraints(&intentional));
+    }
+
+    #[test]
+    fn single_circle_requires_half_turn_and_normalizes_to_full_circle() {
+        let start = StartAnchor { peg: PegRef::Custom { id: 0 }, port: Port::Top };
+        let refs = [start.peg];
+        let make_thread = |sweep: f64| Thread {
+            anchor: Point::new(0.0, -50.0),
+            wraps: vec![crate::geometry::Wrap {
+                peg: 0,
+                s: 1.0,
+                entry: 0.0,
+                exit: sweep,
+            }],
+            tip: Point::new(0.0, -50.0),
+        };
+        assert!(intentional_single_circle_wrap(
+            &make_thread(std::f64::consts::PI - 0.01),
+            start,
+            &refs,
+        )
+        .is_none());
+        let full = intentional_single_circle_wrap(
+            &make_thread(std::f64::consts::PI + 0.01),
+            start,
+            &refs,
+        )
+        .unwrap();
+        assert!(matches!(
+            &full,
+            Element::Wrap { sweep_hint, turns: 0, .. }
+                if (*sweep_hint - std::f64::consts::TAU).abs() < 1e-9
+        ));
+        let face = Face {
+            start,
+            elements: vec![full],
+            name: String::new(),
+            visible: true,
+            baked: None,
+            ignored_pegs: Vec::new(),
+        };
+        let resolver = |peg_ref: &PegRef| (*peg_ref == start.peg).then_some(Peg {
+            center: Point::new(0.0, 0.0),
+            radius: 50.0,
+            shape: crate::model::PegShape::Circle,
+            rounding: 0.0,
+        });
+        let segs = materialize_face(&face, &resolver).unwrap();
+        let mut points = Vec::new();
+        let app = test_app();
+        app.flatten_segments_for_appearance(&segs, &mut points, 0.2);
+        assert!(signed_area(&points).abs() > 7_000.0);
     }
 
     #[test]
