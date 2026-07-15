@@ -3,12 +3,12 @@ use crate::geometry::{
     bevel_ring, clamp_outside_pegs,
     materialize_chain, materialize_face, materialize_face_with_obstacles,
     peg_signed_distance, pegs_penetrated_by_line, segments_penetrate_pegs, signed_area,
-    thread_to_wrap_elements, union_polygons, update_thread_ignoring,
+    thread_to_wrap_elements, union_polygon_ring_sets, update_thread_ignoring,
     Peg, Seg, Thread,
 };
 use crate::model::{
     resolve_peg, CustomPeg, Document, Element, Face, GridSettings, PegRef, Port, ScaleAnchor,
-    StartAnchor,
+    StartAnchor, CURRENT_DOCUMENT_VERSION,
 };
 use egui_dock::{DockArea, DockState, NodeIndex, TabViewer};
 use egui::{
@@ -251,6 +251,9 @@ enum ActiveDrag {
     Custom {
         start: Vec<(u64, Point)>,
         anchor: Point,
+        /// Direct SelectでGrid/Sub参照をCustomへ変換した時点で、位置が
+        /// 元に戻ってもドキュメント自体は変更済みであることを示す。
+        converted: bool,
     },
 }
 
@@ -312,6 +315,7 @@ pub struct App {
     dark_theme: bool,
     dock: DockState<DockTab>,
     drag_snapshot: Option<Document>,
+    grid_edit_orig: Option<Document>,
     /// 任意円編集中の (id)
     radius_edit_orig: Option<u64>,
     bevel_edit_orig: Option<Document>,
@@ -348,6 +352,7 @@ impl App {
             dark_theme: true,
             dock: App::default_dock_layout(),
             drag_snapshot: None,
+            grid_edit_orig: None,
             radius_edit_orig: None,
             bevel_edit_orig: None,
             face_name_snapshot: None,
@@ -402,9 +407,11 @@ impl App {
     /// 一時的に防ぎ、カーソルが円の外へ出れば通常の捕捉へ戻す。
     fn undo_last_catch(&mut self) {
         if let Some(active) = self.draw.as_mut() {
+            // Commandキーの解放は、巻き付きが無い場合でもCmd+Z操作の一部。
+            // 貫通確定として解釈しない。
+            active.suppress_cmd_ignore_until_release = true;
             if let Some(w) = active.th.wraps.pop() {
                 active.undo_guard = Some(w.peg);
-                active.suppress_cmd_ignore_until_release = true;
                 self.status = "直前の引っ掛かりを解除しました".to_owned();
             } else {
                 self.status = "解除できる引っ掛かりがありません".to_owned();
@@ -444,6 +451,14 @@ impl App {
                     Element::Pin { pos } => {
                         pos.x += dx;
                         pos.y += dy;
+                    }
+                }
+            }
+            if let Some(baked) = &mut face.baked {
+                for ring in &mut baked.rings {
+                    for point in ring {
+                        point.x += dx;
+                        point.y += dy;
                     }
                 }
             }
@@ -584,7 +599,7 @@ impl App {
         self.selection.clear();
     }
 
-    fn begin_drag(&mut self, ids: &[u64], anchor: Point) {
+    fn begin_drag(&mut self, ids: &[u64], anchor: Point, converted: bool) {
         let mut start = Vec::new();
         for id in ids {
             if let Some(peg) = self.doc.custom_pegs.iter().find(|peg| peg.id == *id) {
@@ -595,11 +610,39 @@ impl App {
             self.active_custom_drag = Some(ActiveDrag::Custom {
                 start,
                 anchor,
+                converted,
             });
         }
     }
 
+    /// 操作途中で既にドキュメントへ反映された変更を開始時点へ戻す。
+    /// Escape・ツール切替・Undoの入口を一本化し、古いドラッグ状態が
+    /// 次フレームでUndo結果を上書きしないようにする。
+    fn cancel_active_manipulation(&mut self) -> bool {
+        let mut canceled = false;
+        if let Some(grab) = self.grab.take() {
+            self.doc = grab.base;
+            canceled = true;
+        }
+        if let Some(face_drag) = self.face_drag.take() {
+            self.doc = face_drag.base;
+            canceled = true;
+        }
+        if self.active_custom_drag.take().is_some() {
+            if let Some(snapshot) = self.drag_snapshot.take() {
+                self.doc = snapshot;
+            }
+            canceled = true;
+        }
+        if canceled {
+            self.radius_edit_orig = None;
+            self.rebuild_pegs(self.canvas_size);
+        }
+        canceled
+    }
+
     fn do_undo(&mut self) {
+        self.cancel_active_manipulation();
         if let Some(d) = self.undo.pop() {
             self.redo.push(self.doc.clone());
             self.doc = d;
@@ -610,6 +653,7 @@ impl App {
     }
 
     fn do_redo(&mut self) {
+        self.cancel_active_manipulation();
         if let Some(d) = self.redo.pop() {
             self.undo.push(self.doc.clone());
             self.doc = d;
@@ -827,6 +871,15 @@ impl App {
         self.pegs
             .iter()
             .zip(self.peg_refs.iter())
+            .filter(|(_, peg_ref)| match peg_ref {
+                PegRef::Custom { id } => self
+                    .doc
+                    .custom_pegs
+                    .iter()
+                    .find(|custom| custom.id == *id)
+                    .is_none_or(|custom| custom.visible),
+                _ => true,
+            })
             .rfind(|(peg, _)| peg_signed_distance(peg, point) <= self.doc.grid.catch)
             .map(|(peg, peg_ref)| (*peg_ref, peg.center))
     }
@@ -1161,6 +1214,7 @@ impl App {
                 .iter()
                 .copied()
                 .zip(self.pegs.iter().copied())
+                .filter(|(peg_ref, _)| !face.ignored_pegs.contains(peg_ref))
                 .collect();
             if let Some(segments) = materialize_face_with_obstacles(face, &resolver, &obstacles) {
                 let mut points = Vec::new();
@@ -1173,7 +1227,10 @@ impl App {
                 }
                 let invalid = self.has_self_intersections(&points)
                     || self.face_has_overwrapped_peg(face)
-                    || segments_penetrate_pegs(&segments, &self.pegs);
+                    || segments_penetrate_pegs(
+                        &segments,
+                        &obstacles.iter().map(|(_, peg)| *peg).collect::<Vec<_>>(),
+                    );
                 out.push((
                     i,
                     FaceRender {
@@ -1322,34 +1379,29 @@ impl App {
             .copied()
             .zip(self.pegs.iter().copied())
             .collect();
-        let mut polys: Vec<Vec<Point>> = Vec::new();
+        let mut shapes: Vec<Vec<Vec<Point>>> = Vec::new();
         for &i in &indices {
             if let Some(face) = self.doc.faces.get(i) {
-                let ring = if let Some(baked) = &face.baked {
+                let rings = if let Some(baked) = &face.baked {
                     baked
                         .rings
                         .iter()
-                        .max_by(|a, b| {
-                            signed_area(a)
-                                .abs()
-                                .partial_cmp(&signed_area(b).abs())
-                                .unwrap_or(std::cmp::Ordering::Equal)
-                        })
-                        .cloned()
-                        .unwrap_or_default()
+                        .map(|ring| bevel_ring(ring, baked.bevel))
+                        .filter(|ring| ring.len() >= 3)
+                        .collect()
                 } else if let Some(segs) = materialize_face_with_obstacles(face, &resolver, &obstacles) {
                     let mut pts = Vec::new();
                     self.flatten_segments_for_appearance(&segs, &mut pts, 0.2);
-                    pts
+                    vec![pts]
                 } else {
                     continue;
                 };
-                if ring.len() >= 3 {
-                    polys.push(ring);
+                if !rings.is_empty() {
+                    shapes.push(rings);
                 }
             }
         }
-        let rings = union_polygons(&polys);
+        let rings = union_polygon_ring_sets(&shapes);
         if rings.is_empty() {
             self.status = "マージできませんでした".to_owned();
             return;
@@ -1370,6 +1422,7 @@ impl App {
             name: format!("マージ {n}"),
             visible: true,
             baked: Some(crate::model::BakedShape { rings, bevel: 0.0 }),
+            ignored_pegs: Vec::new(),
         });
         self.set_single_selection(Some(Selection::Face(self.doc.faces.len() - 1)));
         self.status = "レイヤーをマージしました".to_owned();
@@ -1423,13 +1476,20 @@ impl App {
                 .map_err(|e| e.to_string())
                 .and_then(|s| serde_json::from_str::<Document>(&s).map_err(|e| e.to_string()))
             {
-                Ok(doc) => {
+                Ok(mut doc) if doc.version <= CURRENT_DOCUMENT_VERSION => {
                     self.push_history();
+                    doc.version = CURRENT_DOCUMENT_VERSION;
                     self.doc = doc;
                     self.doc.next_peg_id = self.next_peg_id();
                     self.draw = None;
                     self.clear_selection();
                     self.status = format!("JSONを読み込みました: {}", path.display());
+                }
+                Ok(doc) => {
+                    self.status = format!(
+                        "このファイルは新しいバージョンです（ファイル: v{} / アプリ: v{}）",
+                        doc.version, CURRENT_DOCUMENT_VERSION
+                    );
                 }
                 Err(e) => self.status = format!("読み込みに失敗しました: {e}"),
             }
@@ -1459,7 +1519,7 @@ impl App {
             .custom_pegs
             .iter()
             .rev()
-            .find(|custom| resolve_peg(&self.doc.grid, &self.doc.custom_pegs, self.canvas_center, self.doc.peg_appearance, &PegRef::Custom { id: custom.id }).is_some_and(|peg| peg_signed_distance(&peg, point) <= self.doc.grid.catch))
+            .find(|custom| custom.visible && resolve_peg(&self.doc.grid, &self.doc.custom_pegs, self.canvas_center, self.doc.peg_appearance, &PegRef::Custom { id: custom.id }).is_some_and(|peg| peg_signed_distance(&peg, point) <= self.doc.grid.catch))
         {
             return Some(Selection::Peg(custom.id));
         }
@@ -1467,7 +1527,16 @@ impl App {
             .iter()
             .rev()
             .find_map(|(i, render)| {
-                if point_in_polygon(point, &render.points) {
+                // 全リングをeven-oddで判定する。これにより独立した小さい成分も
+                // 選択でき、穴の内部は面として誤選択しない。
+                if render
+                    .rings
+                    .iter()
+                    .filter(|ring| point_in_polygon(point, ring))
+                    .count()
+                    % 2
+                    == 1
+                {
                     Some(Selection::Face(*i))
                 } else {
                     None
@@ -1685,7 +1754,9 @@ impl App {
                 row_frame(ui, selected, |ui| {
                     let visible = self.doc.faces[i].visible;
                     if eye_button(ui, visible).clicked() {
+                        let snapshot = self.doc.clone();
                         self.doc.faces[i].visible = !visible;
+                        self.push_history_snapshot(snapshot);
                     }
                     self.face_preview_widget(ui, i, 20.0);
                     // × を右端に固定し、名前は残り幅いっぱいに広げる
@@ -1749,7 +1820,9 @@ impl App {
                 let used = self.custom_peg_in_use(id);
                 row_frame(ui, selected, |ui| {
                     if eye_button(ui, visible).clicked() {
+                        let snapshot = self.doc.clone();
                         self.doc.custom_pegs[i].visible = !visible;
+                        self.push_history_snapshot(snapshot);
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if used {
@@ -1813,13 +1886,18 @@ impl App {
             let r_resp = scrub_value(ui, "半径", &mut r, 0.5, 0.0..=120.0);
 
             if x_resp.changed() || y_resp.changed() || r_resp.changed() {
-                if self.radius_edit_orig.is_none() {
-                    self.radius_edit_orig = Some(peg_id);
-                    self.drag_snapshot = Some(self.doc.clone());
+                let candidate_center = Point::new(x, y);
+                if self.can_place_custom_peg(candidate_center, r, &[peg_id]) {
+                    if self.radius_edit_orig.is_none() {
+                        self.radius_edit_orig = Some(peg_id);
+                        self.drag_snapshot = Some(self.doc.clone());
+                    }
+                    self.doc.custom_pegs[peg_idx].center = candidate_center;
+                    self.doc.custom_pegs[peg_idx].radius = r;
+                    self.rebuild_pegs(self.canvas_size);
+                } else {
+                    self.status = "円同士が重なる位置・半径には変更できません".to_owned();
                 }
-                self.doc.custom_pegs[peg_idx].center = Point::new(x, y);
-                self.doc.custom_pegs[peg_idx].radius = r;
-                self.rebuild_pegs(self.canvas_size);
             }
             if (x_resp.lost_focus()
                 || y_resp.lost_focus()
@@ -1850,19 +1928,27 @@ impl App {
             section_header(ui, &format!("レイヤー {}件", face_indices.len()));
             ui.horizontal(|ui| {
                 if ui.button("すべて表示").clicked() {
+                    let snapshot = self.doc.clone();
+                    let mut changed = false;
                     for &face_idx in &face_indices {
                         if let Some(face) = self.doc.faces.get_mut(face_idx) {
+                            changed |= !face.visible;
                             face.visible = true;
                         }
                     }
+                    if changed { self.push_history_snapshot(snapshot); }
                     self.status = "選択中のレイヤーを表示".to_owned();
                 }
                 if ui.button("すべて非表示").clicked() {
+                    let snapshot = self.doc.clone();
+                    let mut changed = false;
                     for &face_idx in &face_indices {
                         if let Some(face) = self.doc.faces.get_mut(face_idx) {
+                            changed |= face.visible;
                             face.visible = false;
                         }
                     }
+                    if changed { self.push_history_snapshot(snapshot); }
                     self.status = "選択中のレイヤーを非表示".to_owned();
                 }
             });
@@ -1889,8 +1975,11 @@ impl App {
                     );
                 }
             });
+            let visibility_snapshot = self.doc.clone();
             if let Some(face) = self.doc.faces.get_mut(face_idx) {
-                ui.checkbox(&mut face.visible, "表示");
+                if ui.checkbox(&mut face.visible, "表示").changed() {
+                    self.push_history_snapshot(visibility_snapshot);
+                }
             }
             // マージ済みレイヤーはベベル量を非破壊で調整できる
             let is_baked = self
@@ -1923,6 +2012,7 @@ impl App {
     fn render_grid_tab(&mut self, ui: &mut egui::Ui) {
         let colors = self.theme_colors();
         ui.vertical(|ui| {
+            let before_doc = self.doc.clone();
             let before_grid = self.doc.grid;
             ui.add(egui::Slider::new(&mut self.doc.grid.spacing, 40.0..=320.0).text("間隔"));
             ui.add(egui::Slider::new(&mut self.doc.grid.catch, 0.0..=24.0).text("引っかかり範囲"));
@@ -1975,6 +2065,14 @@ impl App {
             }
             if self.enforce_safe_grid_radii() {
                 self.status = "円同士が重ならない安全な半径へ自動調整しました".to_owned();
+            }
+            if self.doc.grid != before_grid && self.grid_edit_orig.is_none() {
+                self.grid_edit_orig = Some(before_doc);
+            }
+            if self.grid_edit_orig.is_some() && !ui.input(|input| input.pointer.primary_down()) {
+                if let Some(snapshot) = self.grid_edit_orig.take() {
+                    self.push_history_snapshot(snapshot);
+                }
             }
             ui.add_space(8.0);
             ui.separator();
@@ -2052,14 +2150,23 @@ impl App {
             let confirm = response.clicked() || ui.input(|i| i.key_pressed(Key::Enter));
             if let (Some(grab), Some(pos)) = (self.grab.as_ref(), hover) {
                 let delta = pos - grab.anchor;
-                let moves: Vec<(u64, Point)> =
-                    grab.origins.iter().map(|(id, o)| (*id, *o + delta)).collect();
-                for (id, np) in moves {
-                    if let Some(p) = self.doc.custom_pegs.iter_mut().find(|p| p.id == id) {
-                        p.center = np;
+                let moves: Vec<(u64, Point, f64)> = grab
+                    .origins
+                    .iter()
+                    .filter_map(|(id, origin)| {
+                        self.doc.custom_pegs.iter().find(|peg| peg.id == *id)
+                            .map(|peg| (*id, *origin + delta, peg.radius))
+                    })
+                    .collect();
+                let moving_ids: Vec<u64> = moves.iter().map(|(id, _, _)| *id).collect();
+                if self.can_place_custom_pegs(&moves, &moving_ids) {
+                    for (id, np, _) in moves {
+                        if let Some(p) = self.doc.custom_pegs.iter_mut().find(|p| p.id == id) {
+                            p.center = np;
+                        }
                     }
+                    self.rebuild_pegs(self.canvas_size);
                 }
-                self.rebuild_pegs(self.canvas_size);
             }
             if cancel {
                 if let Some(grab) = self.grab.take() {
@@ -2080,15 +2187,16 @@ impl App {
             self.status = "描画モードを切り替えたため描画中の線をキャンセルしました".to_owned();
         }
         if self.tool != Tool::Select && self.tool != Tool::DirectSelect {
-            self.active_custom_drag = None;
+            self.cancel_active_manipulation();
         }
 
         if !grabbing && (ui.input(|i| i.key_pressed(Key::Escape)) || response.secondary_clicked()) {
             if self.draw.take().is_some() {
                 self.status = "描画をキャンセルしました".to_owned();
+            } else if self.cancel_active_manipulation() {
+                self.status = "移動を取り消しました".to_owned();
             } else {
                 self.clear_selection();
-                self.active_custom_drag = None;
             }
             self.radius_edit_orig = None;
             self.drag_snapshot = None;
@@ -2167,7 +2275,7 @@ impl App {
                             } else {
                                 vec![id]
                             };
-                            self.begin_drag(&ids, pos);
+                            self.begin_drag(&ids, pos, false);
                         }
                         (Tool::DirectSelect, PegRef::Custom { id }) => {
                             if !self.drag_snapshot.is_some() {
@@ -2180,7 +2288,7 @@ impl App {
                             } else {
                                 vec![id]
                             };
-                            self.begin_drag(&ids, pos);
+                            self.begin_drag(&ids, pos, false);
                         }
                         (Tool::DirectSelect, source) => {
                             // 参照判定は変換「前」に行う。変換後は参照が新しい
@@ -2192,7 +2300,8 @@ impl App {
                                 }
                                 self.set_single_selection(Some(Selection::PegRef(source)));
                                 let id = self.direct_select_drag_target(source, pos_ref, radius);
-                                self.begin_drag(&[id], pos);
+                                self.set_single_selection(Some(Selection::Peg(id)));
+                                self.begin_drag(&[id], pos, true);
                                 self.rebuild_pegs(self.canvas_size);
                             } else {
                                 self.set_single_selection(Some(Selection::PegRef(source)));
@@ -2282,15 +2391,15 @@ impl App {
 
         if response.drag_stopped() {
             if let Some(drag) = self.active_custom_drag.take() {
-                let moved = match drag {
-                    ActiveDrag::Custom { start, .. } => start.iter().any(|(id, start_center)| {
+                let changed = match drag {
+                    ActiveDrag::Custom { start, converted, .. } => converted || start.iter().any(|(id, start_center)| {
                         self.doc
                             .custom_pegs
                             .iter()
                             .any(|peg| peg.id == *id && peg.center != *start_center)
                     }),
                 };
-                if moved {
+                if changed {
                     if let Some(snap) = self.drag_snapshot.take() {
                         self.push_history_snapshot(snap);
                         self.status = if self.tool == Tool::DirectSelect {
@@ -2479,10 +2588,6 @@ impl App {
                 let trailing_start_wrap = th.wraps.last().filter(|wrap| {
                     peg_refs.get(wrap.peg).is_some_and(|peg_ref| *peg_ref == start.peg)
                 });
-                let auto_close_sweep = trailing_start_wrap
-                    .map(|wrap| ((wrap.exit - wrap.entry) * wrap.s).abs());
-                let prefer_anchor_close = trailing_start_wrap.is_none()
-                    || auto_close_sweep.is_some_and(|sweep| sweep > MAX_AUTO_CLOSE_SWEEP);
                 let preferred_start_s = if matches!(elements.last(), Some(Element::Wrap { peg, .. }) if *peg == start.peg) {
                     None
                 } else {
@@ -2494,23 +2599,6 @@ impl App {
                     })
                 };
                 let mut variants = Vec::new();
-                if prefer_anchor_close {
-                    let mut anchored_thread = th.clone();
-                    if trailing_start_wrap.is_some() {
-                        anchored_thread.wraps.pop();
-                    }
-                    if let Some(anchor_wraps) = thread_to_wrap_elements(
-                        &anchored_thread,
-                        &resolved_pegs,
-                        &peg_refs,
-                        start_point,
-                    ) {
-                        let mut anchored = base_elements.clone();
-                        anchored.extend(anchor_wraps);
-                        anchored.push(Element::Pin { pos: start_point });
-                        variants.push(anchored);
-                    }
-                }
                 if let Some(s) = preferred_start_s {
                     for start_s in [s, -s] {
                         let mut candidate = elements.clone();
@@ -2565,16 +2653,61 @@ impl App {
                         visible: true,
                         name: String::new(),
                         baked: None,
+                        ignored_pegs: ignored_refs.clone(),
                     };
                     let Some(segs) = materialize_face_with_obstacles(&face, &resolver, &obstacles) else { continue };
                     if first_candidate.is_none() {
                         first_candidate = Some((face.clone(), segs.clone()));
                     }
-                    if !self.has_penetration_on_lines(&segs)
+                    let start_peg = resolver(&start.peg);
+                    let start_sweep = start_peg.and_then(|peg| {
+                        segs.iter().find_map(|segment| match *segment {
+                            Seg::Arc { center, start, end, .. }
+                                if center.distance(peg.center) < 1e-8 => Some((end - start).abs()),
+                            _ => None,
+                        })
+                    });
+                    if start_sweep.is_some_and(|sweep| sweep <= MAX_AUTO_CLOSE_SWEEP)
+                        && !self.has_penetration_on_lines(&segs)
                         && !segments_penetrate_pegs(&segs, &obstacle_pegs)
                     {
                         chosen = Some((face, segs));
                         break;
+                    }
+                }
+                // 円へ自然に閉じる候補が90°を超えて回り込む場合だけ、開始点を
+                // 結び目にした候補へフォールバックする。「末尾が開始円ではない」
+                // だけで Pin 化すると通常の閉路まで再計算不能になるため、実際に
+                // 解いた開始円弧の掃引量を基準にする。
+                if chosen.is_none() {
+                    let mut anchored_thread = th.clone();
+                    if trailing_start_wrap.is_some() {
+                        anchored_thread.wraps.pop();
+                    }
+                    if let Some(anchor_wraps) = thread_to_wrap_elements(
+                        &anchored_thread,
+                        &resolved_pegs,
+                        &peg_refs,
+                        start_point,
+                    ) {
+                        let mut anchored = base_elements.clone();
+                        anchored.extend(anchor_wraps);
+                        anchored.push(Element::Pin { pos: start_point });
+                        let face = Face {
+                            start,
+                            elements: anchored,
+                            visible: true,
+                            name: String::new(),
+                            baked: None,
+                            ignored_pegs: ignored_refs.clone(),
+                        };
+                        if let Some(segs) = materialize_face_with_obstacles(&face, &resolver, &obstacles) {
+                            if !self.has_penetration_on_lines(&segs)
+                                && !segments_penetrate_pegs(&segs, &obstacle_pegs)
+                            {
+                                chosen = Some((face, segs));
+                            }
+                        }
                     }
                 }
                 if let Some((face, segs)) = chosen.or(first_candidate) {
@@ -2764,7 +2897,12 @@ impl App {
         // 円弧だけを後から上書きし、直線より細く見えていたため。
         if self.show_circles && self.doc.grid.catch > 0.5 {
             let zoom = self.view.zoom;
-            for peg in &self.pegs {
+            for (peg, peg_ref) in self.pegs.iter().zip(self.peg_refs.iter()) {
+                if let PegRef::Custom { id } = peg_ref {
+                    if self.doc.custom_pegs.iter().find(|custom| custom.id == *id).is_some_and(|custom| !custom.visible) {
+                        continue;
+                    }
+                }
                 let c = self.to_screen(origin, peg.center);
                 if peg.shape == crate::model::PegShape::RoundedSquare {
                     let catch_rect = Rect::from_center_size(c, Vec2::splat(peg.radius as f32 * zoom * 2.0));
@@ -2838,6 +2976,11 @@ impl App {
         if self.show_circles {
             let zoom = self.view.zoom;
             for (peg, peg_ref) in self.pegs.iter().zip(self.peg_refs.iter()) {
+                if let PegRef::Custom { id } = peg_ref {
+                    if self.doc.custom_pegs.iter().find(|custom| custom.id == *id).is_some_and(|custom| !custom.visible) {
+                        continue;
+                    }
+                }
                 let c = self.to_screen(origin, peg.center);
                 let r_draw = ((peg.radius - self.doc.grid.catch).max(0.0) as f32) * zoom;
                 // 任意円がグリッド/サブ円に被っているときは赤で警告表示
@@ -3752,7 +3895,7 @@ mod tests {
         app.doc.faces.push(Face {
             start: StartAnchor { peg: PegRef::Grid { row: 0, col: 0 }, port: Port::Right },
             elements: vec![Element::Wrap { peg: target, s: 1.0, turns: 0, exit_offset: 0.0, sweep_hint: 1.0 }],
-            name: String::new(), visible: true, baked: None,
+            name: String::new(), visible: true, baked: None, ignored_pegs: Vec::new(),
         });
         app.set_single_selection(Some(Selection::PegRef(target)));
         app.delete_selected();
@@ -3774,6 +3917,7 @@ mod tests {
             name: String::new(),
             visible: true,
             baked: None,
+            ignored_pegs: Vec::new(),
         };
         app.doc.faces.push(mk(0, 1));
         app.doc.faces.push(mk(1, 2));
@@ -3809,7 +3953,7 @@ mod tests {
                 Element::Wrap { peg: PegRef::Custom { id: 0 }, s: 1.0, turns: 1, exit_offset: -0.1, sweep_hint: 0.1 },
             ],
             visible: true,
-            name: String::new(), baked: None,
+            name: String::new(), baked: None, ignored_pegs: Vec::new(),
         });
         for i in 0..600 {
             app.doc.grid.spacing = 40.0 + (i as f64 * 11.7) % 280.0;
@@ -3885,6 +4029,7 @@ mod tests {
             show_circles: true,
             dark_theme: true,
             drag_snapshot: None,
+            grid_edit_orig: None,
             radius_edit_orig: None,
             bevel_edit_orig: None,
             draw: None,
@@ -3990,5 +4135,62 @@ mod tests {
         assert_eq!(active.ignored, vec![3]);
         assert_eq!(active.undo_guard, Some(1));
         assert!(active.suppress_cmd_ignore_until_release);
+    }
+
+    #[test]
+    fn drawing_undo_without_wrap_still_suppresses_command_release() {
+        let mut app = test_app();
+        app.draw = Some(ActiveDraw {
+            th: Thread::new(Point::new(0.0, 0.0)),
+            start: StartAnchor { peg: PegRef::Grid { row: 0, col: 0 }, port: Port::Right },
+            start_point: Point::new(0.0, 0.0),
+            elements: Vec::new(),
+            armed: true,
+            ignored: Vec::new(),
+            undo_guard: None,
+            suppress_cmd_ignore_until_release: false,
+            cmd_was_down: true,
+        });
+        app.undo_last_catch();
+        assert!(app.draw.as_ref().unwrap().suppress_cmd_ignore_until_release);
+    }
+
+    #[test]
+    fn cancel_custom_drag_restores_pre_drag_document() {
+        let mut app = test_app();
+        app.doc.custom_pegs.push(CustomPeg {
+            id: 1,
+            center: Point::new(10.0, 20.0),
+            radius: 12.0,
+            visible: true,
+        });
+        app.drag_snapshot = Some(app.doc.clone());
+        app.begin_drag(&[1], Point::new(10.0, 20.0), false);
+        app.doc.custom_pegs[0].center = Point::new(90.0, 80.0);
+        assert!(app.cancel_active_manipulation());
+        assert_eq!(app.doc.custom_pegs[0].center, Point::new(10.0, 20.0));
+        assert!(app.active_custom_drag.is_none());
+    }
+
+    #[test]
+    fn baked_face_translation_moves_every_ring_point() {
+        let mut app = test_app();
+        app.doc.grid.spacing = 100.0;
+        app.doc.faces.push(Face {
+            start: StartAnchor { peg: PegRef::Grid { row: 0, col: 0 }, port: Port::Top },
+            elements: Vec::new(),
+            name: String::new(),
+            visible: true,
+            baked: Some(crate::model::BakedShape {
+                rings: vec![vec![Point::new(1.0, 2.0), Point::new(3.0, 2.0), Point::new(1.0, 4.0)]],
+                bevel: 0.0,
+            }),
+            ignored_pegs: Vec::new(),
+        });
+        let base = app.doc.clone();
+        app.apply_face_translation(&base, &[0], 2, 1);
+        let moved = &app.doc.faces[0].baked.as_ref().unwrap().rings[0];
+        assert_eq!(moved[0], Point::new(101.0, 202.0));
+        assert_eq!(moved[2], Point::new(101.0, 204.0));
     }
 }

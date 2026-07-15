@@ -2,6 +2,8 @@ use crate::geometry::Peg;
 use kurbo::Point;
 use serde::{Deserialize, Serialize};
 
+pub const CURRENT_DOCUMENT_VERSION: u32 = 5;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PegRef {
     Grid { row: i32, col: i32 },
@@ -114,6 +116,10 @@ pub struct Face {
     /// Some のときはパラメトリック要素ではなく焼き込みリングを描く（マージ済み）
     #[serde(default)]
     pub baked: Option<BakedShape>,
+    /// Commandで意図的に貫通させた円。完成後・再読込後も同じ経路を
+    /// 検証できるよう、描画中だけでなく面に永続化する。
+    #[serde(default)]
+    pub ignored_pegs: Vec<PegRef>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -181,7 +187,7 @@ pub struct Document {
 impl Default for Document {
     fn default() -> Self {
         Document {
-            version: 4,
+            version: CURRENT_DOCUMENT_VERSION,
             grid: GridSettings::default(),
             custom_pegs: Vec::new(),
             next_peg_id: 0,
@@ -392,7 +398,7 @@ mod tests {
                 sweep_hint: std::f64::consts::PI,
             }],
             visible: true,
-        name: String::new(), baked: None,
+        name: String::new(), baked: None, ignored_pegs: Vec::new(),
         };
 
         let grid_resolver = |r: &PegRef| resolve_peg(&grid, &[], canvas_center, PegAppearance::default(), r);
@@ -416,5 +422,22 @@ mod tests {
 
         assert_eq!(grid_pts.len(), custom_pts.len());
         assert!((signed_area(&grid_pts) - signed_area(&custom_pts)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ignored_pegs_survive_document_roundtrip() {
+        let mut doc = Document::default();
+        doc.faces.push(Face {
+            start: StartAnchor { peg: PegRef::Grid { row: 0, col: 0 }, port: Port::Right },
+            elements: vec![Element::Pin { pos: Point::new(200.0, 100.0) }],
+            name: String::new(),
+            visible: true,
+            baked: None,
+            ignored_pegs: vec![PegRef::Sub { row: 0, col: 0 }],
+        });
+        let json = serde_json::to_string(&doc).unwrap();
+        let restored: Document = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.version, CURRENT_DOCUMENT_VERSION);
+        assert_eq!(restored.faces[0].ignored_pegs, doc.faces[0].ignored_pegs);
     }
 }

@@ -137,6 +137,10 @@ pub fn document_to_svg(doc: &Document, canvas_center: Point) -> String {
         let mut d = String::new();
         if let Some(base_segs) = materialize_face(face, &resolver) {
             let obstacles = export_pegs(doc, canvas_center, &base_segs);
+            let obstacles: Vec<_> = obstacles
+                .into_iter()
+                .filter(|(peg_ref, _)| !face.ignored_pegs.contains(peg_ref))
+                .collect();
             let Some(segs) = materialize_face_with_obstacles(face, &resolver, &obstacles) else { continue };
             let mut face_pts = Vec::new();
             flatten_segs(&segs, path_appearance, &mut face_pts);
@@ -203,7 +207,7 @@ mod tests {
                     exit_offset: 0.0, sweep_hint: std::f64::consts::PI,
                 }],
                 visible: true,
-            name: String::new(), baked: None,
+            name: String::new(), baked: None, ignored_pegs: Vec::new(),
             }],
             ..Document::default()
         };
