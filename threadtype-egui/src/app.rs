@@ -20,6 +20,9 @@ use kurbo::Point;
 const CLOSE_RADIUS: f64 = 16.0;
 const START_SNAP: f64 = 12.0;
 const START_PROX: f64 = 40.0;
+/// 閉じ操作だけで開始円へ大きく巻き付くことを防ぐ上限。
+/// これを超える場合は選択した開始点を結び目としてその場で閉じる。
+const MAX_AUTO_CLOSE_SWEEP: f64 = std::f64::consts::PI / 2.0;
 // 角丸四角は張力経路と形状変更時の再捕捉仕様が未確定のため、製品UIでは休眠。
 // 実験コードは残し、円の挙動を固めた後に別ブランチで再開できるようにする。
 const ENABLE_EXPERIMENTAL_SQUARE_PEGS: bool = false;
@@ -2473,6 +2476,13 @@ impl App {
 
                 let mut elements = base_elements.clone();
                 elements.extend(lc);
+                let trailing_start_wrap = th.wraps.last().filter(|wrap| {
+                    peg_refs.get(wrap.peg).is_some_and(|peg_ref| *peg_ref == start.peg)
+                });
+                let auto_close_sweep = trailing_start_wrap
+                    .map(|wrap| ((wrap.exit - wrap.entry) * wrap.s).abs());
+                let prefer_anchor_close = trailing_start_wrap.is_none()
+                    || auto_close_sweep.is_some_and(|sweep| sweep > MAX_AUTO_CLOSE_SWEEP);
                 let preferred_start_s = if matches!(elements.last(), Some(Element::Wrap { peg, .. }) if *peg == start.peg) {
                     None
                 } else {
@@ -2484,6 +2494,23 @@ impl App {
                     })
                 };
                 let mut variants = Vec::new();
+                if prefer_anchor_close {
+                    let mut anchored_thread = th.clone();
+                    if trailing_start_wrap.is_some() {
+                        anchored_thread.wraps.pop();
+                    }
+                    if let Some(anchor_wraps) = thread_to_wrap_elements(
+                        &anchored_thread,
+                        &resolved_pegs,
+                        &peg_refs,
+                        start_point,
+                    ) {
+                        let mut anchored = base_elements.clone();
+                        anchored.extend(anchor_wraps);
+                        anchored.push(Element::Pin { pos: start_point });
+                        variants.push(anchored);
+                    }
+                }
                 if let Some(s) = preferred_start_s {
                     for start_s in [s, -s] {
                         let mut candidate = elements.clone();
