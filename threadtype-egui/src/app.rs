@@ -113,6 +113,23 @@ fn should_release_undo_guard(
         || origin.is_some_and(|origin| origin.distance(cursor) > move_threshold)
 }
 
+fn face_has_minimum_constraints(face: &Face) -> bool {
+    if face.elements.iter().all(|element| matches!(element, Element::Wrap { .. })) {
+        let mut unique = Vec::new();
+        for element in &face.elements {
+            if let Element::Wrap { peg, .. } = element {
+                if !unique.contains(peg) {
+                    unique.push(*peg);
+                }
+            }
+        }
+        unique.len() >= 2
+    } else {
+        // Commandで置いたPinを含む自由形状は従来どおり許可する。
+        face.elements.len() >= 2
+    }
+}
+
 fn safe_grid_radius_limits(grid: &GridSettings) -> (f64, f64) {
     let main_max = (grid.spacing * 0.5 - grid.catch - PEG_CLEARANCE).clamp(0.0, 100.0);
     let sub_to_sub = grid.spacing * 0.5 - grid.catch - PEG_CLEARANCE;
@@ -382,7 +399,16 @@ struct FaceRender {
     /// 塗り用の全リング（マージ済みは穴を含む。通常面は points 1本のみ）
     rings: Vec<Vec<Point>>,
     invalid: bool,
-    stroke_width: f32,
+    wrap_accents: Vec<WrapAccent>,
+}
+
+#[derive(Clone, Copy)]
+struct WrapAccent {
+    center: Point,
+    radius: f64,
+    start: f64,
+    direction: f64,
+    turns: u32,
 }
 
 pub struct App {
@@ -1296,7 +1322,7 @@ impl App {
                     })
                     .cloned()
                     .unwrap_or_default();
-                out.push((i, FaceRender { points, rings, invalid: false, stroke_width: 1.0 }));
+                out.push((i, FaceRender { points, rings, invalid: false, wrap_accents: Vec::new() }));
                 continue;
             }
             let obstacles: Vec<(PegRef, Peg)> = self
@@ -1321,21 +1347,36 @@ impl App {
                         &segments,
                         &obstacles.iter().map(|(_, peg)| *peg).collect::<Vec<_>>(),
                     );
-                let extra_turns: u32 = face
-                    .elements
-                    .iter()
-                    .filter_map(|element| match element {
-                        Element::Wrap { turns, .. } => Some(*turns),
-                        Element::Pin { .. } => None,
-                    })
-                    .sum();
+                let mut wrap_accents = Vec::new();
+                for element in &face.elements {
+                    let Element::Wrap { peg, s, turns, .. } = *element else { continue };
+                    if turns == 0 {
+                        continue;
+                    }
+                    let Some(resolved) = resolver(&peg) else { continue };
+                    if let Some((start, direction)) = segments.iter().find_map(|segment| match *segment {
+                        Seg::Arc { center, start, end, .. }
+                            if center.distance(resolved.center) < 1e-8 => {
+                                Some((start, (end - start).signum()))
+                            }
+                        _ => None,
+                    }) {
+                        wrap_accents.push(WrapAccent {
+                            center: resolved.center,
+                            radius: resolved.radius,
+                            start,
+                            direction: if direction == 0.0 { s.signum() } else { direction },
+                            turns,
+                        });
+                    }
+                }
                 out.push((
                     i,
                     FaceRender {
                         rings: vec![points.clone()],
                         points,
                         invalid,
-                        stroke_width: 1.0 + extra_turns.min(6) as f32 * 0.45,
+                        wrap_accents,
                     },
                 ));
             }
@@ -2776,7 +2817,7 @@ impl App {
                     let in_close_radius = th.tip.distance(start_point) <= self.world_unit(CLOSE_RADIUS);
                     active_close_allowed = armed
                         && !segs.is_empty()
-                        && !face.elements.is_empty()
+                        && face_has_minimum_constraints(&face)
                         && in_close_radius
                         && !active_has_penetration;
                     // 始点付近では、赤/緑判定と確定後に使う同一の閉路を表示する。
@@ -2793,6 +2834,11 @@ impl App {
                     pin_request = true;
                 } else if active_close_allowed {
                     request_finish = true;
+                } else if request_finish_face
+                    .as_ref()
+                    .is_some_and(|(face, _)| !face_has_minimum_constraints(face))
+                {
+                    active_status = Some("異なる円を2個以上経由してから閉じてください".to_owned());
                 } else if th.wraps.is_empty() && base_is_empty {
                             active_status = Some("ペグに引っかけてから始点に戻ると閉じられます".to_owned());
                         } else if active_has_penetration {
@@ -2815,8 +2861,8 @@ impl App {
         if request_finish {
             if let Some(active) = self.draw.take() {
                 if let Some((face, segs)) = request_finish_face {
-                    if face.elements.is_empty() {
-                        self.status = "面の確定に失敗しました（参照先が失われています）".to_owned();
+                    if !face_has_minimum_constraints(&face) {
+                        self.status = "異なる円を2個以上経由してから閉じてください".to_owned();
                         self.draw = Some(active);
                     } else if segs.is_empty() {
                         self.status = "面の確定に失敗しました（参照先が失われています）".to_owned();
@@ -2986,7 +3032,7 @@ impl App {
                 }
                 painter.add(egui::Shape::closed_line(
                     line,
-                    Stroke::new(render.stroke_width, colors.thread),
+                    Stroke::new(0.78, colors.thread),
                 ));
             }
         }
@@ -3014,8 +3060,36 @@ impl App {
                 }
                 painter.add(egui::Shape::closed_line(
                     line,
-                    Stroke::new(2.2 + (render.stroke_width - 1.0), colors.select),
+                    Stroke::new(1.8, colors.select),
                 ));
+            }
+        }
+        // 多重巻きは輪郭全体を太くせず、巻いた円弧の外側だけへ
+        // わずかな隙間を空けた同心線を追加して見せる。
+        let accent_gap_world = 2.8 / f64::from(self.view.zoom.max(0.01));
+        for (list_idx, &(_, ref render)) in rendered.iter().enumerate() {
+            let selected = selected_face_indices.contains(&list_idx);
+            let color = if selected { colors.select } else { colors.thread };
+            let width = if selected { 1.35 } else { 0.78 };
+            for accent in &render.wrap_accents {
+                for layer in 1..=accent.turns.min(3) {
+                    let radius = accent.radius + accent_gap_world * f64::from(layer);
+                    let steps = 96usize;
+                    let points: Vec<Pos2> = (0..=steps)
+                        .map(|index| {
+                            let angle = accent.start
+                                + accent.direction
+                                    * std::f64::consts::TAU
+                                    * index as f64
+                                    / steps as f64;
+                            self.to_screen(
+                                origin,
+                                crate::geometry::on_circle(accent.center, radius, angle),
+                            )
+                        })
+                        .collect();
+                    painter.add(egui::Shape::line(points, Stroke::new(width, color)));
+                }
             }
         }
         for id in self.selected_pegs() {
@@ -3065,17 +3139,6 @@ impl App {
         if let Some(active) = &self.draw {
             let mut pts = Vec::new();
             if let Some(segs) = active_preview.as_ref() {
-                let live_turns: u32 = active
-                    .th
-                    .wraps
-                    .iter()
-                    .map(|wrap| {
-                        (((wrap.exit - wrap.entry) * wrap.s).max(0.0)
-                            / std::f64::consts::TAU)
-                            .floor() as u32
-                    })
-                    .sum();
-                let live_width = 2.0 + live_turns.min(6) as f32 * 0.45;
                 let mut color = colors.thread;
                 let command_penetrates = if is_command {
                     self.command_line_penetrates(active)
@@ -3098,7 +3161,7 @@ impl App {
                 self.flatten_segments_for_appearance(solid, &mut pts, tol);
                 if pts.len() >= 2 {
                     let line: Vec<Pos2> = pts.iter().map(|p| self.to_screen(origin, *p)).collect();
-                    painter.add(egui::Shape::line(line, Stroke::new(live_width, color)));
+                    painter.add(egui::Shape::line(line, Stroke::new(1.55, color)));
                 }
                 if let Some((from, to)) = dashed_tail {
                     let a = self.to_screen(origin, from);
@@ -3109,6 +3172,21 @@ impl App {
                         7.0,
                         6.0,
                     ));
+                }
+                for wrap in &active.th.wraps {
+                    let turns = ((((wrap.exit - wrap.entry) * wrap.s).max(0.0)
+                        / std::f64::consts::TAU)
+                        .floor() as u32)
+                        .min(3);
+                    let Some(peg) = resolved_pegs.get(wrap.peg) else { continue };
+                    let center = self.to_screen(origin, peg.center);
+                    for layer in 1..=turns {
+                        painter.circle_stroke(
+                            center,
+                            peg.radius as f32 * self.view.zoom + layer as f32 * 2.8,
+                            Stroke::new(0.78, color),
+                        );
+                    }
                 }
             }
             let anchor = self.to_screen(origin, active.start_point);
@@ -4298,6 +4376,34 @@ mod tests {
             variants[0][0],
             Element::Wrap { peg: PegRef::Custom { id: 0 }, turns: 3, .. }
         ));
+    }
+
+    #[test]
+    fn one_circle_cannot_create_degenerate_closed_face() {
+        let one = Face {
+            start: StartAnchor { peg: PegRef::Custom { id: 0 }, port: Port::Top },
+            elements: vec![Element::Wrap {
+                peg: PegRef::Custom { id: 0 },
+                s: 1.0,
+                turns: 0,
+                exit_offset: 0.0,
+                sweep_hint: std::f64::consts::PI,
+            }],
+            name: String::new(),
+            visible: true,
+            baked: None,
+            ignored_pegs: Vec::new(),
+        };
+        assert!(!face_has_minimum_constraints(&one));
+        let mut two = one.clone();
+        two.elements.push(Element::Wrap {
+            peg: PegRef::Custom { id: 1 },
+            s: 1.0,
+            turns: 0,
+            exit_offset: 0.0,
+            sweep_hint: std::f64::consts::PI,
+        });
+        assert!(face_has_minimum_constraints(&two));
     }
 
     #[test]
