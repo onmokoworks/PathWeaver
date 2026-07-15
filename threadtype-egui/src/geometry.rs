@@ -477,6 +477,18 @@ fn materialize_taut_wrap_cycle(
             Element::Pin { .. } => None,
         })
         .collect();
+    wraps.dedup_by(|next, previous| {
+        if next.0 == previous.0 {
+            previous.2 = previous.2.saturating_add(next.2);
+            true
+        } else {
+            false
+        }
+    });
+    if wraps.len() > 1 && wraps.first().map(|wrap| wrap.0) == wraps.last().map(|wrap| wrap.0) {
+        let last = wraps.pop().unwrap();
+        wraps[0].2 = wraps[0].2.saturating_add(last.2);
+    }
     if wraps.is_empty() {
         return None;
     }
@@ -761,9 +773,16 @@ pub fn thread_to_wrap_elements(
             None => None,
         };
         let nat_exit = natural_exit_angle(&peg, w.s, entry, next_el.as_ref(), &resolve_local, end)?;
-        let exit_offset = w.exit - nat_exit;
+        let actual_sweep = ((w.exit - entry) * w.s).max(0.0);
+        let natural_sweep = ((nat_exit - entry) * w.s).rem_euclid(TAU);
+        let extra_sweep = (actual_sweep - natural_sweep).max(0.0);
+        // 完全周回は最も近い整数へ分離し、残りだけを把持オフセットにする。
+        // floorだと自然接線との差がわずかに負のとき、1周がoffset側へ入り
+        // 保存後の線幅・周回数が一つ少なくなる。
+        let turns = (extra_sweep / TAU).round() as u32;
+        let exit_offset = w.exit - (nat_exit + turns as f64 * TAU * w.s);
         let sweep_hint = (nat_exit - entry) * w.s;
-        out.push(Element::Wrap { peg: peg_ref, s: w.s, turns: 0, exit_offset, sweep_hint });
+        out.push(Element::Wrap { peg: peg_ref, s: w.s, turns, exit_offset, sweep_hint });
         cur = on_peg(&peg, w.exit);
     }
     Some(out)
@@ -1614,6 +1633,34 @@ fn thread_to_face(th: &Thread) -> Face {
         assert_eq!(live_pts.len(), chain_pts.len());
         for (a, b) in live_pts.iter().zip(chain_pts.iter()) {
             assert!(a.distance(*b) < 1e-6, "mismatch: {a:?} vs {b:?}");
+        }
+    }
+
+    #[test]
+    fn live_multi_wrap_is_saved_as_turns_and_roundtrips() {
+        let pegs = [peg(0.0, 0.0, 20.0)];
+        let refs = [PegRef::Custom { id: 0 }];
+        let anchor = Point::new(-60.0, 0.0);
+        let tip = Point::new(60.0, 0.0);
+        let entry = point_tangent_entry(anchor, &pegs[0], 1.0);
+        let th = Thread {
+            anchor,
+            wraps: vec![Wrap {
+                peg: 0,
+                s: 1.0,
+                entry,
+                exit: entry + TAU * 3.0 + PI / 2.0,
+            }],
+            tip,
+        };
+        let elements = thread_to_wrap_elements(&th, &pegs, &refs, tip).unwrap();
+        assert!(matches!(elements[0], Element::Wrap { turns: 3, .. }));
+        let rebuilt = materialize_chain(anchor, &elements, &make_peg_resolver(&pegs), tip).unwrap();
+        let original = materialize(&th, &pegs, tip);
+        let rebuilt_points = sample_path(&rebuilt, 400);
+        let original_points = sample_path(&original, 400);
+        for (a, b) in rebuilt_points.iter().zip(original_points.iter()) {
+            assert!(a.distance(*b) < 1e-6);
         }
     }
 

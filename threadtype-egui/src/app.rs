@@ -24,12 +24,51 @@ const START_PROX: f64 = 40.0;
 // 実験コードは残し、円の挙動を固めた後に別ブランチで再開できるようにする。
 const ENABLE_EXPERIMENTAL_SQUARE_PEGS: bool = false;
 const PEG_CLEARANCE: f64 = 1.0;
+const MAX_MANUAL_TURNS: u32 = 8;
 
 /// 閉路候補の巻き方向を、ライブ描画の符号に近い順で展開する。
 /// 小規模な閉路では全組合せを調べ、三角形など複数接触の同時反転が
 /// 必要なケースを一箇所反転だけで取りこぼさない。
 fn winding_variants(seed: &[Element]) -> Vec<Vec<Element>> {
-    let wrap_indices: Vec<usize> = seed
+    let mut normalized = Vec::with_capacity(seed.len());
+    for element in seed.iter().cloned() {
+        let duplicate = match (normalized.last_mut(), &element) {
+            (
+                Some(Element::Wrap { peg: previous_peg, turns: previous_turns, .. }),
+                Element::Wrap { peg, turns, .. },
+            ) if previous_peg == peg => {
+                *previous_turns = previous_turns.saturating_add(*turns);
+                true
+            }
+            _ => false,
+        };
+        if !duplicate {
+            normalized.push(element);
+        }
+    }
+    // 閉路では末尾と先頭も隣接する。同じ円なら一つの接触へ統合し、
+    // 同一中心同士の「存在しない接線」を要求しないようにする。
+    if normalized.len() > 1 {
+        let same_cyclic_peg = matches!(
+            (normalized.first(), normalized.last()),
+            (
+                Some(Element::Wrap { peg: first, .. }),
+                Some(Element::Wrap { peg: last, .. })
+            ) if first == last
+        );
+        if same_cyclic_peg {
+            let last = normalized.pop().unwrap();
+            if let (
+                Some(Element::Wrap { turns: first_turns, .. }),
+                Element::Wrap { turns: last_turns, .. },
+            ) = (normalized.first_mut(), last)
+            {
+                *first_turns = first_turns.saturating_add(last_turns);
+            }
+        }
+    }
+
+    let wrap_indices: Vec<usize> = normalized
         .iter()
         .enumerate()
         .filter_map(|(index, element)| matches!(element, Element::Wrap { .. }).then_some(index))
@@ -40,7 +79,7 @@ fn winding_variants(seed: &[Element]) -> Vec<Vec<Element>> {
         return masks
             .into_iter()
             .map(|mask| {
-                let mut candidate = seed.to_vec();
+                let mut candidate = normalized.clone();
                 for (bit, index) in wrap_indices.iter().enumerate() {
                     if mask & (1 << bit) != 0 {
                         if let Element::Wrap { s, .. } = &mut candidate[*index] {
@@ -53,9 +92,9 @@ fn winding_variants(seed: &[Element]) -> Vec<Vec<Element>> {
             .collect();
     }
 
-    let mut variants = vec![seed.to_vec()];
+    let mut variants = vec![normalized.clone()];
     for index in wrap_indices {
-        let mut candidate = seed.to_vec();
+        let mut candidate = normalized.clone();
         if let Element::Wrap { s, .. } = &mut candidate[index] {
             *s = -*s;
         }
@@ -343,6 +382,7 @@ struct FaceRender {
     /// 塗り用の全リング（マージ済みは穴を含む。通常面は points 1本のみ）
     rings: Vec<Vec<Point>>,
     invalid: bool,
+    stroke_width: f32,
 }
 
 pub struct App {
@@ -1256,7 +1296,7 @@ impl App {
                     })
                     .cloned()
                     .unwrap_or_default();
-                out.push((i, FaceRender { points, rings, invalid: false }));
+                out.push((i, FaceRender { points, rings, invalid: false, stroke_width: 1.0 }));
                 continue;
             }
             let obstacles: Vec<(PegRef, Peg)> = self
@@ -1281,12 +1321,21 @@ impl App {
                         &segments,
                         &obstacles.iter().map(|(_, peg)| *peg).collect::<Vec<_>>(),
                     );
+                let extra_turns: u32 = face
+                    .elements
+                    .iter()
+                    .filter_map(|element| match element {
+                        Element::Wrap { turns, .. } => Some(*turns),
+                        Element::Pin { .. } => None,
+                    })
+                    .sum();
                 out.push((
                     i,
                     FaceRender {
                         rings: vec![points.clone()],
                         points,
                         invalid,
+                        stroke_width: 1.0 + extra_turns.min(6) as f32 * 0.45,
                     },
                 ));
             }
@@ -1481,7 +1530,7 @@ impl App {
     fn face_has_overwrapped_peg(&self, face: &Face) -> bool {
         face.elements.iter().any(|el| {
             if let Element::Wrap { turns, .. } = *el {
-                turns > 2
+                turns > MAX_MANUAL_TURNS
             } else {
                 false
             }
@@ -2718,7 +2767,8 @@ impl App {
                 let chosen = chosen.map(|(face, segs, _)| (face, segs));
                 if let Some((face, segs)) = chosen.or(first_candidate) {
                     let over_wrap = th.wraps.iter().any(|wrap| {
-                        ((wrap.exit - wrap.entry) * wrap.s).abs() > std::f64::consts::PI * 4.0
+                        ((wrap.exit - wrap.entry) * wrap.s).abs()
+                            > std::f64::consts::TAU * MAX_MANUAL_TURNS as f64
                     });
                     active_has_penetration = over_wrap
                         || self.has_penetration_on_lines(&segs)
@@ -2936,7 +2986,7 @@ impl App {
                 }
                 painter.add(egui::Shape::closed_line(
                     line,
-                    Stroke::new(1.0, colors.thread),
+                    Stroke::new(render.stroke_width, colors.thread),
                 ));
             }
         }
@@ -2962,7 +3012,10 @@ impl App {
                 if line.len() > 2 && line.first().zip(line.last()).is_some_and(|(a, b)| a.distance(*b) < 0.01) {
                     line.pop();
                 }
-                painter.add(egui::Shape::closed_line(line, Stroke::new(2.2, colors.select)));
+                painter.add(egui::Shape::closed_line(
+                    line,
+                    Stroke::new(2.2 + (render.stroke_width - 1.0), colors.select),
+                ));
             }
         }
         for id in self.selected_pegs() {
@@ -3012,6 +3065,17 @@ impl App {
         if let Some(active) = &self.draw {
             let mut pts = Vec::new();
             if let Some(segs) = active_preview.as_ref() {
+                let live_turns: u32 = active
+                    .th
+                    .wraps
+                    .iter()
+                    .map(|wrap| {
+                        (((wrap.exit - wrap.entry) * wrap.s).max(0.0)
+                            / std::f64::consts::TAU)
+                            .floor() as u32
+                    })
+                    .sum();
+                let live_width = 2.0 + live_turns.min(6) as f32 * 0.45;
                 let mut color = colors.thread;
                 let command_penetrates = if is_command {
                     self.command_line_penetrates(active)
@@ -3034,7 +3098,7 @@ impl App {
                 self.flatten_segments_for_appearance(solid, &mut pts, tol);
                 if pts.len() >= 2 {
                     let line: Vec<Pos2> = pts.iter().map(|p| self.to_screen(origin, *p)).collect();
-                    painter.add(egui::Shape::line(line, Stroke::new(2.0, color)));
+                    painter.add(egui::Shape::line(line, Stroke::new(live_width, color)));
                 }
                 if let Some((from, to)) = dashed_tail {
                     let a = self.to_screen(origin, from);
@@ -4219,6 +4283,24 @@ mod tests {
     }
 
     #[test]
+    fn cyclic_duplicate_start_contact_is_merged_before_closing() {
+        let wrap = |id, turns| Element::Wrap {
+            peg: PegRef::Custom { id },
+            s: 1.0,
+            turns,
+            exit_offset: 0.0,
+            sweep_hint: std::f64::consts::PI,
+        };
+        let variants = winding_variants(&[wrap(0, 1), wrap(1, 0), wrap(0, 2)]);
+        assert_eq!(variants.len(), 4, "two unique contacts have four sign combinations");
+        assert!(variants.iter().all(|variant| variant.len() == 2));
+        assert!(matches!(
+            variants[0][0],
+            Element::Wrap { peg: PegRef::Custom { id: 0 }, turns: 3, .. }
+        ));
+    }
+
+    #[test]
     fn undo_guard_releases_after_pointer_moves_even_inside_peg() {
         let peg = Peg {
             center: Point::new(0.0, 0.0),
@@ -4238,5 +4320,82 @@ mod tests {
             Some(&peg),
             6.0,
         ));
+    }
+
+    fn assert_simple_cycle_can_close(centers: &[Point], radii: &[f64]) {
+        let app = test_app();
+        let pegs: Vec<Peg> = centers
+            .iter()
+            .zip(radii)
+            .map(|(center, radius)| Peg {
+                center: *center,
+                radius: *radius,
+                shape: crate::model::PegShape::Circle,
+                rounding: 0.0,
+            })
+            .collect();
+        let refs: Vec<PegRef> = (0..pegs.len())
+            .map(|id| PegRef::Custom { id: id as u64 })
+            .collect();
+        let seed: Vec<Element> = refs
+            .iter()
+            .map(|peg| Element::Wrap {
+                peg: *peg,
+                s: 1.0,
+                turns: 0,
+                exit_offset: 0.0,
+                sweep_hint: std::f64::consts::PI,
+            })
+            .collect();
+        let resolver = |peg_ref: &PegRef| match *peg_ref {
+            PegRef::Custom { id } => pegs.get(id as usize).copied(),
+            _ => None,
+        };
+        let obstacles: Vec<(PegRef, Peg)> = refs.iter().copied().zip(pegs.iter().copied()).collect();
+        let obstacle_pegs: Vec<Peg> = pegs.clone();
+        let valid = winding_variants(&seed).into_iter().any(|elements| {
+            let face = Face {
+                start: StartAnchor { peg: refs[0], port: Port::Top },
+                elements,
+                name: String::new(),
+                visible: true,
+                baked: None,
+                ignored_pegs: Vec::new(),
+            };
+            let Some(segs) = materialize_face_with_obstacles(&face, &resolver, &obstacles) else {
+                return false;
+            };
+            !app.has_penetration_on_lines(&segs)
+                && !segments_penetrate_pegs(&segs, &obstacle_pegs)
+        });
+        assert!(valid, "at least one winding combination must form a valid cycle");
+    }
+
+    #[test]
+    fn two_equal_circles_can_form_capsule_cycle() {
+        assert_simple_cycle_can_close(
+            &[Point::new(0.0, 0.0), Point::new(200.0, 0.0)],
+            &[60.0, 60.0],
+        );
+    }
+
+    #[test]
+    fn three_equal_circles_can_form_triangle_cycle() {
+        assert_simple_cycle_can_close(
+            &[
+                Point::new(0.0, 0.0),
+                Point::new(200.0, 0.0),
+                Point::new(100.0, 170.0),
+            ],
+            &[60.0, 60.0, 60.0],
+        );
+    }
+
+    #[test]
+    fn two_sub_sized_circles_can_form_capsule_cycle() {
+        assert_simple_cycle_can_close(
+            &[Point::new(0.0, 0.0), Point::new(100.0, 0.0)],
+            &[24.0, 24.0],
+        );
     }
 }
