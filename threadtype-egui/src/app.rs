@@ -104,6 +104,34 @@ fn winding_variants(seed: &[Element]) -> Vec<Vec<Element>> {
     variants
 }
 
+/// ライブ描画で実際に捕捉した巻き方向から、候補が何箇所変わったか。
+/// 閉じる際の形状最短化より先にこの値を比較し、凹みなどの作図意図を守る。
+fn winding_change_count(preferred: &[Element], candidate: &[Element]) -> usize {
+    let mut changes = preferred.len().abs_diff(candidate.len());
+    for (a, b) in preferred.iter().zip(candidate) {
+        changes += match (a, b) {
+            (
+                Element::Wrap { peg: a_peg, s: a_s, .. },
+                Element::Wrap { peg: b_peg, s: b_s, .. },
+            ) => usize::from(a_peg != b_peg || a_s.signum() != b_s.signum()),
+            (Element::Pin { pos: a }, Element::Pin { pos: b }) => usize::from(a.distance(*b) > 1e-9),
+            _ => 1,
+        };
+    }
+    changes
+}
+
+fn closure_score_is_better(
+    winding_changes: usize,
+    total_arc: f64,
+    best: Option<(usize, f64)>,
+) -> bool {
+    best.is_none_or(|(best_changes, best_arc)| {
+        winding_changes < best_changes
+            || (winding_changes == best_changes && total_arc < best_arc)
+    })
+}
+
 fn should_release_undo_guard(
     cursor: Point,
     origin: Option<Point>,
@@ -2825,6 +2853,7 @@ impl App {
                     }
                 }
 
+                let preferred_elements = variants.first().cloned().unwrap_or_default();
                 let ignored_refs: Vec<PegRef> = ignored
                     .iter()
                     .filter_map(|index| peg_refs.get(*index).copied())
@@ -2837,8 +2866,9 @@ impl App {
                     .collect();
                 let obstacle_pegs: Vec<Peg> = obstacles.iter().map(|(_, peg)| *peg).collect();
                 let mut first_candidate = None;
-                let mut chosen: Option<(Face, Vec<Seg>, f64)> = None;
+                let mut chosen: Option<(Face, Vec<Seg>, usize, f64)> = None;
                 for candidate_elements in variants {
+                    let winding_changes = winding_change_count(&preferred_elements, &candidate_elements);
                     let face = Face {
                         start,
                         elements: candidate_elements,
@@ -2858,12 +2888,18 @@ impl App {
                             Seg::Arc { start, end, .. } => (end - start).abs(),
                             Seg::Line { .. } => 0.0,
                         }).sum::<f64>();
-                        if chosen.as_ref().is_none_or(|(_, _, best)| total_arc < *best) {
-                            chosen = Some((face, segs, total_arc));
+                        if closure_score_is_better(
+                            winding_changes,
+                            total_arc,
+                            chosen
+                                .as_ref()
+                                .map(|(_, _, best_changes, best_arc)| (*best_changes, *best_arc)),
+                        ) {
+                            chosen = Some((face, segs, winding_changes, total_arc));
                         }
                     }
                 }
-                let chosen = chosen.map(|(face, segs, _)| (face, segs));
+                let chosen = chosen.map(|(face, segs, _, _)| (face, segs));
                 if let Some((face, segs)) = chosen.or(first_candidate) {
                     let over_wrap = th.wraps.iter().any(|wrap| {
                         ((wrap.exit - wrap.entry) * wrap.s).abs()
@@ -4421,6 +4457,30 @@ mod tests {
         assert!(variants.iter().any(|variant| {
             variant.iter().all(|element| matches!(element, Element::Wrap { s, .. } if *s < 0.0))
         }));
+    }
+
+    #[test]
+    fn closure_prefers_captured_concavity_over_shorter_flipped_path() {
+        let wrap = |id, s| Element::Wrap {
+            peg: PegRef::Custom { id },
+            s,
+            turns: 0,
+            exit_offset: 0.0,
+            sweep_hint: std::f64::consts::PI,
+        };
+        // 中央の円だけ逆向きに捕捉した状態が、凹みを作るユーザー意図。
+        let captured = vec![wrap(0, 1.0), wrap(1, -1.0), wrap(2, 1.0)];
+        let filled = vec![wrap(0, 1.0), wrap(1, 1.0), wrap(2, 1.0)];
+        assert_eq!(winding_change_count(&captured, &captured), 0);
+        assert_eq!(winding_change_count(&captured, &filled), 1);
+        assert!(
+            !closure_score_is_better(1, 1.0, Some((0, 10.0))),
+            "a shorter path must not override the captured winding direction"
+        );
+        assert!(
+            closure_score_is_better(0, 8.0, Some((0, 10.0))),
+            "arc length only breaks ties with equal intent fidelity"
+        );
     }
 
     #[test]
