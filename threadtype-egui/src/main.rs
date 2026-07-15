@@ -2,6 +2,7 @@
 
 mod app;
 mod export;
+mod font_export;
 mod geometry;
 mod model;
 

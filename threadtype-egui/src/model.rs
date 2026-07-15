@@ -3,6 +3,7 @@ use kurbo::Point;
 use serde::{Deserialize, Serialize};
 
 pub const CURRENT_DOCUMENT_VERSION: u32 = 5;
+pub const CURRENT_FONT_PROJECT_VERSION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PegRef {
@@ -198,6 +199,86 @@ impl Default for Document {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GlyphRecord {
+    pub character: char,
+    pub name: String,
+    pub advance_width: u16,
+    pub document: Document,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FontProject {
+    pub version: u32,
+    pub family_name: String,
+    pub style_name: String,
+    pub active_glyph: usize,
+    pub glyphs: Vec<GlyphRecord>,
+}
+
+pub fn default_font_characters() -> Vec<char> {
+    let mut chars: Vec<char> = ('a'..='z').collect();
+    chars.extend([
+        ' ', '.', ',', ':', ';', '!', '?', '-', '_', '(', ')', '[', ']', '{', '}', '\'',
+        '"', '/', '\\', '&', '@', '#', '%', '+', '=', '*',
+    ]);
+    chars
+}
+
+pub fn glyph_name(character: char) -> String {
+    match character {
+        ' ' => "space".to_owned(),
+        '.' => "period".to_owned(),
+        ',' => "comma".to_owned(),
+        ':' => "colon".to_owned(),
+        ';' => "semicolon".to_owned(),
+        '!' => "exclam".to_owned(),
+        '?' => "question".to_owned(),
+        '-' => "hyphen".to_owned(),
+        '_' => "underscore".to_owned(),
+        '(' => "parenleft".to_owned(),
+        ')' => "parenright".to_owned(),
+        '[' => "bracketleft".to_owned(),
+        ']' => "bracketright".to_owned(),
+        '{' => "braceleft".to_owned(),
+        '}' => "braceright".to_owned(),
+        '\'' => "quotesingle".to_owned(),
+        '"' => "quotedbl".to_owned(),
+        '/' => "slash".to_owned(),
+        '\\' => "backslash".to_owned(),
+        '&' => "ampersand".to_owned(),
+        '@' => "at".to_owned(),
+        '#' => "numbersign".to_owned(),
+        '%' => "percent".to_owned(),
+        '+' => "plus".to_owned(),
+        '=' => "equal".to_owned(),
+        '*' => "asterisk".to_owned(),
+        value if value.is_ascii_lowercase() => value.to_string(),
+        value => format!("uni{:04X}", value as u32),
+    }
+}
+
+impl Default for FontProject {
+    fn default() -> Self {
+        let glyphs = default_font_characters()
+            .into_iter()
+            .map(|character| GlyphRecord {
+                character,
+                name: glyph_name(character),
+                advance_width: if character == ' ' { 300 } else { 600 },
+                document: Document::default(),
+            })
+            .collect();
+        FontProject {
+            version: CURRENT_FONT_PROJECT_VERSION,
+            family_name: "ThreadType".to_owned(),
+            style_name: "Regular".to_owned(),
+            active_glyph: 0,
+            glyphs,
+        }
+    }
+}
+
 pub fn resolve_peg(
     grid: &GridSettings,
     customs: &[CustomPeg],
@@ -260,6 +341,37 @@ mod tests {
     use super::*;
     use crate::geometry::{flatten_segs, materialize_face, signed_area};
     use crate::model::CustomPeg;
+
+    #[test]
+    fn default_font_project_contains_lowercase_and_punctuation() {
+        let project = FontProject::default();
+        for character in ['a', 'z', ' ', '.', ',', '!', '?', '&', '@'] {
+            assert!(project.glyphs.iter().any(|glyph| glyph.character == character));
+        }
+        assert_eq!(project.glyphs[project.active_glyph].character, 'a');
+        assert_eq!(
+            project
+                .glyphs
+                .iter()
+                .find(|glyph| glyph.character == ' ')
+                .unwrap()
+                .advance_width,
+            300
+        );
+    }
+
+    #[test]
+    fn default_glyph_names_are_unique() {
+        let project = FontProject::default();
+        let mut names: Vec<&str> = project
+            .glyphs
+            .iter()
+            .map(|glyph| glyph.name.as_str())
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), project.glyphs.len());
+    }
 
     #[test]
     fn sub_pegs_are_off_by_default() {

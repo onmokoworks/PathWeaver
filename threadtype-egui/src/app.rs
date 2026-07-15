@@ -1,4 +1,5 @@
 use crate::export::document_to_svg;
+use crate::font_export::export_ttf;
 use crate::geometry::{
     bevel_ring, clamp_outside_pegs,
     materialize_chain, materialize_face, materialize_face_with_obstacles,
@@ -7,8 +8,9 @@ use crate::geometry::{
     Peg, Seg, Thread,
 };
 use crate::model::{
-    resolve_peg, CustomPeg, Document, Element, Face, GridSettings, PegRef, Port, ScaleAnchor,
-    StartAnchor, CURRENT_DOCUMENT_VERSION,
+    glyph_name, resolve_peg, CustomPeg, Document, Element, Face, FontProject, GlyphRecord,
+    GridSettings, PegRef, Port, ScaleAnchor, StartAnchor, CURRENT_DOCUMENT_VERSION,
+    CURRENT_FONT_PROJECT_VERSION,
 };
 use egui_dock::{DockArea, DockState, NodeIndex, TabViewer};
 use egui::{
@@ -405,6 +407,7 @@ enum AlignAxis {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum DockTab {
     Canvas,
+    Glyphs,
     Layers,
     Circles,
     Properties,
@@ -482,6 +485,8 @@ struct WrapAccent {
 
 pub struct App {
     doc: Document,
+    font_project: FontProject,
+    new_glyph_text: String,
     undo: Vec<Document>,
     redo: Vec<Document>,
     pegs: Vec<Peg>,
@@ -516,6 +521,8 @@ impl App {
         install_cjk_fonts(&cc.egui_ctx);
         let mut app = App {
             doc: Document::default(),
+            font_project: FontProject::default(),
+            new_glyph_text: String::new(),
             undo: Vec::new(),
             redo: Vec::new(),
             pegs: Vec::new(),
@@ -572,10 +579,10 @@ impl App {
 
     fn default_dock_layout() -> DockState<DockTab> {
         let mut dock = DockState::new(vec![DockTab::Canvas]);
-        // 右カラム: 上からグリッド（大きめ・既定表示）→ 円 → プロパティ → レイヤー（一番下）
+        // 右カラム: グリフ管理を入口にし、同じ領域からグリッドへ切り替えられる。
         let [_, grid] = dock
             .main_surface_mut()
-            .split_right(NodeIndex::root(), 0.80, vec![DockTab::Grid]);
+            .split_right(NodeIndex::root(), 0.80, vec![DockTab::Glyphs, DockTab::Grid]);
         let [_, circles] = dock
             .main_surface_mut()
             .split_below(grid, 0.42, vec![DockTab::Circles]);
@@ -1679,6 +1686,158 @@ impl App {
         }
     }
 
+    fn sync_active_glyph(&mut self) {
+        if let Some(glyph) = self
+            .font_project
+            .glyphs
+            .get_mut(self.font_project.active_glyph)
+        {
+            glyph.document = self.doc.clone();
+        }
+    }
+
+    fn reset_editor_for_glyph(&mut self) {
+        self.undo.clear();
+        self.redo.clear();
+        self.draw = None;
+        self.active_custom_drag = None;
+        self.face_drag = None;
+        self.grab = None;
+        self.drag_snapshot = None;
+        self.grid_edit_orig = None;
+        self.radius_edit_orig = None;
+        self.bevel_edit_orig = None;
+        self.face_name_snapshot = None;
+        self.face_editor = None;
+        self.clear_selection();
+        self.pegs_key = (0, 0, 0, 0, 0, 0);
+        self.rebuild_pegs(self.canvas_size);
+    }
+
+    fn switch_glyph(&mut self, index: usize) {
+        if index >= self.font_project.glyphs.len()
+            || index == self.font_project.active_glyph
+        {
+            return;
+        }
+        self.sync_active_glyph();
+        self.font_project.active_glyph = index;
+        self.doc = self.font_project.glyphs[index].document.clone();
+        self.reset_editor_for_glyph();
+        let glyph = &self.font_project.glyphs[index];
+        self.status = format!("グリフ {} ({}) を編集中", glyph.character, glyph.name);
+    }
+
+    fn add_or_switch_glyph(&mut self, character: char, duplicate_current: bool) {
+        if let Some(index) = self
+            .font_project
+            .glyphs
+            .iter()
+            .position(|glyph| glyph.character == character)
+        {
+            self.switch_glyph(index);
+            self.status = format!("既存のグリフ {character} に切り替えました");
+            return;
+        }
+        self.sync_active_glyph();
+        let document = if duplicate_current {
+            self.doc.clone()
+        } else {
+            Document::default()
+        };
+        self.font_project.glyphs.push(GlyphRecord {
+            character,
+            name: glyph_name(character),
+            advance_width: if character == ' ' { 300 } else { 600 },
+            document: document.clone(),
+        });
+        self.font_project.active_glyph = self.font_project.glyphs.len() - 1;
+        self.doc = document;
+        self.reset_editor_for_glyph();
+        self.new_glyph_text.clear();
+        self.status = format!("グリフ {character} を追加しました");
+    }
+
+    fn save_font_project(&mut self) {
+        self.sync_active_glyph();
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("ThreadType project", &["json"])
+            .set_file_name("ThreadType.font.json")
+            .save_file()
+        {
+            match serde_json::to_string_pretty(&self.font_project)
+                .map_err(|error| error.to_string())
+                .and_then(|json| std::fs::write(&path, json).map_err(|error| error.to_string()))
+            {
+                Ok(()) => self.status = format!("フォントプロジェクトを保存しました: {}", path.display()),
+                Err(error) => self.status = format!("プロジェクト保存に失敗しました: {error}"),
+            }
+        }
+    }
+
+    fn load_font_project(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("ThreadType project", &["json"])
+            .pick_file()
+        {
+            let loaded = std::fs::read_to_string(&path)
+                .map_err(|error| error.to_string())
+                .and_then(|json| {
+                    serde_json::from_str::<FontProject>(&json).map_err(|error| error.to_string())
+                });
+            match loaded {
+                Ok(mut project)
+                    if project.version <= CURRENT_FONT_PROJECT_VERSION
+                        && !project.glyphs.is_empty()
+                        && project
+                            .glyphs
+                            .iter()
+                            .all(|glyph| glyph.document.version <= CURRENT_DOCUMENT_VERSION) =>
+                {
+                    project.version = CURRENT_FONT_PROJECT_VERSION;
+                    for glyph in &mut project.glyphs {
+                        glyph.document.version = CURRENT_DOCUMENT_VERSION;
+                    }
+                    project.active_glyph = project.active_glyph.min(project.glyphs.len() - 1);
+                    self.doc = project.glyphs[project.active_glyph].document.clone();
+                    self.font_project = project;
+                    self.reset_editor_for_glyph();
+                    self.status = format!("フォントプロジェクトを読み込みました: {}", path.display());
+                }
+                Ok(project) if project.version > CURRENT_FONT_PROJECT_VERSION => {
+                    self.status = format!(
+                        "このプロジェクトは新しいバージョンです（ファイル: v{} / アプリ: v{}）",
+                        project.version, CURRENT_FONT_PROJECT_VERSION
+                    );
+                }
+                Ok(project)
+                    if project
+                        .glyphs
+                        .iter()
+                        .any(|glyph| glyph.document.version > CURRENT_DOCUMENT_VERSION) =>
+                {
+                    self.status = "このプロジェクト内のシェイプは新しいバージョンです".to_owned();
+                }
+                Ok(_) => self.status = "グリフがないため読み込めません".to_owned(),
+                Err(error) => self.status = format!("プロジェクト読込に失敗しました: {error}"),
+            }
+        }
+    }
+
+    fn export_font_ttf(&mut self) {
+        self.sync_active_glyph();
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("TrueType font", &["ttf"])
+            .set_file_name(format!("{}.ttf", self.font_project.family_name.replace(' ', "-")))
+            .save_file()
+        {
+            match export_ttf(&self.font_project, self.canvas_center, &path) {
+                Ok(()) => self.status = format!("TTFを書き出しました: {}", path.display()),
+                Err(error) => self.status = format!("TTF書き出しに失敗しました: {error}"),
+            }
+        }
+    }
+
     fn load_json(&mut self) {
         if let Some(path) = rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file() {
             match std::fs::read_to_string(&path)
@@ -1756,11 +1915,110 @@ impl App {
     fn render_tab_content(&mut self, ui: &mut egui::Ui, tab: DockTab) {
         match tab {
             DockTab::Canvas => self.canvas(ui),
+            DockTab::Glyphs => self.render_glyphs_tab(ui),
             DockTab::Layers => self.render_layers_tab(ui),
             DockTab::Circles => self.render_circles_tab(ui),
             DockTab::Properties => self.render_properties_tab(ui),
             DockTab::Grid => self.render_grid_tab(ui),
         }
+    }
+
+    fn render_glyphs_tab(&mut self, ui: &mut egui::Ui) {
+        let colors = self.theme_colors();
+        ui.label(egui::RichText::new("フォント").strong());
+        ui.add(egui::TextEdit::singleline(&mut self.font_project.family_name).hint_text("ファミリー名"));
+        ui.add(egui::TextEdit::singleline(&mut self.font_project.style_name).hint_text("スタイル名"));
+        ui.add_space(8.0);
+
+        if let Some(glyph) = self
+            .font_project
+            .glyphs
+            .get_mut(self.font_project.active_glyph)
+        {
+            ui.horizontal(|ui| {
+                let character = if glyph.character == ' ' { "␠".to_owned() } else { glyph.character.to_string() };
+                ui.label(egui::RichText::new(character).size(26.0).strong());
+                ui.vertical(|ui| {
+                    ui.label(&glyph.name);
+                    ui.add(egui::Slider::new(&mut glyph.advance_width, 100..=1200).text("送り幅"));
+                });
+            });
+        }
+
+        ui.separator();
+        ui.label(egui::RichText::new("グリフ").strong());
+        let mut switch_target = None;
+        egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for (index, glyph) in self.font_project.glyphs.iter().enumerate() {
+                    let character = if glyph.character == ' ' {
+                        "␠".to_owned()
+                    } else {
+                        glyph.character.to_string()
+                    };
+                    let is_empty = if index == self.font_project.active_glyph {
+                        self.doc.faces.is_empty()
+                    } else {
+                        glyph.document.faces.is_empty()
+                    };
+                    let label = if is_empty {
+                        character
+                    } else {
+                        format!("{character} •")
+                    };
+                    let selected = index == self.font_project.active_glyph;
+                    if ui
+                        .add_sized([42.0, 28.0], egui::SelectableLabel::new(selected, label))
+                        .on_hover_text(format!("{} / {}", glyph.name, if is_empty { "未作成" } else { "作成済み" }))
+                        .clicked()
+                    {
+                        switch_target = Some(index);
+                    }
+                }
+            });
+        });
+        if let Some(index) = switch_target {
+            self.switch_glyph(index);
+        }
+
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label("追加");
+            ui.add_sized(
+                [42.0, 24.0],
+                egui::TextEdit::singleline(&mut self.new_glyph_text).char_limit(1),
+            );
+        });
+        let new_character = self.new_glyph_text.chars().next();
+        ui.horizontal(|ui| {
+            if ui.add_enabled(new_character.is_some(), egui::Button::new("空で追加")).clicked() {
+                self.add_or_switch_glyph(new_character.unwrap(), false);
+            }
+            if ui.add_enabled(new_character.is_some(), egui::Button::new("現在を複製")).clicked() {
+                self.add_or_switch_glyph(new_character.unwrap(), true);
+            }
+        });
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.label(egui::RichText::new("フォントプロジェクト").strong());
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("保存").clicked() {
+                self.save_font_project();
+            }
+            if ui.button("読み込み").clicked() {
+                self.load_font_project();
+            }
+            if ui.button("TTF書き出し").clicked() {
+                self.export_font_ttf();
+            }
+        });
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new("• は作成済み。上部の保存／SVGは現在のシェイプだけを扱います。")
+                .small()
+                .color(colors.text2),
+        );
     }
 
     /// フローティングのツールパレット。上端の掴みバーをドラッグで自由に移動でき、
@@ -1853,6 +2111,7 @@ impl App {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.menu_button("パネル", |ui| {
                     for (tab, label) in [
+                        (DockTab::Glyphs, "グリフ"),
                         (DockTab::Layers, "レイヤー"),
                         (DockTab::Circles, "円"),
                         (DockTab::Properties, "プロパティ"),
@@ -3562,6 +3821,7 @@ impl TabViewer for AppTabViewer<'_> {
     fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
         match tab {
             DockTab::Canvas => "キャンバス".into(),
+            DockTab::Glyphs => "グリフ".into(),
             DockTab::Layers => "レイヤー".into(),
             DockTab::Circles => "円".into(),
             DockTab::Properties => "プロパティ".into(),
@@ -4254,9 +4514,31 @@ mod tests {
         assert!(!app.enforce_safe_grid_radii());
     }
 
+    #[test]
+    fn switching_glyphs_preserves_each_document_independently() {
+        let mut app = test_app();
+        app.doc.custom_pegs.push(CustomPeg {
+            id: 7,
+            center: Point::new(20.0, 30.0),
+            radius: 12.0,
+            visible: true,
+        });
+
+        app.switch_glyph(1);
+        assert!(app.doc.custom_pegs.is_empty());
+        assert_eq!(app.font_project.glyphs[0].document.custom_pegs.len(), 1);
+
+        app.doc.grid.radius = 42.0;
+        app.switch_glyph(0);
+        assert_eq!(app.doc.custom_pegs[0].id, 7);
+        assert_eq!(app.font_project.glyphs[1].document.grid.radius, 42.0);
+    }
+
     fn test_app() -> App {
         App {
             doc: Document::default(),
+            font_project: FontProject::default(),
+            new_glyph_text: String::new(),
             undo: Vec::new(),
             redo: Vec::new(),
             pegs: Vec::new(),
