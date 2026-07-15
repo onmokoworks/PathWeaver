@@ -1,19 +1,14 @@
 # ThreadShape
 
-![ThreadShape UI](public/threadshape-ui.png)
+糸を円形ペグへ巻き付けながらグリフを設計する、Rust + egui製のフォント制作ツールです。
 
-糸を引くように輪郭を組み立てる、実験的なグリフエディタです。
+React版は開発を終了しました。現在の実装と開発対象は [`threadtype-egui`](threadtype-egui/) のみです。
 
-## 要件
-
-- React + TypeScript + Vite ベースで動くこと
-- 1000 x 1000 の仮想グリフ座標を扱えること
-- 円ガイドに沿って輪郭を描けること
-- SVG と JSON を書き出せること
-
-## 開発
+## 起動
 
 ```bash
-npm install
-npm run dev
+cd threadtype-egui
+./run.sh
 ```
+
+詳細は [`threadtype-egui/README.md`](threadtype-egui/README.md) を参照してください。

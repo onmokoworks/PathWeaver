@@ -93,6 +93,16 @@ pub enum Element {
     Pin { pos: Point },
 }
 
+/// マージ（パス結合）で焼き込まれた形状。ユニオン結果のリング群を保持し、
+/// ベベル量は描画時に適用する（スライダーで非破壊に変えられる）
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BakedShape {
+    /// ユニオン結果のリング列（外周＋穴、NonZero）
+    pub rings: Vec<Vec<Point>>,
+    /// ベベル（面取り）量。0 なら角のまま
+    pub bevel: f64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Face {
     pub start: StartAnchor,
@@ -101,6 +111,9 @@ pub struct Face {
     pub name: String,
     #[serde(default = "default_true")]
     pub visible: bool,
+    /// Some のときはパラメトリック要素ではなく焼き込みリングを描く（マージ済み）
+    #[serde(default)]
+    pub baked: Option<BakedShape>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -114,6 +127,30 @@ pub struct GridSettings {
     pub scale_anchor: ScaleAnchor,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PegShape {
+    Circle,
+    RoundedSquare,
+}
+
+impl Default for PegShape {
+    fn default() -> Self { Self::Circle }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PegAppearance {
+    #[serde(default)]
+    pub shape: PegShape,
+    #[serde(default = "default_peg_rounding")]
+    pub rounding: f64,
+}
+
+fn default_peg_rounding() -> f64 { 12.0 }
+
+impl Default for PegAppearance {
+    fn default() -> Self { Self { shape: PegShape::Circle, rounding: default_peg_rounding() } }
+}
+
 impl Default for GridSettings {
     fn default() -> Self {
         GridSettings {
@@ -121,7 +158,7 @@ impl Default for GridSettings {
             radius: 60.0,
             catch: 6.0,
             sub_radius: 24.0,
-            subs_enabled: true,
+            subs_enabled: false,
             scale_link: false,
             scale_anchor: ScaleAnchor::TopLeft,
         }
@@ -135,16 +172,22 @@ pub struct Document {
     pub custom_pegs: Vec<CustomPeg>,
     pub next_peg_id: u64,
     pub faces: Vec<Face>,
+    #[serde(default)]
+    pub peg_appearance: PegAppearance,
+    #[serde(default)]
+    pub disabled_pegs: Vec<PegRef>,
 }
 
 impl Default for Document {
     fn default() -> Self {
         Document {
-            version: 3,
+            version: 4,
             grid: GridSettings::default(),
             custom_pegs: Vec::new(),
             next_peg_id: 0,
             faces: Vec::new(),
+            peg_appearance: PegAppearance::default(),
+            disabled_pegs: Vec::new(),
         }
     }
 }
@@ -153,12 +196,15 @@ pub fn resolve_peg(
     grid: &GridSettings,
     customs: &[CustomPeg],
     canvas_center: Point,
+    appearance: PegAppearance,
     peg: &PegRef,
 ) -> Option<Peg> {
     match (grid.scale_anchor, *peg) {
         (ScaleAnchor::TopLeft, PegRef::Grid { row, col }) => Some(Peg {
             center: Point::new(110.0 + (col as f64) * grid.spacing, 110.0 + (row as f64) * grid.spacing),
             radius: grid.radius + grid.catch,
+            shape: appearance.shape,
+            rounding: appearance.rounding + grid.catch,
         }),
         (ScaleAnchor::TopLeft, PegRef::Sub { row, col }) => Some(Peg {
             center: Point::new(
@@ -166,6 +212,8 @@ pub fn resolve_peg(
                 110.0 + (row as f64 + 0.5) * grid.spacing,
             ),
             radius: grid.sub_radius + grid.catch,
+            shape: appearance.shape,
+            rounding: appearance.rounding + grid.catch,
         }),
         (ScaleAnchor::Center, PegRef::Grid { row, col }) => Some(Peg {
             center: Point::new(
@@ -173,6 +221,8 @@ pub fn resolve_peg(
                 canvas_center.y + ((row as f64) - 2.0) * grid.spacing,
             ),
             radius: grid.radius + grid.catch,
+            shape: appearance.shape,
+            rounding: appearance.rounding + grid.catch,
         }),
         (ScaleAnchor::Center, PegRef::Sub { row, col }) => Some(Peg {
             center: Point::new(
@@ -180,6 +230,8 @@ pub fn resolve_peg(
                 canvas_center.y + ((row as f64 + 0.5) - 2.0) * grid.spacing,
             ),
             radius: grid.sub_radius + grid.catch,
+            shape: appearance.shape,
+            rounding: appearance.rounding + grid.catch,
         }),
         (_, PegRef::Custom { id }) => customs
             .iter()
@@ -187,6 +239,8 @@ pub fn resolve_peg(
             .map(|peg| Peg {
                 center: peg.center,
                 radius: peg.radius + grid.catch,
+                shape: appearance.shape,
+                rounding: appearance.rounding + grid.catch,
             }),
     }
 }
@@ -200,6 +254,11 @@ mod tests {
     use super::*;
     use crate::geometry::{flatten_segs, materialize_face, signed_area};
     use crate::model::CustomPeg;
+
+    #[test]
+    fn sub_pegs_are_off_by_default() {
+        assert!(!GridSettings::default().subs_enabled);
+    }
 
     #[test]
     fn resolve_peg_top_left_grid_position() {
@@ -216,6 +275,7 @@ mod tests {
             &grid,
             &[],
             Point::new(999.0, 999.0),
+            PegAppearance::default(),
             &PegRef::Grid { row: 2, col: 3 },
         )
         .expect("grid peg should resolve");
@@ -238,6 +298,7 @@ mod tests {
             &grid,
             &[],
             Point::new(0.0, 0.0),
+            PegAppearance::default(),
             &PegRef::Sub { row: 1, col: 1 },
         )
         .expect("sub peg should resolve");
@@ -256,7 +317,7 @@ mod tests {
             subs_enabled: false,
             scale_link: false,
         };
-        assert!(resolve_peg(&grid, &[], Point::new(0.0, 0.0), &PegRef::Sub { row: 0, col: 0 }).is_some());
+        assert!(resolve_peg(&grid, &[], Point::new(0.0, 0.0), PegAppearance::default(), &PegRef::Sub { row: 0, col: 0 }).is_some());
     }
 
     #[test]
@@ -281,10 +342,10 @@ mod tests {
             scale_link: false,
         };
         let first =
-            resolve_peg(&small_grid, &[], canvas_center, &PegRef::Grid { row: 2, col: 3 })
+            resolve_peg(&small_grid, &[], canvas_center, PegAppearance::default(), &PegRef::Grid { row: 2, col: 3 })
                 .expect("reference grid peg should resolve");
         let second =
-            resolve_peg(&large_grid, &[], canvas_center, &PegRef::Grid { row: 2, col: 3 })
+            resolve_peg(&large_grid, &[], canvas_center, PegAppearance::default(), &PegRef::Grid { row: 2, col: 3 })
                 .expect("reference grid peg should resolve");
         assert!((first.center.x - second.center.x).abs() < 1e-9);
         assert!((first.center.y - second.center.y).abs() < 1e-9);
@@ -331,11 +392,11 @@ mod tests {
                 sweep_hint: std::f64::consts::PI,
             }],
             visible: true,
-        name: String::new(),
+        name: String::new(), baked: None,
         };
 
-        let grid_resolver = |r: &PegRef| resolve_peg(&grid, &[], canvas_center, r);
-        let custom_resolver = |r: &PegRef| resolve_peg(&grid, &customs, canvas_center, r);
+        let grid_resolver = |r: &PegRef| resolve_peg(&grid, &[], canvas_center, PegAppearance::default(), r);
+        let custom_resolver = |r: &PegRef| resolve_peg(&grid, &customs, canvas_center, PegAppearance::default(), r);
 
         let mut grid_pts = Vec::new();
         let mut custom_pts = Vec::new();
