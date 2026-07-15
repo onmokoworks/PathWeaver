@@ -20,13 +20,59 @@ use kurbo::Point;
 const CLOSE_RADIUS: f64 = 16.0;
 const START_SNAP: f64 = 12.0;
 const START_PROX: f64 = 40.0;
-/// 閉じ操作だけで開始円へ大きく巻き付くことを防ぐ上限。
-/// これを超える場合は選択した開始点を結び目としてその場で閉じる。
-const MAX_AUTO_CLOSE_SWEEP: f64 = std::f64::consts::PI / 2.0;
 // 角丸四角は張力経路と形状変更時の再捕捉仕様が未確定のため、製品UIでは休眠。
 // 実験コードは残し、円の挙動を固めた後に別ブランチで再開できるようにする。
 const ENABLE_EXPERIMENTAL_SQUARE_PEGS: bool = false;
 const PEG_CLEARANCE: f64 = 1.0;
+
+/// 閉路候補の巻き方向を、ライブ描画の符号に近い順で展開する。
+/// 小規模な閉路では全組合せを調べ、三角形など複数接触の同時反転が
+/// 必要なケースを一箇所反転だけで取りこぼさない。
+fn winding_variants(seed: &[Element]) -> Vec<Vec<Element>> {
+    let wrap_indices: Vec<usize> = seed
+        .iter()
+        .enumerate()
+        .filter_map(|(index, element)| matches!(element, Element::Wrap { .. }).then_some(index))
+        .collect();
+    if wrap_indices.len() <= 8 {
+        let mut masks: Vec<usize> = (0..(1usize << wrap_indices.len())).collect();
+        masks.sort_by_key(|mask| mask.count_ones());
+        return masks
+            .into_iter()
+            .map(|mask| {
+                let mut candidate = seed.to_vec();
+                for (bit, index) in wrap_indices.iter().enumerate() {
+                    if mask & (1 << bit) != 0 {
+                        if let Element::Wrap { s, .. } = &mut candidate[*index] {
+                            *s = -*s;
+                        }
+                    }
+                }
+                candidate
+            })
+            .collect();
+    }
+
+    let mut variants = vec![seed.to_vec()];
+    for index in wrap_indices {
+        let mut candidate = seed.to_vec();
+        if let Element::Wrap { s, .. } = &mut candidate[index] {
+            *s = -*s;
+        }
+        variants.push(candidate);
+    }
+    variants
+}
+
+fn should_release_undo_guard(
+    cursor: Point,
+    origin: Option<Point>,
+    peg: Option<&Peg>,
+    move_threshold: f64,
+) -> bool {
+    peg.is_none_or(|peg| peg_signed_distance(peg, cursor) > 1.0)
+        || origin.is_some_and(|origin| origin.distance(cursor) > move_threshold)
+}
 
 fn safe_grid_radius_limits(grid: &GridSettings) -> (f64, f64) {
     let main_max = (grid.spacing * 0.5 - grid.catch - PEG_CLEARANCE).clamp(0.0, 100.0);
@@ -282,6 +328,9 @@ struct ActiveDraw {
     ignored: Vec<usize>,
     /// Undo直後の同一円への即時再捕捉だけを防ぐ。円の外へ出たら解除する。
     undo_guard: Option<usize>,
+    /// Undoした瞬間のカーソル位置。円内に留まっていてもここから少し動けば
+    /// ガードを解除し、同じ円を再び巻けるようにする。
+    undo_guard_origin: Option<Point>,
     /// Cmd+ZのCommandキー解放を「貫通確定」と誤認しないための抑制。
     suppress_cmd_ignore_until_release: bool,
     /// 前フレームで Command が押されていたか（離した瞬間の無視確定に使う）
@@ -412,6 +461,7 @@ impl App {
             active.suppress_cmd_ignore_until_release = true;
             if let Some(w) = active.th.wraps.pop() {
                 active.undo_guard = Some(w.peg);
+                active.undo_guard_origin = Some(active.th.tip);
                 self.status = "直前の引っ掛かりを解除しました".to_owned();
             } else {
                 self.status = "解除できる引っ掛かりがありません".to_owned();
@@ -2425,13 +2475,17 @@ impl App {
         }
 
         let close_radius = self.world_unit(CLOSE_RADIUS);
+        let undo_guard_release_distance = self.world_unit(6.0);
         if let Some(active) = self.draw.as_mut() {
             if let (Some(cursor), Some(guard)) = (hover, active.undo_guard) {
-                let clear = resolved_pegs
-                    .get(guard)
-                    .is_none_or(|peg| peg_signed_distance(peg, cursor) > 1.0);
-                if clear {
+                if should_release_undo_guard(
+                    cursor,
+                    active.undo_guard_origin,
+                    resolved_pegs.get(guard),
+                    undo_guard_release_distance,
+                ) {
                     active.undo_guard = None;
+                    active.undo_guard_origin = None;
                 }
             }
             let mut capture_ignored = active.ignored.clone();
@@ -2508,6 +2562,7 @@ impl App {
                                 armed: false,
                                 ignored: Vec::new(),
                                 undo_guard: None,
+                                undo_guard_origin: None,
                                 suppress_cmd_ignore_until_release: false,
                                 cmd_was_down: false,
                             });
@@ -2585,9 +2640,6 @@ impl App {
 
                 let mut elements = base_elements.clone();
                 elements.extend(lc);
-                let trailing_start_wrap = th.wraps.last().filter(|wrap| {
-                    peg_refs.get(wrap.peg).is_some_and(|peg_ref| *peg_ref == start.peg)
-                });
                 let preferred_start_s = if matches!(elements.last(), Some(Element::Wrap { peg, .. }) if *peg == start.peg) {
                     None
                 } else {
@@ -2618,19 +2670,11 @@ impl App {
                         variants.push(elements.clone());
                     }
                 }
-                // 局所捕捉の巻き方向が閉路では交差接線になる場合に備え、
-                // 各接触を1つずつ反転した候補も近い順に評価する。
-                let seed_variants = variants.clone();
-                if let Some(seed) = seed_variants.first() {
-                    for index in 0..seed.len() {
-                        if let Element::Wrap { .. } = seed[index] {
-                            let mut candidate = seed.clone();
-                            if let Element::Wrap { s, .. } = &mut candidate[index] {
-                                *s = -*s;
-                            }
-                            variants.push(candidate);
-                        }
-                    }
+                // ライブ描画時の局所的な巻き方向が、閉路全体では成立しない
+                // 三角形などがある。Wrapが8個以下なら全符号組合せを調べ、
+                // 複数箇所の反転が必要な閉路も候補に含める。
+                if let Some(seed) = variants.first() {
+                    variants = winding_variants(seed);
                 }
 
                 let ignored_refs: Vec<PegRef> = ignored
@@ -2645,7 +2689,7 @@ impl App {
                     .collect();
                 let obstacle_pegs: Vec<Peg> = obstacles.iter().map(|(_, peg)| *peg).collect();
                 let mut first_candidate = None;
-                let mut chosen = None;
+                let mut chosen: Option<(Face, Vec<Seg>, f64)> = None;
                 for candidate_elements in variants {
                     let face = Face {
                         start,
@@ -2659,57 +2703,19 @@ impl App {
                     if first_candidate.is_none() {
                         first_candidate = Some((face.clone(), segs.clone()));
                     }
-                    let start_peg = resolver(&start.peg);
-                    let start_sweep = start_peg.and_then(|peg| {
-                        segs.iter().find_map(|segment| match *segment {
-                            Seg::Arc { center, start, end, .. }
-                                if center.distance(peg.center) < 1e-8 => Some((end - start).abs()),
-                            _ => None,
-                        })
-                    });
-                    if start_sweep.is_some_and(|sweep| sweep <= MAX_AUTO_CLOSE_SWEEP)
-                        && !self.has_penetration_on_lines(&segs)
+                    if !self.has_penetration_on_lines(&segs)
                         && !segments_penetrate_pegs(&segs, &obstacle_pegs)
                     {
-                        chosen = Some((face, segs));
-                        break;
-                    }
-                }
-                // 円へ自然に閉じる候補が90°を超えて回り込む場合だけ、開始点を
-                // 結び目にした候補へフォールバックする。「末尾が開始円ではない」
-                // だけで Pin 化すると通常の閉路まで再計算不能になるため、実際に
-                // 解いた開始円弧の掃引量を基準にする。
-                if chosen.is_none() {
-                    let mut anchored_thread = th.clone();
-                    if trailing_start_wrap.is_some() {
-                        anchored_thread.wraps.pop();
-                    }
-                    if let Some(anchor_wraps) = thread_to_wrap_elements(
-                        &anchored_thread,
-                        &resolved_pegs,
-                        &peg_refs,
-                        start_point,
-                    ) {
-                        let mut anchored = base_elements.clone();
-                        anchored.extend(anchor_wraps);
-                        anchored.push(Element::Pin { pos: start_point });
-                        let face = Face {
-                            start,
-                            elements: anchored,
-                            visible: true,
-                            name: String::new(),
-                            baked: None,
-                            ignored_pegs: ignored_refs.clone(),
-                        };
-                        if let Some(segs) = materialize_face_with_obstacles(&face, &resolver, &obstacles) {
-                            if !self.has_penetration_on_lines(&segs)
-                                && !segments_penetrate_pegs(&segs, &obstacle_pegs)
-                            {
-                                chosen = Some((face, segs));
-                            }
+                        let total_arc = segs.iter().map(|segment| match *segment {
+                            Seg::Arc { start, end, .. } => (end - start).abs(),
+                            Seg::Line { .. } => 0.0,
+                        }).sum::<f64>();
+                        if chosen.as_ref().is_none_or(|(_, _, best)| total_arc < *best) {
+                            chosen = Some((face, segs, total_arc));
                         }
                     }
                 }
+                let chosen = chosen.map(|(face, segs, _)| (face, segs));
                 if let Some((face, segs)) = chosen.or(first_candidate) {
                     let over_wrap = th.wraps.iter().any(|wrap| {
                         ((wrap.exit - wrap.entry) * wrap.s).abs() > std::f64::consts::PI * 4.0
@@ -4125,6 +4131,7 @@ mod tests {
             armed: true,
             ignored: vec![3],
             undo_guard: None,
+            undo_guard_origin: None,
             suppress_cmd_ignore_until_release: false,
             cmd_was_down: false,
         });
@@ -4148,6 +4155,7 @@ mod tests {
             armed: true,
             ignored: Vec::new(),
             undo_guard: None,
+            undo_guard_origin: None,
             suppress_cmd_ignore_until_release: false,
             cmd_was_down: true,
         });
@@ -4192,5 +4200,43 @@ mod tests {
         let moved = &app.doc.faces[0].baked.as_ref().unwrap().rings[0];
         assert_eq!(moved[0], Point::new(101.0, 202.0));
         assert_eq!(moved[2], Point::new(101.0, 204.0));
+    }
+
+    #[test]
+    fn triangle_closure_checks_all_winding_combinations() {
+        let wrap = |id| Element::Wrap {
+            peg: PegRef::Custom { id },
+            s: 1.0,
+            turns: 0,
+            exit_offset: 0.0,
+            sweep_hint: std::f64::consts::PI,
+        };
+        let variants = winding_variants(&[wrap(0), wrap(1), wrap(2)]);
+        assert_eq!(variants.len(), 8);
+        assert!(variants.iter().any(|variant| {
+            variant.iter().all(|element| matches!(element, Element::Wrap { s, .. } if *s < 0.0))
+        }));
+    }
+
+    #[test]
+    fn undo_guard_releases_after_pointer_moves_even_inside_peg() {
+        let peg = Peg {
+            center: Point::new(0.0, 0.0),
+            radius: 50.0,
+            shape: crate::model::PegShape::Circle,
+            rounding: 0.0,
+        };
+        assert!(!should_release_undo_guard(
+            Point::new(1.0, 0.0),
+            Some(Point::new(0.0, 0.0)),
+            Some(&peg),
+            6.0,
+        ));
+        assert!(should_release_undo_guard(
+            Point::new(8.0, 0.0),
+            Some(Point::new(0.0, 0.0)),
+            Some(&peg),
+            6.0,
+        ));
     }
 }
