@@ -796,7 +796,7 @@ impl App {
             onion_opacity: 0.42,
             onion_previous_color: Color32::from_rgb(116, 184, 255),
             onion_next_color: Color32::from_rgb(255, 137, 174),
-            proof_text: String::new(),
+            proof_text: "Hamburgefontsiv 0123".to_owned(),
             proof_size: 64.0,
             proof_tracking: 0.0,
             proof_cache: HashMap::new(),
@@ -830,8 +830,8 @@ impl App {
     }
 
     fn default_dock_layout() -> DockState<DockTab> {
-        // 試打はキャンバスと同じ中央領域を使う兄弟タブ。
-        let mut dock = DockState::new(vec![DockTab::Canvas, DockTab::Proof]);
+        // 試打はフォントモードでのみキャンバスの兄弟タブとして追加する。
+        let mut dock = DockState::new(vec![DockTab::Canvas]);
         // 右側の情報は縦に細切れにせず、一つのインスペクター領域へ集約する。
         // 必要な情報だけをタブで切り替え、キャンバス面積と視線の流れを安定させる。
         dock.main_surface_mut().split_right(
@@ -2200,6 +2200,9 @@ impl App {
         self.workspace_mode = mode;
         match mode {
             WorkspaceMode::Shape => {
+                if let Some(location) = self.dock.find_tab(&DockTab::Proof) {
+                    self.dock.remove_tab(location);
+                }
                 self.doc = self.shape_document.clone();
                 self.undo = std::mem::take(&mut self.shape_undo);
                 self.redo = std::mem::take(&mut self.shape_redo);
@@ -2210,6 +2213,13 @@ impl App {
                 self.status = "シェイプモードに切り替えました".to_owned();
             }
             WorkspaceMode::Font => {
+                if self.dock.find_tab(&DockTab::Proof).is_none() {
+                    if let Some((surface, node, _)) = self.dock.find_tab(&DockTab::Canvas) {
+                        self.dock[surface][node].append_tab(DockTab::Proof);
+                    } else {
+                        self.dock.add_window(vec![DockTab::Proof]);
+                    }
+                }
                 self.load_active_glyph_session();
                 if let Some(location) = self.dock.find_tab(&DockTab::Glyphs) {
                     self.dock.set_active_tab(location);
@@ -3068,7 +3078,6 @@ impl App {
 
     /// フローティングのツールパレット。上端の掴みバーをドラッグで自由に移動でき、
     /// egui_dock のタブ幅制約を受けずに細いまま保てる（Illustrator のツールバー相当）
-    #[allow(dead_code)]
     fn tool_palette(&mut self, ctx: &egui::Context) {
         let colors = self.theme_colors();
         egui::Area::new(egui::Id::new("tool-palette"))
@@ -3133,6 +3142,7 @@ impl App {
             });
     }
 
+    #[allow(dead_code)]
     fn left_tool_sidebar(&mut self, ui: &mut egui::Ui) {
         ui.vertical_centered(|ui| {
             ui.add_space(8.0);
@@ -3238,8 +3248,8 @@ impl App {
                 self.switch_workspace_mode(WorkspaceMode::Font);
             }
             ui.separator();
-            // ツールは左のドッキング可能な「ツール」パネルへ。元に戻す/やり直すは
-            // Cmd+Z / Cmd+Shift+Z に集約したのでバーからは省く
+            // 描画ツールはキャンバス上の移動可能な縦パレットへ集約する。
+            // ここには選択内容に依存する操作だけを置く。
             let sel_faces = self
                 .selection
                 .iter()
@@ -5770,24 +5780,8 @@ impl eframe::App for App {
         egui::TopBottomPanel::bottom("statusbar")
             .exact_height(28.0)
             .show(ctx, |ui| self.status_bar(ui));
-        egui::SidePanel::left("fixed-tool-sidebar")
-            .exact_width(68.0)
-            .resizable(false)
-            .frame(
-                egui::Frame::new()
-                    .fill(ctx.style().visuals.panel_fill)
-                    .stroke(Stroke::new(
-                        1.0,
-                        ctx.style().visuals.widgets.inactive.bg_stroke.color,
-                    ))
-                    .inner_margin(egui::Margin::symmetric(8, 4)),
-            )
-            .show(ctx, |ui| self.left_tool_sidebar(ui));
         // DockState と App の二重借用を避けるため一時的に取り出す
-        let mut dock = std::mem::replace(
-            &mut self.dock,
-            DockState::new(vec![DockTab::Canvas, DockTab::Proof]),
-        );
+        let mut dock = std::mem::replace(&mut self.dock, DockState::new(vec![DockTab::Canvas]));
         let colors = self.theme_colors();
         let mut dock_style = egui_dock::Style::from_egui(ctx.style().as_ref());
         // 区切り線の既定色は黒なので、テーマの枠色に上書きしてライトモードで
@@ -5809,6 +5803,9 @@ impl eframe::App for App {
             .show_window_close_buttons(false)
             .show(ctx, &mut AppTabViewer { app: self });
         self.dock = dock;
+        // Illustrator と同様、ツールはドックを圧迫せずキャンバス上で移動できる。
+        // Area は最後に描画して、ドック内容より常に手前へ出す。
+        self.tool_palette(ctx);
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
@@ -6881,7 +6878,7 @@ mod tests {
             onion_opacity: 0.42,
             onion_previous_color: Color32::from_rgb(116, 184, 255),
             onion_next_color: Color32::from_rgb(255, 137, 174),
-            proof_text: String::new(),
+            proof_text: "Hamburgefontsiv 0123".to_owned(),
             proof_size: 64.0,
             proof_tracking: 0.0,
             proof_cache: HashMap::new(),
