@@ -2966,13 +2966,23 @@ impl App {
         }
         let metrics = self.font_project.metrics;
         ui.label(
-            egui::RichText::new(format!(
-                "asc {} / x {} / desc {} units / 横倍率 {:.2}",
-                metrics.ascender_units(),
-                metrics.x_height_units(),
-                metrics.descender_units(),
-                metrics.horizontal_scale()
-            ))
+            egui::RichText::new(if language == UiLanguage::Japanese {
+                format!(
+                    "asc {} / x {} / desc {} units / 横倍率 {:.2}",
+                    metrics.ascender_units(),
+                    metrics.x_height_units(),
+                    metrics.descender_units(),
+                    metrics.horizontal_scale()
+                )
+            } else {
+                format!(
+                    "asc {} / x {} / desc {} units / width scale {:.2}",
+                    metrics.ascender_units(),
+                    metrics.x_height_units(),
+                    metrics.descender_units(),
+                    metrics.horizontal_scale()
+                )
+            })
             .small()
             .color(colors.text2),
         );
@@ -3010,9 +3020,12 @@ impl App {
         });
 
         ui.label(
-            egui::RichText::new("グリフの選択は左のプロジェクトパネルで行います。")
-                .small()
-                .color(colors.text2),
+            egui::RichText::new(language.text(
+                "グリフの選択は左のプロジェクトパネルで行います。",
+                "Select glyphs in the Project panel on the left.",
+            ))
+            .small()
+            .color(colors.text2),
         );
     }
 
@@ -3477,10 +3490,42 @@ impl App {
                 );
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.menu_button(language.text("日本語", "English"), |ui| {
-                    ui.selectable_value(&mut self.language, UiLanguage::Japanese, "日本語");
-                    ui.selectable_value(&mut self.language, UiLanguage::English, "English");
-                });
+                egui::Frame::new()
+                    .fill(ui.visuals().widgets.noninteractive.weak_bg_fill)
+                    .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+                    .corner_radius(6)
+                    .inner_margin(egui::Margin::same(2))
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add_sized(
+                                    [30.0, 22.0],
+                                    egui::Button::selectable(
+                                        self.language == UiLanguage::Japanese,
+                                        "JA",
+                                    ),
+                                )
+                                .on_hover_text("日本語に切り替え")
+                                .clicked()
+                            {
+                                self.language = UiLanguage::Japanese;
+                            }
+                            if ui
+                                .add_sized(
+                                    [30.0, 22.0],
+                                    egui::Button::selectable(
+                                        self.language == UiLanguage::English,
+                                        "EN",
+                                    ),
+                                )
+                                .on_hover_text("Switch to English")
+                                .clicked()
+                            {
+                                self.language = UiLanguage::English;
+                            }
+                        });
+                    });
                 ui.menu_button(language.text("パネル", "Panels"), |ui| {
                     for (tab, label) in [
                         (DockTab::Glyphs, language.text("フォント", "Font")),
@@ -3499,7 +3544,10 @@ impl App {
                         }
                     }
                     ui.separator();
-                    if ui.button("標準レイアウトに戻す").clicked() {
+                    if ui
+                        .button(language.text("標準レイアウトに戻す", "Reset layout"))
+                        .clicked()
+                    {
                         self.dock = Self::default_dock_layout();
                         ui.close();
                     }
@@ -3507,8 +3555,13 @@ impl App {
                 if theme_icon_button(ui, self.dark_theme).clicked() {
                     self.dark_theme = !self.dark_theme;
                 }
-                if icon_toggle_button(ui, self.show_circles, IconKind::Eye, "円を表示 (H)")
-                    .clicked()
+                if icon_toggle_button(
+                    ui,
+                    self.show_circles,
+                    IconKind::Eye,
+                    language.text("円を表示 (H)", "Show pegs (H)"),
+                )
+                .clicked()
                 {
                     self.show_circles = !self.show_circles;
                 }
@@ -3683,6 +3736,7 @@ impl App {
     }
 
     fn render_layers_tab(&mut self, ui: &mut egui::Ui) {
+        let language = self.language;
         let shift = ui.input(|i| i.modifiers.shift);
         let mut remove_face: Option<usize> = None;
         let mut toggle_folder: Option<u64> = None;
@@ -3764,7 +3818,11 @@ impl App {
                                 ui.add_space(18.0);
                                 let selected = self.is_selected(Selection::Face(face_idx));
                                 let name = if self.doc.faces[face_idx].name.is_empty() {
-                                    format!("レイヤー {}", face_idx + 1)
+                                    format!(
+                                        "{} {}",
+                                        language.text("レイヤー", "Layer"),
+                                        face_idx + 1
+                                    )
                                 } else {
                                     self.doc.faces[face_idx].name.clone()
                                 };
@@ -3826,7 +3884,7 @@ impl App {
                         continue;
                     }
                     let name = if self.doc.faces[i].name.is_empty() {
-                        format!("レイヤー {}", i + 1)
+                        format!("{} {}", language.text("レイヤー", "Layer"), i + 1)
                     } else {
                         self.doc.faces[i].name.clone()
                     };
@@ -4000,8 +4058,8 @@ impl App {
         ui.separator();
         ui.horizontal(|ui| {
             if ui
-                .button("＋ レイヤー")
-                .on_hover_text("空レイヤーを追加")
+                .button(language.text("＋ レイヤー", "+ Layer"))
+                .on_hover_text(language.text("空レイヤーを追加", "Add an empty layer"))
                 .clicked()
             {
                 let snapshot = self.doc.clone();
@@ -4009,15 +4067,18 @@ impl App {
                 let number = self.doc.empty_layers.len() + self.doc.faces.len() + 1;
                 self.doc.empty_layers.push(EmptyLayer {
                     id,
-                    name: format!("レイヤー {number}"),
+                    name: format!("{} {number}", language.text("レイヤー", "Layer")),
                     visible: true,
                     folder_id: None,
                 });
                 self.push_history_snapshot(snapshot);
             }
             if ui
-                .button("▣ フォルダ")
-                .on_hover_text("選択した面をフォルダへまとめる")
+                .button(language.text("▣ フォルダ", "▣ Folder"))
+                .on_hover_text(language.text(
+                    "選択した面をフォルダへまとめる",
+                    "Group selected shapes in a folder",
+                ))
                 .clicked()
             {
                 let snapshot = self.doc.clone();
@@ -4040,7 +4101,7 @@ impl App {
                 let number = self.doc.layer_folders.len() + 1;
                 self.doc.layer_folders.push(LayerFolder {
                     id,
-                    name: format!("フォルダ {number}"),
+                    name: format!("{} {number}", language.text("フォルダ", "Folder")),
                     visible: true,
                     expanded: true,
                     face_indices,
@@ -4051,6 +4112,7 @@ impl App {
     }
 
     fn render_circles_tab(&mut self, ui: &mut egui::Ui) {
+        let language = self.language;
         let shift = ui.input(|i| i.modifiers.shift);
         ui.add_space(2.0);
         let mut remove_custom: Option<usize> = None;
@@ -4070,16 +4132,19 @@ impl App {
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if used {
-                                delete_button(ui).on_hover_text("この円は面に使われています");
+                                delete_button(ui).on_hover_text(language.text(
+                                    "この円は面に使われています",
+                                    "This peg is used by a shape",
+                                ));
                             } else if delete_button(ui).clicked() {
                                 remove_custom = Some(i);
                             }
                             let w = ui.available_width();
                             let txt = if selected {
-                                egui::RichText::new(format!("円 #{id}"))
+                                egui::RichText::new(format!("{} #{id}", language.text("円", "Peg")))
                                     .color(ui.visuals().strong_text_color())
                             } else {
-                                egui::RichText::new(format!("円 #{id}"))
+                                egui::RichText::new(format!("{} #{id}", language.text("円", "Peg")))
                             };
                             let resp = ui.add_sized(
                                 [w, 22.0],
@@ -4107,6 +4172,7 @@ impl App {
     }
 
     fn render_properties_tab(&mut self, ui: &mut egui::Ui) {
+        let language = self.language;
         let face_indices: Vec<_> = self
             .selection
             .iter()
@@ -4135,13 +4201,22 @@ impl App {
             let Some(peg_idx) = self.doc.custom_pegs.iter().position(|peg| peg.id == peg_id) else {
                 return;
             };
-            section_header(ui, &format!("任意円 #{peg_id}"));
+            section_header(
+                ui,
+                &format!("{} #{peg_id}", language.text("任意円", "Custom peg")),
+            );
             let mut x = self.doc.custom_pegs[peg_idx].center.x;
             let mut y = self.doc.custom_pegs[peg_idx].center.y;
             let mut r = self.doc.custom_pegs[peg_idx].radius;
             let x_resp = scrub_value(ui, "X", &mut x, 0.5, -5000.0..=5000.0);
             let y_resp = scrub_value(ui, "Y", &mut y, 0.5, -5000.0..=5000.0);
-            let r_resp = scrub_value(ui, "半径", &mut r, 0.5, 0.0..=120.0);
+            let r_resp = scrub_value(
+                ui,
+                language.text("半径", "Radius"),
+                &mut r,
+                0.5,
+                0.0..=120.0,
+            );
 
             if x_resp.changed() || y_resp.changed() || r_resp.changed() {
                 let candidate_center = Point::new(x, y);
@@ -4185,9 +4260,16 @@ impl App {
             return;
         }
         if face_indices.len() > 1 {
-            section_header(ui, &format!("レイヤー {}件", face_indices.len()));
+            section_header(
+                ui,
+                &format!(
+                    "{} {}",
+                    language.text("レイヤー", "Layers"),
+                    face_indices.len()
+                ),
+            );
             ui.horizontal(|ui| {
-                if ui.button("すべて表示").clicked() {
+                if ui.button(language.text("すべて表示", "Show all")).clicked() {
                     let snapshot = self.doc.clone();
                     let mut changed = false;
                     for &face_idx in &face_indices {
@@ -4201,7 +4283,10 @@ impl App {
                     }
                     self.status = "選択中のレイヤーを表示".to_owned();
                 }
-                if ui.button("すべて非表示").clicked() {
+                if ui
+                    .button(language.text("すべて非表示", "Hide all"))
+                    .clicked()
+                {
                     let snapshot = self.doc.clone();
                     let mut changed = false;
                     for &face_idx in &face_indices {
@@ -4225,23 +4310,30 @@ impl App {
             }
             let title = match self.doc.faces.get(face_idx) {
                 Some(f) if !f.name.is_empty() => f.name.clone(),
-                _ => format!("レイヤー {}", face_idx + 1),
+                _ => format!("{} {}", language.text("レイヤー", "Layer"), face_idx + 1),
             };
             section_header(ui, &title);
             // 名前（インライン編集）
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("名前").weak().small());
+                ui.label(
+                    egui::RichText::new(language.text("名前", "Name"))
+                        .weak()
+                        .small(),
+                );
                 if let Some(face) = self.doc.faces.get_mut(face_idx) {
                     ui.add(
                         egui::TextEdit::singleline(&mut face.name)
-                            .hint_text("（無題）")
+                            .hint_text(language.text("（無題）", "Untitled"))
                             .desired_width(ui.available_width()),
                     );
                 }
             });
             let visibility_snapshot = self.doc.clone();
             if let Some(face) = self.doc.faces.get_mut(face_idx) {
-                if ui.checkbox(&mut face.visible, "表示").changed() {
+                if ui
+                    .checkbox(&mut face.visible, language.text("表示", "Visible"))
+                    .changed()
+                {
                     self.push_history_snapshot(visibility_snapshot);
                 }
             }
@@ -4256,8 +4348,14 @@ impl App {
                 ui.add_space(6.0);
                 let mut bevel = self.doc.faces[face_idx].baked.as_ref().unwrap().bevel;
                 let resp = ui
-                    .add(egui::Slider::new(&mut bevel, 0.0..=200.0).text("丸ベベル"))
-                    .on_hover_text("最大200。実際の丸みは各辺長の49%まで安全に制限されます");
+                    .add(
+                        egui::Slider::new(&mut bevel, 0.0..=200.0)
+                            .text(language.text("丸ベベル", "Round bevel")),
+                    )
+                    .on_hover_text(language.text(
+                        "最大200。実際の丸みは各辺長の49%まで安全に制限されます",
+                        "Maximum 200; each corner is limited to 49% of its adjacent edges",
+                    ));
                 if resp.changed() {
                     if self.bevel_edit_orig.is_none() {
                         self.bevel_edit_orig = Some(self.doc.clone());
