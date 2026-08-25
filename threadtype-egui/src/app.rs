@@ -410,29 +410,29 @@ impl Theme {
 
         let mut style = (*ctx.style()).clone();
         style.text_styles = [
-            (TextStyle::Body, FontId::new(12.0, FontFamily::Proportional)),
+            (TextStyle::Body, FontId::new(13.0, FontFamily::Proportional)),
             (
                 TextStyle::Button,
-                FontId::new(12.0, FontFamily::Proportional),
-            ),
-            (
-                TextStyle::Small,
-                FontId::new(11.0, FontFamily::Proportional),
-            ),
-            (
-                TextStyle::Heading,
                 FontId::new(13.0, FontFamily::Proportional),
             ),
             (
+                TextStyle::Small,
+                FontId::new(11.5, FontFamily::Proportional),
+            ),
+            (
+                TextStyle::Heading,
+                FontId::new(14.0, FontFamily::Proportional),
+            ),
+            (
                 TextStyle::Monospace,
-                FontId::new(12.0, FontFamily::Monospace),
+                FontId::new(13.0, FontFamily::Monospace),
             ),
         ]
         .into_iter()
         .collect();
-        style.spacing.item_spacing = Vec2::new(8.0, 6.0);
-        style.spacing.button_padding = Vec2::new(10.0, 2.0);
-        style.spacing.interact_size.y = 22.0;
+        style.spacing.item_spacing = Vec2::new(8.0, 7.0);
+        style.spacing.button_padding = Vec2::new(10.0, 4.0);
+        style.spacing.interact_size.y = 26.0;
         style.spacing.slider_width = 144.0;
         style.spacing.slider_rail_height = 1.5;
         ctx.set_style(style);
@@ -2614,27 +2614,45 @@ impl App {
 
     fn render_project_tab(&mut self, ui: &mut egui::Ui) {
         let language = self.language;
-        ui.label(egui::RichText::new("ThreadType").strong());
-        ui.add_space(6.0);
         match self.workspace_mode {
             WorkspaceMode::Shape => {
-                ui.label(egui::RichText::new(language.text("シェイプ", "SHAPE")).weak());
+                ui.label(
+                    egui::RichText::new(language.text("シェイププロジェクト", "SHAPE PROJECT"))
+                        .size(10.0)
+                        .strong()
+                        .color(self.theme_colors().text3),
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(language.text("無題のシェイプ", "Untitled shape")).strong(),
+                );
+                ui.add_space(8.0);
                 ui.separator();
-                ui.label(format!(
-                    "{}  {}",
-                    language.text("レイヤー", "Layers"),
-                    self.doc.faces.len() + self.doc.empty_layers.len()
-                ));
-                ui.label(format!(
-                    "{}  {}",
-                    language.text("任意円", "Custom pegs"),
-                    self.doc.custom_pegs.len()
-                ));
-                ui.label(format!(
-                    "{}  {:.0}",
-                    language.text("グリッド", "Grid"),
-                    self.doc.grid.spacing
-                ));
+                for (icon, label, value) in [
+                    (
+                        "▱",
+                        language.text("レイヤー", "Layers"),
+                        (self.doc.faces.len() + self.doc.empty_layers.len()).to_string(),
+                    ),
+                    (
+                        "○",
+                        language.text("任意円", "Custom pegs"),
+                        self.doc.custom_pegs.len().to_string(),
+                    ),
+                    (
+                        "⌗",
+                        language.text("グリッド", "Grid"),
+                        format!("{:.0}", self.doc.grid.spacing),
+                    ),
+                ] {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(icon).color(self.theme_colors().text2));
+                        ui.label(label);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(egui::RichText::new(value).color(self.theme_colors().text3));
+                        });
+                    });
+                }
                 ui.add_space(10.0);
                 if ui
                     .button(language.text("フォント制作へ", "Open font workspace"))
@@ -2644,10 +2662,23 @@ impl App {
                 }
             }
             WorkspaceMode::Font => {
+                ui.label(
+                    egui::RichText::new(language.text("フォントプロジェクト", "FONT PROJECT"))
+                        .size(10.0)
+                        .strong()
+                        .color(self.theme_colors().text3),
+                );
+                ui.add_space(4.0);
                 ui.label(egui::RichText::new(&self.font_project.family_name).strong());
                 ui.label(egui::RichText::new(&self.font_project.style_name).weak());
+                ui.add_space(6.0);
                 ui.separator();
-                ui.label(egui::RichText::new(language.text("グリフ", "GLYPHS")).weak());
+                ui.label(
+                    egui::RichText::new(language.text("グリフ", "GLYPHS"))
+                        .size(10.0)
+                        .strong()
+                        .color(self.theme_colors().text3),
+                );
                 let glyphs: Vec<(usize, char, bool)> = self
                     .font_project
                     .glyphs
@@ -3199,22 +3230,24 @@ impl App {
                         spread: 0,
                         color: Color32::from_black_alpha(if self.dark_theme { 90 } else { 30 }),
                     })
-                    .inner_margin(egui::Margin::symmetric(4, 4))
+                    .inner_margin(egui::Margin::symmetric(5, 5))
                     .show(ui, |ui| {
-                        ui.set_width(30.0);
+                        ui.set_width(34.0);
                         ui.vertical_centered(|ui| {
                             // 掴みバー（横棒）
                             let (bar, _) =
-                                ui.allocate_exact_size(Vec2::new(18.0, 8.0), Sense::hover());
-                            for k in 0..2 {
-                                let y = bar.center().y - 1.5 + k as f32 * 3.0;
-                                ui.painter().line_segment(
-                                    [
-                                        Pos2::new(bar.left() + 2.0, y),
-                                        Pos2::new(bar.right() - 2.0, y),
-                                    ],
-                                    Stroke::new(1.0, colors.text3),
-                                );
+                                ui.allocate_exact_size(Vec2::new(20.0, 10.0), Sense::hover());
+                            for row in 0..2 {
+                                for column in 0..3 {
+                                    ui.painter().circle_filled(
+                                        Pos2::new(
+                                            bar.center().x - 5.0 + column as f32 * 5.0,
+                                            bar.center().y - 2.2 + row as f32 * 4.4,
+                                        ),
+                                        1.0,
+                                        colors.text3,
+                                    );
+                                }
                             }
                             ui.add_space(2.0);
                             for (tool, tooltip) in [
@@ -6131,6 +6164,7 @@ impl eframe::App for App {
             // 常時表示の×ボタンは煩いので消す（パネルの開閉は上部「パネル」メニュー）
             .show_close_buttons(false)
             .show_leaf_close_all_buttons(false)
+            .show_leaf_collapse_buttons(false)
             .show(ctx, &mut AppTabViewer { app: self });
         self.dock = dock;
         // Illustrator と同様、ツールはドックを圧迫せずキャンバス上で移動できる。
@@ -6184,15 +6218,15 @@ impl TabViewer for AppTabViewer<'_> {
 
 /// ツールアイコンボタン（Illustrator風、描画ベース）
 fn tool_icon_button(ui: &mut egui::Ui, active: bool, tool: Tool, tooltip: &str) -> egui::Response {
-    let size = Vec2::new(26.0, 24.0);
+    let size = Vec2::new(30.0, 28.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     let visuals = ui.style().interact_selectable(&resp, active);
     if active {
         ui.painter()
-            .rect_filled(rect.shrink(1.0), 4.0, ui.visuals().selection.bg_fill);
+            .rect_filled(rect.shrink(1.0), 6.0, ui.visuals().selection.bg_fill);
     } else if resp.hovered() {
         ui.painter()
-            .rect_filled(rect.shrink(1.0), 4.0, visuals.bg_fill);
+            .rect_filled(rect.shrink(1.0), 6.0, visuals.bg_fill);
     }
     let color = if active {
         ui.visuals().selection.stroke.color
