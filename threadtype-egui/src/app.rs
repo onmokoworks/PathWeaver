@@ -2634,23 +2634,23 @@ impl App {
                 ui.separator();
                 for (icon, label, value) in [
                     (
-                        "▱",
+                        PanelGlyph::Layers,
                         language.text("レイヤー", "Layers"),
                         (self.doc.faces.len() + self.doc.empty_layers.len()).to_string(),
                     ),
                     (
-                        "○",
+                        PanelGlyph::Peg,
                         language.text("任意円", "Custom pegs"),
                         self.doc.custom_pegs.len().to_string(),
                     ),
                     (
-                        "⌗",
+                        PanelGlyph::Grid,
                         language.text("グリッド", "Grid"),
                         format!("{:.0}", self.doc.grid.spacing),
                     ),
                 ] {
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(icon).color(self.theme_colors().text2));
+                        panel_glyph(ui, icon);
                         ui.label(label);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.label(egui::RichText::new(value).color(self.theme_colors().text3));
@@ -3762,11 +3762,10 @@ impl App {
                         if eye_button(ui, folder.visible).clicked() {
                             toggle_folder_visibility = Some(folder.id);
                         }
-                        let disclosure = if folder.expanded { "▾" } else { "▸" };
-                        if ui.small_button(disclosure).clicked() {
+                        if disclosure_button(ui, folder.expanded).clicked() {
                             toggle_folder = Some(folder.id);
                         }
-                        ui.label("▣");
+                        panel_glyph(ui, PanelGlyph::Folder);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if delete_button(ui).clicked() {
                                 remove_folder = Some(folder.id);
@@ -3845,6 +3844,7 @@ impl App {
                         for empty in folder_empty_layers {
                             ui.horizontal(|ui| {
                                 ui.add_space(18.0);
+                                panel_glyph(ui, PanelGlyph::EmptyLayer);
                                 if self.layer_item_editor == Some(empty.id) {
                                     if let Some(target) = self
                                         .doc
@@ -3864,10 +3864,8 @@ impl App {
                                         }
                                     }
                                 } else {
-                                    let response = ui.add(
-                                        egui::Label::new(format!("□  {}", empty.name))
-                                            .sense(Sense::click()),
-                                    );
+                                    let response =
+                                        ui.add(egui::Label::new(&empty.name).sense(Sense::click()));
                                     if response.double_clicked() {
                                         begin_layer_item_edit = Some(empty.id);
                                     }
@@ -3954,7 +3952,7 @@ impl App {
                         if eye_button(ui, empty.visible).clicked() {
                             toggle_empty_visibility = Some(empty.id);
                         }
-                        ui.label("□");
+                        panel_glyph(ui, PanelGlyph::EmptyLayer);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if delete_button(ui).clicked() {
                                 remove_empty = Some(empty.id);
@@ -6515,6 +6513,7 @@ fn tool_icon_button(ui: &mut egui::Ui, active: bool, tool: Tool, tooltip: &str) 
     };
     let c = rect.center();
     let p = ui.painter();
+    let icon_stroke = Stroke::new(1.5, color);
     match tool {
         Tool::Select => {
             // 塗りのカーソル矢印
@@ -6532,7 +6531,7 @@ fn tool_icon_button(ui: &mut egui::Ui, active: bool, tool: Tool, tooltip: &str) 
                 color,
                 Stroke::NONE,
             ));
-            p.add(egui::Shape::closed_line(pts, Stroke::new(1.3, color)));
+            p.add(egui::Shape::closed_line(pts, icon_stroke));
         }
         Tool::DirectSelect => {
             // 白抜きのカーソル矢印
@@ -6545,7 +6544,7 @@ fn tool_icon_button(ui: &mut egui::Ui, active: bool, tool: Tool, tooltip: &str) 
                 Pos2::new(c.x + 1.1, c.y + 1.4),
                 Pos2::new(c.x + 4.5, c.y + 1.0),
             ];
-            p.add(egui::Shape::closed_line(pts, Stroke::new(1.3, color)));
+            p.add(egui::Shape::closed_line(pts, icon_stroke));
         }
         Tool::Draw => {
             // 素直な鉛筆: 斜めの軸 + 先端の三角チップ
@@ -6554,10 +6553,10 @@ fn tool_icon_button(ui: &mut egui::Ui, active: bool, tool: Tool, tooltip: &str) 
             let tip = Pos2::new(c.x - 5.0, c.y + 5.5);
             // 軸（2本の平行線）
             let n = Vec2::new(0.9, 0.9); // 軸に直交する太さ方向
-            p.line_segment([top + n, mid + n], Stroke::new(1.3, color));
-            p.line_segment([top - n, mid - n], Stroke::new(1.3, color));
-            p.line_segment([top + n, top - n], Stroke::new(1.3, color)); // 消しゴム側
-                                                                         // 先端チップ（塗り三角）
+            p.line_segment([top + n, mid + n], icon_stroke);
+            p.line_segment([top - n, mid - n], icon_stroke);
+            p.line_segment([top + n, top - n], icon_stroke); // 消しゴム側
+                                                             // 先端チップ（塗り三角）
             p.add(egui::Shape::convex_polygon(
                 vec![mid + n, mid - n, tip],
                 color,
@@ -6566,20 +6565,98 @@ fn tool_icon_button(ui: &mut egui::Ui, active: bool, tool: Tool, tooltip: &str) 
         }
         Tool::CustomPeg => {
             // 円 + プラス
-            p.circle_stroke(Pos2::new(c.x - 1.5, c.y), 5.0, Stroke::new(1.3, color));
+            p.circle_stroke(Pos2::new(c.x - 1.5, c.y), 5.4, icon_stroke);
             let px = c.x + 5.0;
             let py = c.y - 4.5;
             p.line_segment(
                 [Pos2::new(px - 2.5, py), Pos2::new(px + 2.5, py)],
-                Stroke::new(1.3, color),
+                icon_stroke,
             );
             p.line_segment(
                 [Pos2::new(px, py - 2.5), Pos2::new(px, py + 2.5)],
-                Stroke::new(1.3, color),
+                icon_stroke,
             );
         }
     }
     resp.on_hover_text(tooltip)
+}
+
+#[derive(Clone, Copy)]
+enum PanelGlyph {
+    Layers,
+    Peg,
+    Grid,
+    Folder,
+    EmptyLayer,
+}
+
+/// パネル用の16pxベクターアイコン。文字記号に依存せず、すべて同じ
+/// 24pxグリッド・1.35pxストロークで描く。
+fn panel_glyph(ui: &mut egui::Ui, glyph: PanelGlyph) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+    let center = rect.center();
+    let color = ui
+        .visuals()
+        .widgets
+        .inactive
+        .fg_stroke
+        .color
+        .gamma_multiply(0.82);
+    let stroke = Stroke::new(1.35, color);
+    let painter = ui.painter();
+    match glyph {
+        PanelGlyph::Layers => {
+            for offset in [-3.5_f32, 0.0, 3.5] {
+                let y = center.y + offset;
+                painter.add(egui::Shape::closed_line(
+                    vec![
+                        Pos2::new(center.x, y - 3.0),
+                        Pos2::new(center.x + 6.5, y),
+                        Pos2::new(center.x, y + 3.0),
+                        Pos2::new(center.x - 6.5, y),
+                    ],
+                    stroke,
+                ));
+            }
+        }
+        PanelGlyph::Peg => {
+            painter.circle_stroke(center, 6.2, stroke);
+            painter.circle_filled(center, 1.4, color);
+        }
+        PanelGlyph::Grid => {
+            for row in -1..=1 {
+                for column in -1..=1 {
+                    painter.circle_filled(
+                        center + Vec2::new(column as f32 * 5.0, row as f32 * 5.0),
+                        1.15,
+                        color,
+                    );
+                }
+            }
+        }
+        PanelGlyph::Folder => {
+            painter.add(egui::Shape::closed_line(
+                vec![
+                    Pos2::new(center.x - 7.0, center.y - 4.5),
+                    Pos2::new(center.x - 1.5, center.y - 4.5),
+                    Pos2::new(center.x + 0.5, center.y - 2.2),
+                    Pos2::new(center.x + 7.0, center.y - 2.2),
+                    Pos2::new(center.x + 7.0, center.y + 5.0),
+                    Pos2::new(center.x - 7.0, center.y + 5.0),
+                ],
+                stroke,
+            ));
+        }
+        PanelGlyph::EmptyLayer => {
+            painter.rect_stroke(
+                Rect::from_center_size(center, Vec2::splat(12.0)),
+                2.0,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+        }
+    }
+    response
 }
 
 fn align_icon_button(ui: &mut egui::Ui, axis: AlignAxis, tooltip: &str) -> egui::Response {
@@ -6882,6 +6959,35 @@ fn eye_button(ui: &mut egui::Ui, visible: bool) -> egui::Response {
     } else {
         "表示する"
     })
+}
+
+/// フォルダ開閉用の背景なしシェブロン。既定の文字ボタンによる
+/// サイズ差を避け、他の16pxアイコンと光学サイズを揃える。
+fn disclosure_button(ui: &mut egui::Ui, expanded: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
+    let visuals = ui.style().interact(&response);
+    if response.hovered() {
+        ui.painter()
+            .rect_filled(rect.shrink(1.0), 4.0, visuals.bg_fill);
+    }
+    let center = rect.center();
+    let color = visuals.fg_stroke.color.gamma_multiply(0.85);
+    let stroke = Stroke::new(1.45, color);
+    let points = if expanded {
+        [
+            Pos2::new(center.x - 4.0, center.y - 2.0),
+            Pos2::new(center.x, center.y + 2.5),
+            Pos2::new(center.x + 4.0, center.y - 2.0),
+        ]
+    } else {
+        [
+            Pos2::new(center.x - 2.0, center.y - 4.0),
+            Pos2::new(center.x + 2.5, center.y),
+            Pos2::new(center.x - 2.0, center.y + 4.0),
+        ]
+    };
+    ui.painter().add(egui::Shape::line(points.to_vec(), stroke));
+    response
 }
 
 fn point_in_polygon(p: Point, poly: &[Point]) -> bool {
