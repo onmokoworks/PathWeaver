@@ -511,6 +511,7 @@ enum AlignAxis {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum DockTab {
+    Project,
     Canvas,
     Proof,
     Glyphs,
@@ -854,16 +855,14 @@ impl App {
         let mut dock = DockState::new(vec![DockTab::Canvas]);
         // 左はプロジェクト／素材、中央は制作面、右は選択内容のインスペクター。
         // 各タブは egui_dock のドラッグで従来どおり分離できる。
-        let [center, _left] = dock.main_surface_mut().split_left(
+        let [center, _right] = dock.main_surface_mut().split_right(
             NodeIndex::root(),
-            0.78,
-            vec![DockTab::Glyphs, DockTab::Circles],
-        );
-        dock.main_surface_mut().split_right(
-            center,
-            0.72,
+            0.75,
             vec![DockTab::Properties, DockTab::Grid, DockTab::Layers],
         );
+        // split_left は画面上の左側（新規ノード）の比率を受け取る。
+        dock.main_surface_mut()
+            .split_left(center, 0.22, vec![DockTab::Project]);
         dock
     }
 
@@ -2223,11 +2222,17 @@ impl App {
                 if let Some(location) = self.dock.find_tab(&DockTab::Proof) {
                     self.dock.remove_tab(location);
                 }
+                if let Some(location) = self.dock.find_tab(&DockTab::Glyphs) {
+                    self.dock.remove_tab(location);
+                }
                 self.doc = self.shape_document.clone();
                 self.undo = std::mem::take(&mut self.shape_undo);
                 self.redo = std::mem::take(&mut self.shape_redo);
                 self.reset_transient_editor();
                 if let Some(location) = self.dock.find_tab(&DockTab::Grid) {
+                    self.dock.set_active_tab(location);
+                }
+                if let Some(location) = self.dock.find_tab(&DockTab::Circles) {
                     self.dock.set_active_tab(location);
                 }
                 self.status = "シェイプモードに切り替えました".to_owned();
@@ -2238,6 +2243,13 @@ impl App {
                         self.dock[surface][node].append_tab(DockTab::Proof);
                     } else {
                         self.dock.add_window(vec![DockTab::Proof]);
+                    }
+                }
+                if self.dock.find_tab(&DockTab::Glyphs).is_none() {
+                    if let Some((surface, node, _)) = self.dock.find_tab(&DockTab::Properties) {
+                        self.dock[surface][node].append_tab(DockTab::Glyphs);
+                    } else {
+                        self.dock.add_window(vec![DockTab::Glyphs]);
                     }
                 }
                 self.load_active_glyph_session();
@@ -2585,9 +2597,14 @@ impl App {
 
     fn render_tab_content(&mut self, ui: &mut egui::Ui, tab: DockTab) {
         match tab {
+            DockTab::Project => self.render_project_tab(ui),
             DockTab::Canvas => self.canvas(ui),
             DockTab::Proof => self.render_proof_tab(ui),
-            DockTab::Glyphs => self.render_glyphs_tab(ui),
+            DockTab::Glyphs => {
+                egui::ScrollArea::vertical()
+                    .id_salt("font-inspector-scroll")
+                    .show(ui, |ui| self.render_glyphs_tab(ui));
+            }
             DockTab::Layers => self.render_layers_tab(ui),
             DockTab::Circles => self.render_circles_tab(ui),
             DockTab::Properties => self.render_properties_tab(ui),
@@ -2595,8 +2612,98 @@ impl App {
         }
     }
 
+    fn render_project_tab(&mut self, ui: &mut egui::Ui) {
+        let language = self.language;
+        ui.label(egui::RichText::new("ThreadType").strong());
+        ui.add_space(6.0);
+        match self.workspace_mode {
+            WorkspaceMode::Shape => {
+                ui.label(egui::RichText::new(language.text("シェイプ", "SHAPE")).weak());
+                ui.separator();
+                ui.label(format!(
+                    "{}  {}",
+                    language.text("レイヤー", "Layers"),
+                    self.doc.faces.len() + self.doc.empty_layers.len()
+                ));
+                ui.label(format!(
+                    "{}  {}",
+                    language.text("任意円", "Custom pegs"),
+                    self.doc.custom_pegs.len()
+                ));
+                ui.label(format!(
+                    "{}  {:.0}",
+                    language.text("グリッド", "Grid"),
+                    self.doc.grid.spacing
+                ));
+                ui.add_space(10.0);
+                if ui
+                    .button(language.text("フォント制作へ", "Open font workspace"))
+                    .clicked()
+                {
+                    self.switch_workspace_mode(WorkspaceMode::Font);
+                }
+            }
+            WorkspaceMode::Font => {
+                ui.label(egui::RichText::new(&self.font_project.family_name).strong());
+                ui.label(egui::RichText::new(&self.font_project.style_name).weak());
+                ui.separator();
+                ui.label(egui::RichText::new(language.text("グリフ", "GLYPHS")).weak());
+                let glyphs: Vec<(usize, char, bool)> = self
+                    .font_project
+                    .glyphs
+                    .iter()
+                    .enumerate()
+                    .map(|(index, glyph)| {
+                        let document = if index == self.font_project.active_glyph {
+                            &self.doc
+                        } else {
+                            &glyph.document
+                        };
+                        (index, glyph.character, !document.faces.is_empty())
+                    })
+                    .collect();
+                let mut switch_to = None;
+                egui::Grid::new("project-glyph-grid")
+                    .num_columns(5)
+                    .spacing(Vec2::new(3.0, 3.0))
+                    .show(ui, |ui| {
+                        for (position, (index, character, complete)) in
+                            glyphs.into_iter().enumerate()
+                        {
+                            let text = if character == ' ' {
+                                "␠".to_owned()
+                            } else if complete {
+                                format!("{character}·")
+                            } else {
+                                character.to_string()
+                            };
+                            if ui
+                                .add_sized(
+                                    [24.0, 24.0],
+                                    egui::Button::selectable(
+                                        index == self.font_project.active_glyph,
+                                        text,
+                                    ),
+                                )
+                                .clicked()
+                            {
+                                switch_to = Some(index);
+                            }
+                            if position % 5 == 4 {
+                                ui.end_row();
+                            }
+                        }
+                    });
+                if let Some(index) = switch_to {
+                    self.switch_glyph(index);
+                }
+            }
+        }
+    }
+
     fn render_glyphs_tab(&mut self, ui: &mut egui::Ui) {
         let colors = self.theme_colors();
+        let language = self.language;
         if self.workspace_mode == WorkspaceMode::Shape {
             ui.label(egui::RichText::new("フォント制作").size(18.0).strong());
             ui.add_space(6.0);
@@ -2607,13 +2714,14 @@ impl App {
             }
             return;
         }
-        ui.label(egui::RichText::new("フォント").strong());
+        ui.label(egui::RichText::new(language.text("フォント", "Font")).strong());
         ui.add(
             egui::TextEdit::singleline(&mut self.font_project.family_name)
-                .hint_text("ファミリー名"),
+                .hint_text(language.text("ファミリー名", "Family name")),
         );
         ui.add(
-            egui::TextEdit::singleline(&mut self.font_project.style_name).hint_text("スタイル名"),
+            egui::TextEdit::singleline(&mut self.font_project.style_name)
+                .hint_text(language.text("スタイル名", "Style name")),
         );
         ui.add_space(8.0);
 
@@ -2638,23 +2746,39 @@ impl App {
                 ui.vertical(|ui| {
                     ui.label(&glyph.name);
                     let mut advance = f64::from(glyph.advance_width);
-                    if scrub_value(ui, "送り幅", &mut advance, parameter_speed, 100.0..=1200.0)
-                        .on_hover_text("ドラッグで微調整 / Shift+ドラッグで高速")
-                        .changed()
+                    if scrub_value(
+                        ui,
+                        language.text("送り幅", "Advance"),
+                        &mut advance,
+                        parameter_speed,
+                        100.0..=1200.0,
+                    )
+                    .on_hover_text("ドラッグで微調整 / Shift+ドラッグで高速")
+                    .changed()
                     {
                         glyph.advance_width = advance.round() as u16;
                     }
                     let design_width = if glyph.character == ' ' { 0.0 } else { 600.0 };
                     let mut left = f64::from(glyph.left_side_bearing);
                     let mut right = f64::from(glyph.advance_width) - left - design_width;
-                    let left_changed =
-                        scrub_value(ui, "左余白", &mut left, parameter_speed, -300.0..=600.0)
-                            .on_hover_text("グリフを右へ送る余白 / Shift+ドラッグで高速")
-                            .changed();
-                    let right_changed =
-                        scrub_value(ui, "右余白", &mut right, parameter_speed, -300.0..=600.0)
-                            .on_hover_text("次の文字までの右余白 / Shift+ドラッグで高速")
-                            .changed();
+                    let left_changed = scrub_value(
+                        ui,
+                        language.text("左余白", "Left bearing"),
+                        &mut left,
+                        parameter_speed,
+                        -300.0..=600.0,
+                    )
+                    .on_hover_text("グリフを右へ送る余白 / Shift+ドラッグで高速")
+                    .changed();
+                    let right_changed = scrub_value(
+                        ui,
+                        language.text("右余白", "Right bearing"),
+                        &mut right,
+                        parameter_speed,
+                        -300.0..=600.0,
+                    )
+                    .on_hover_text("次の文字までの右余白 / Shift+ドラッグで高速")
+                    .changed();
                     if left_changed || right_changed {
                         glyph.left_side_bearing = left.round() as i16;
                         glyph.advance_width =
@@ -2664,27 +2788,30 @@ impl App {
             });
         }
         ui.horizontal_wrapped(|ui| {
-            ui.checkbox(&mut self.onion_skin, "前");
+            ui.checkbox(&mut self.onion_skin, language.text("前", "Previous"));
             ui.color_edit_button_srgba(&mut self.onion_previous_color);
-            ui.checkbox(&mut self.onion_next, "次");
+            ui.checkbox(&mut self.onion_next, language.text("次", "Next"));
             ui.color_edit_button_srgba(&mut self.onion_next_color);
         });
         ui.add(
             egui::Slider::new(&mut self.onion_opacity, 0.05..=1.0)
-                .text("オニオン透明度")
+                .text(language.text("オニオン透明度", "Onion opacity"))
                 .fixed_decimals(2),
         );
 
         ui.add_space(6.0);
         ui.separator();
-        ui.label(egui::RichText::new("下書きフォント").strong());
+        ui.label(egui::RichText::new(language.text("下書きフォント", "Reference font")).strong());
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Macのフォントを選択…").clicked() {
+            if ui
+                .button(language.text("Macのフォントを選択…", "Choose Mac font…"))
+                .clicked()
+            {
                 self.choose_reference_font();
             }
             if let Some(font) = &self.reference_font {
                 ui.label(egui::RichText::new(&font.name).small().color(colors.text2));
-                if ui.button("解除").clicked() {
+                if ui.button(language.text("解除", "Remove")).clicked() {
                     self.reference_font = None;
                     self.status = "下書きフォントを解除しました".to_owned();
                 }
@@ -2693,12 +2820,12 @@ impl App {
         if self.reference_font.is_some() {
             ui.add(
                 egui::Slider::new(&mut self.reference_font_opacity, 0.03..=0.8)
-                    .text("下書き濃度")
+                    .text(language.text("下書き濃度", "Reference opacity"))
                     .fixed_decimals(2),
             );
             ui.add(
                 egui::Slider::new(&mut self.reference_font_scale, 0.25..=2.0)
-                    .text("下書きサイズ")
+                    .text(language.text("下書きサイズ", "Reference scale"))
                     .custom_formatter(|value, _| format!("{:.0}%", value * 100.0)),
             );
             ui.horizontal(|ui| {
@@ -2712,7 +2839,10 @@ impl App {
                         .speed(0.5)
                         .prefix("Y "),
                 );
-                if ui.button("位置をリセット").clicked() {
+                if ui
+                    .button(language.text("位置をリセット", "Reset position"))
+                    .clicked()
+                {
                     self.reference_font_offset = Vec2::ZERO;
                 }
             });
@@ -2720,12 +2850,12 @@ impl App {
 
         ui.add_space(6.0);
         ui.separator();
-        ui.label(egui::RichText::new("メトリクス箱").strong());
+        ui.label(egui::RichText::new(language.text("メトリクス箱", "Font metrics")).strong());
         let metrics = &mut self.font_project.metrics;
         let mut metrics_changed = false;
         metrics_changed |= scrub_value(
             ui,
-            "左端",
+            language.text("左端", "Origin"),
             &mut metrics.origin_x,
             parameter_speed,
             -400.0..=1600.0,
@@ -2734,7 +2864,7 @@ impl App {
         .changed();
         metrics_changed |= scrub_value(
             ui,
-            "右端",
+            language.text("右端", "Right edge"),
             &mut metrics.right_x,
             parameter_speed,
             -400.0..=2000.0,
@@ -2743,7 +2873,7 @@ impl App {
         .changed();
         metrics_changed |= scrub_value(
             ui,
-            "アセンダー",
+            language.text("アセンダー", "Ascender"),
             &mut metrics.ascender_y,
             parameter_speed,
             -400.0..=1600.0,
@@ -2761,7 +2891,7 @@ impl App {
         .changed();
         metrics_changed |= scrub_value(
             ui,
-            "ベースライン",
+            language.text("ベースライン", "Baseline"),
             &mut metrics.baseline_y,
             parameter_speed,
             -400.0..=1600.0,
@@ -2770,7 +2900,7 @@ impl App {
         .changed();
         metrics_changed |= scrub_value(
             ui,
-            "ディセンダー",
+            language.text("ディセンダー", "Descender"),
             &mut metrics.descender_y,
             parameter_speed,
             -400.0..=1600.0,
@@ -2808,55 +2938,11 @@ impl App {
             .color(colors.text2),
         );
 
-        ui.separator();
-        ui.label(egui::RichText::new("グリフ").strong());
-        let mut switch_target = None;
-        egui::ScrollArea::vertical()
-            .max_height(300.0)
-            .show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    for (index, glyph) in self.font_project.glyphs.iter().enumerate() {
-                        let character = if glyph.character == ' ' {
-                            "␠".to_owned()
-                        } else {
-                            glyph.character.to_string()
-                        };
-                        let is_empty = if index == self.font_project.active_glyph {
-                            self.doc.faces.is_empty()
-                        } else {
-                            glyph.document.faces.is_empty()
-                        };
-                        let label = if is_empty {
-                            character
-                        } else {
-                            format!("{character} •")
-                        };
-                        let selected = index == self.font_project.active_glyph;
-                        if ui
-                            .add_sized([42.0, 28.0], egui::Button::selectable(selected, label))
-                            .on_hover_text(format!(
-                                "{} / {}",
-                                glyph.name,
-                                if is_empty {
-                                    "未作成"
-                                } else {
-                                    "作成済み"
-                                }
-                            ))
-                            .clicked()
-                        {
-                            switch_target = Some(index);
-                        }
-                    }
-                });
-            });
-        if let Some(index) = switch_target {
-            self.switch_glyph(index);
-        }
-
         ui.add_space(6.0);
+        ui.separator();
+        ui.label(egui::RichText::new(language.text("グリフを追加", "Add glyph")).strong());
         ui.horizontal(|ui| {
-            ui.label("追加");
+            ui.label(language.text("追加", "Character"));
             ui.add_sized(
                 [42.0, 24.0],
                 egui::TextEdit::singleline(&mut self.new_glyph_text).char_limit(1),
@@ -2865,36 +2951,27 @@ impl App {
         let new_character = self.new_glyph_text.chars().next();
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(new_character.is_some(), egui::Button::new("空で追加"))
+                .add_enabled(
+                    new_character.is_some(),
+                    egui::Button::new(language.text("空で追加", "Add empty")),
+                )
                 .clicked()
             {
                 self.add_or_switch_glyph(new_character.unwrap(), false);
             }
             if ui
-                .add_enabled(new_character.is_some(), egui::Button::new("現在を複製"))
+                .add_enabled(
+                    new_character.is_some(),
+                    egui::Button::new(language.text("現在を複製", "Duplicate current")),
+                )
                 .clicked()
             {
                 self.add_or_switch_glyph(new_character.unwrap(), true);
             }
         });
 
-        ui.add_space(8.0);
-        ui.separator();
-        ui.label(egui::RichText::new("フォントプロジェクト").strong());
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("保存").clicked() {
-                self.save_font_project();
-            }
-            if ui.button("読み込み").clicked() {
-                self.load_font_project();
-            }
-            if ui.button("TTF書き出し").clicked() {
-                self.export_font_ttf();
-            }
-        });
-        ui.add_space(4.0);
         ui.label(
-            egui::RichText::new("• は作成済み。上部の保存／SVGは現在のシェイプだけを扱います。")
+            egui::RichText::new("グリフの選択は左のプロジェクトパネルで行います。")
                 .small()
                 .color(colors.text2),
         );
@@ -2902,6 +2979,7 @@ impl App {
 
     fn render_proof_tab(&mut self, ui: &mut egui::Ui) {
         let colors = self.theme_colors();
+        let language = self.language;
         if self.workspace_mode != WorkspaceMode::Font {
             ui.centered_and_justified(|ui| {
                 ui.vertical_centered(|ui| {
@@ -2913,7 +2991,11 @@ impl App {
             });
             return;
         }
-        ui.label(egui::RichText::new("試打").size(16.0).strong());
+        ui.label(
+            egui::RichText::new(language.text("試し組み", "Proof"))
+                .size(16.0)
+                .strong(),
+        );
         ui.horizontal(|ui| {
             let (swatch_rect, _) = ui.allocate_exact_size(Vec2::new(46.0, 38.0), Sense::hover());
             let fill_on = matches!(
@@ -2948,23 +3030,23 @@ impl App {
                     ui.selectable_value(
                         &mut self.font_project.render_style,
                         FontRenderStyle::Fill,
-                        "塗り",
+                        language.text("塗り", "Fill"),
                     );
                     ui.selectable_value(
                         &mut self.font_project.render_style,
                         FontRenderStyle::Thread,
-                        "線",
+                        language.text("線", "Thread"),
                     );
                     ui.selectable_value(
                         &mut self.font_project.render_style,
                         FontRenderStyle::FillAndThread,
-                        "塗り＋線",
+                        language.text("塗り＋線", "Fill + thread"),
                     );
                 });
                 if thread_on {
                     ui.add(
                         egui::Slider::new(&mut self.font_project.thread_width, 0.5..=24.0)
-                            .text("線幅")
+                            .text(language.text("線幅", "Width"))
                             .fixed_decimals(1),
                     );
                 }
@@ -2973,17 +3055,17 @@ impl App {
         ui.add(
             egui::TextEdit::multiline(&mut self.proof_text)
                 .desired_rows(2)
-                .hint_text("ここに試したい文字を入力"),
+                .hint_text(language.text("ここに試したい文字を入力", "Type proof text")),
         );
         ui.horizontal_wrapped(|ui| {
             ui.add(
                 egui::Slider::new(&mut self.proof_size, 20.0..=500.0)
-                    .text("サイズ")
+                    .text(language.text("サイズ", "Size"))
                     .fixed_decimals(0),
             );
             ui.add(
                 egui::Slider::new(&mut self.proof_tracking, -40.0..=120.0)
-                    .text("字間")
+                    .text(language.text("字間", "Tracking"))
                     .fixed_decimals(0),
             );
         });
@@ -3104,7 +3186,7 @@ impl App {
         let colors = self.theme_colors();
         egui::Area::new(egui::Id::new("tool-palette"))
             .movable(true)
-            .default_pos(Pos2::new(52.0, 44.0))
+            .default_pos(Pos2::new(210.0, 76.0))
             .constrain(true)
             .show(ctx, |ui| {
                 egui::Frame::new()
@@ -3309,112 +3391,59 @@ impl App {
                 );
             }
             ui.separator();
-            match self.workspace_mode {
-                WorkspaceMode::Shape => {
-                    if egui_shadcn::button(
-                        ui,
-                        &shadcn,
-                        language.text("SVG書き出し", "Export SVG"),
-                        egui_shadcn::ControlVariant::Outline,
-                        egui_shadcn::ControlSize::Sm,
-                        true,
-                    )
-                    .clicked()
-                    {
-                        self.export_svg();
-                    }
-                    if egui_shadcn::button(
-                        ui,
-                        &shadcn,
-                        language.text("保存", "Save"),
-                        egui_shadcn::ControlVariant::Primary,
-                        egui_shadcn::ControlSize::Sm,
-                        true,
-                    )
-                    .clicked()
-                    {
-                        self.save_json();
-                    }
-                    if egui_shadcn::button(
-                        ui,
-                        &shadcn,
-                        language.text("開く", "Open"),
-                        egui_shadcn::ControlVariant::Ghost,
-                        egui_shadcn::ControlSize::Sm,
-                        true,
-                    )
-                    .clicked()
-                    {
-                        self.load_json();
-                    }
-                }
-                WorkspaceMode::Font => {
-                    if egui_shadcn::button(
-                        ui,
-                        &shadcn,
-                        language.text("現在をSVG", "Export SVG"),
-                        egui_shadcn::ControlVariant::Outline,
-                        egui_shadcn::ControlSize::Sm,
-                        true,
-                    )
-                    .clicked()
-                    {
-                        self.export_svg();
-                    }
-                    if egui_shadcn::button(
-                        ui,
-                        &shadcn,
-                        language.text("保存", "Save"),
-                        egui_shadcn::ControlVariant::Primary,
-                        egui_shadcn::ControlSize::Sm,
-                        true,
-                    )
-                    .clicked()
-                    {
-                        self.save_font_project();
-                    }
-                    if egui_shadcn::button(
-                        ui,
-                        &shadcn,
-                        language.text("開く", "Open"),
-                        egui_shadcn::ControlVariant::Ghost,
-                        egui_shadcn::ControlSize::Sm,
-                        true,
-                    )
-                    .clicked()
-                    {
-                        self.load_font_project();
-                    }
-                    if egui_shadcn::button(
-                        ui,
-                        &shadcn,
-                        language.text("TTF書き出し", "Export TTF"),
-                        egui_shadcn::ControlVariant::Secondary,
-                        egui_shadcn::ControlSize::Sm,
-                        true,
-                    )
-                    .clicked()
-                    {
-                        self.export_font_ttf();
-                    }
+            if egui_shadcn::button(
+                ui,
+                &shadcn,
+                language.text("保存", "Save"),
+                egui_shadcn::ControlVariant::Primary,
+                egui_shadcn::ControlSize::Sm,
+                true,
+            )
+            .clicked()
+            {
+                match self.workspace_mode {
+                    WorkspaceMode::Shape => self.save_json(),
+                    WorkspaceMode::Font => self.save_font_project(),
                 }
             }
-            ui.separator();
-            ui.menu_button(language.text("ワークスペース", "Workspace"), |ui| {
-                if ui.button("すべて保存…").clicked() {
-                    self.save_workspace();
+            ui.menu_button(language.text("ファイル", "File"), |ui| {
+                if ui.button(language.text("開く…", "Open…")).clicked() {
+                    match self.workspace_mode {
+                        WorkspaceMode::Shape => self.load_json(),
+                        WorkspaceMode::Font => self.load_font_project(),
+                    }
                     ui.close();
                 }
-                if ui.button("すべて読み込み…").clicked() {
-                    self.load_workspace();
+                if ui
+                    .button(language.text("SVGを書き出す…", "Export SVG…"))
+                    .clicked()
+                {
+                    self.export_svg();
+                    ui.close();
+                }
+                if self.workspace_mode == WorkspaceMode::Font
+                    && ui
+                        .button(language.text("TTFを書き出す…", "Export TTF…"))
+                        .clicked()
+                {
+                    self.export_font_ttf();
                     ui.close();
                 }
                 ui.separator();
-                ui.label(
-                    egui::RichText::new("シェイプと全グリフを1ファイルに保存")
-                        .small()
-                        .weak(),
-                );
+                if ui
+                    .button(language.text("ワークスペースを保存…", "Save workspace…"))
+                    .clicked()
+                {
+                    self.save_workspace();
+                    ui.close();
+                }
+                if ui
+                    .button(language.text("ワークスペースを開く…", "Open workspace…"))
+                    .clicked()
+                {
+                    self.load_workspace();
+                    ui.close();
+                }
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.menu_button(language.text("日本語", "English"), |ui| {
@@ -3423,11 +3452,14 @@ impl App {
                 });
                 ui.menu_button(language.text("パネル", "Panels"), |ui| {
                     for (tab, label) in [
-                        (DockTab::Glyphs, "グリフ"),
-                        (DockTab::Layers, "レイヤー"),
-                        (DockTab::Circles, "円"),
-                        (DockTab::Properties, "プロパティ"),
-                        (DockTab::Grid, "グリッド"),
+                        (DockTab::Glyphs, language.text("フォント", "Font")),
+                        (DockTab::Layers, language.text("レイヤー", "Layers")),
+                        (DockTab::Circles, language.text("円", "Pegs")),
+                        (
+                            DockTab::Properties,
+                            language.text("プロパティ", "Properties"),
+                        ),
+                        (DockTab::Grid, language.text("グリッド", "Grid")),
                     ] {
                         let open = self.dock.find_tab(&tab).is_some();
                         if ui.add_enabled(!open, egui::Button::new(label)).clicked() {
@@ -3511,8 +3543,23 @@ impl App {
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
+        let status = if self.language == UiLanguage::Japanese {
+            self.status.clone()
+        } else if self.status.starts_with("フォントモード:") {
+            self.status.replacen("フォントモード:", "Font mode:", 1)
+        } else {
+            match self.status.as_str() {
+                "クリックで線を引き始め、始点に戻ってクリックで面を閉じます" => {
+                    "Click to start a thread; return to the start to close the face".to_owned()
+                }
+                "シェイプモードに切り替えました" => "Shape mode".to_owned(),
+                "元に戻しました" => "Undone".to_owned(),
+                "やり直しました" => "Redone".to_owned(),
+                _ => "Ready".to_owned(),
+            }
+        };
         ui.horizontal_centered(|ui| {
-            ui.label(egui::RichText::new(self.status.clone()).small());
+            ui.label(egui::RichText::new(status).small());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
                     egui::RichText::new(format!("{:.0}%", f64::from(self.view.zoom) * 100.0))
@@ -3957,7 +4004,9 @@ impl App {
         if face_indices.is_empty() {
             ui.add_space(8.0);
             ui.vertical_centered(|ui| {
-                ui.label(egui::RichText::new("選択なし").weak());
+                ui.label(
+                    egui::RichText::new(self.language.text("選択なし", "No selection")).weak(),
+                );
             });
             return;
         }
@@ -6033,6 +6082,16 @@ impl eframe::App for App {
         egui::TopBottomPanel::bottom("statusbar")
             .exact_height(28.0)
             .show(ctx, |ui| self.status_bar(ui));
+        // 編集ツールは中央リーフでキャンバスが前面のときだけ出す。
+        // 試し組みの入力や表示へ被せない。
+        let canvas_is_active = self
+            .dock
+            .find_tab(&DockTab::Canvas)
+            .and_then(|(surface, node, _)| match &self.dock[surface][node] {
+                egui_dock::Node::Leaf(leaf) => leaf.tabs.get(leaf.active.0),
+                _ => None,
+            })
+            .is_some_and(|tab| *tab == DockTab::Canvas);
         // DockState と App の二重借用を避けるため一時的に取り出す
         let mut dock = std::mem::replace(&mut self.dock, DockState::new(vec![DockTab::Canvas]));
         let colors = self.theme_colors();
@@ -6046,6 +6105,24 @@ impl eframe::App for App {
         dock_style.main_surface_border_stroke = Stroke::NONE;
         dock_style.tab_bar.bg_fill = colors.bg1;
         dock_style.tab_bar.hline_color = colors.border;
+        dock_style.tab_bar.height = 32.0;
+        dock_style.tab_bar.inner_margin = egui::Margin::symmetric(4, 3);
+        dock_style.tab_bar.corner_radius = egui::CornerRadius::same(0);
+        dock_style.tab_bar.show_scroll_bar_on_overflow = true;
+        dock_style.tab.spacing = 2.0;
+        dock_style.tab.active.bg_fill = colors.panel;
+        dock_style.tab.active.text_color = colors.text1;
+        dock_style.tab.active.corner_radius = egui::CornerRadius::same(5);
+        dock_style.tab.active.outline_color = colors.border;
+        dock_style.tab.focused = dock_style.tab.active.clone();
+        dock_style.tab.inactive.bg_fill = colors.bg1;
+        dock_style.tab.inactive.text_color = colors.text2;
+        dock_style.tab.inactive.corner_radius = egui::CornerRadius::same(5);
+        dock_style.tab.inactive.outline_color = Color32::TRANSPARENT;
+        dock_style.tab.hovered.bg_fill = colors.panel;
+        dock_style.tab.hovered.text_color = colors.text1;
+        dock_style.tab.hovered.corner_radius = egui::CornerRadius::same(5);
+        dock_style.tab.hovered.outline_color = colors.border;
         dock_style.tab.tab_body.bg_fill = colors.panel;
         dock_style.tab.tab_body.stroke = Stroke::NONE;
         dock_style.tab.tab_body.inner_margin = egui::Margin::same(10);
@@ -6058,7 +6135,9 @@ impl eframe::App for App {
         self.dock = dock;
         // Illustrator と同様、ツールはドックを圧迫せずキャンバス上で移動できる。
         // Area は最後に描画して、ドック内容より常に手前へ出す。
-        self.tool_palette(ctx);
+        if canvas_is_active {
+            self.tool_palette(ctx);
+        }
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
@@ -6079,9 +6158,10 @@ impl TabViewer for AppTabViewer<'_> {
     fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
         let language = self.app.language;
         match tab {
+            DockTab::Project => language.text("プロジェクト", "Project").into(),
             DockTab::Canvas => language.text("キャンバス", "Canvas").into(),
             DockTab::Proof => language.text("試し組み", "Proof").into(),
-            DockTab::Glyphs => language.text("グリフ", "Glyphs").into(),
+            DockTab::Glyphs => language.text("フォント", "Font").into(),
             DockTab::Layers => language.text("レイヤー", "Layers").into(),
             DockTab::Circles => language.text("円", "Pegs").into(),
             DockTab::Properties => language.text("プロパティ", "Properties").into(),
