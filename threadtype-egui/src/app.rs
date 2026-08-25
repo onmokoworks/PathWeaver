@@ -2694,8 +2694,9 @@ impl App {
                     })
                     .collect();
                 let mut switch_to = None;
+                let columns = (((ui.available_width() + 3.0) / 27.0).floor() as usize).max(4);
                 egui::Grid::new("project-glyph-grid")
-                    .num_columns(5)
+                    .num_columns(columns)
                     .spacing(Vec2::new(3.0, 3.0))
                     .show(ui, |ui| {
                         for (position, (index, character, complete)) in
@@ -2703,24 +2704,27 @@ impl App {
                         {
                             let text = if character == ' ' {
                                 "␠".to_owned()
-                            } else if complete {
-                                format!("{character}·")
                             } else {
                                 character.to_string()
                             };
-                            if ui
-                                .add_sized(
-                                    [24.0, 24.0],
-                                    egui::Button::selectable(
-                                        index == self.font_project.active_glyph,
-                                        text,
-                                    ),
-                                )
-                                .clicked()
-                            {
+                            let response = ui.add_sized(
+                                [24.0, 24.0],
+                                egui::Button::selectable(
+                                    index == self.font_project.active_glyph,
+                                    text,
+                                ),
+                            );
+                            if complete {
+                                ui.painter().circle_filled(
+                                    response.rect.right_bottom() - Vec2::new(4.0, 4.0),
+                                    1.5,
+                                    self.theme_colors().accent,
+                                );
+                            }
+                            if response.clicked() {
                                 switch_to = Some(index);
                             }
-                            if position % 5 == 4 {
+                            if position % columns == columns - 1 {
                                 ui.end_row();
                             }
                         }
@@ -3359,7 +3363,16 @@ impl App {
                 })
                 .weak(),
             );
-            ui.add_space(12.0);
+            // 狭い画面では左から自然に並べ、横幅に余裕があるときだけ
+            // ワークスペース切替をウィンドウ中央へ寄せる。
+            let mode_group_width = 126.0;
+            let centered_gap =
+                ui.max_rect().center().x - ui.cursor().left() - mode_group_width * 0.5;
+            if ui.max_rect().width() >= 1280.0 && centered_gap > 12.0 {
+                ui.add_space(centered_gap);
+            } else {
+                ui.add_space(12.0);
+            }
             let shape_selected = self.workspace_mode == WorkspaceMode::Shape;
             if egui_shadcn::button(
                 ui,
@@ -3423,61 +3436,6 @@ impl App {
                     egui::Slider::new(&mut self.custom_radius, 4.0..=120.0).text("新規円 半径"),
                 );
             }
-            ui.separator();
-            if egui_shadcn::button(
-                ui,
-                &shadcn,
-                language.text("保存", "Save"),
-                egui_shadcn::ControlVariant::Primary,
-                egui_shadcn::ControlSize::Sm,
-                true,
-            )
-            .clicked()
-            {
-                match self.workspace_mode {
-                    WorkspaceMode::Shape => self.save_json(),
-                    WorkspaceMode::Font => self.save_font_project(),
-                }
-            }
-            ui.menu_button(language.text("ファイル", "File"), |ui| {
-                if ui.button(language.text("開く…", "Open…")).clicked() {
-                    match self.workspace_mode {
-                        WorkspaceMode::Shape => self.load_json(),
-                        WorkspaceMode::Font => self.load_font_project(),
-                    }
-                    ui.close();
-                }
-                if ui
-                    .button(language.text("SVGを書き出す…", "Export SVG…"))
-                    .clicked()
-                {
-                    self.export_svg();
-                    ui.close();
-                }
-                if self.workspace_mode == WorkspaceMode::Font
-                    && ui
-                        .button(language.text("TTFを書き出す…", "Export TTF…"))
-                        .clicked()
-                {
-                    self.export_font_ttf();
-                    ui.close();
-                }
-                ui.separator();
-                if ui
-                    .button(language.text("ワークスペースを保存…", "Save workspace…"))
-                    .clicked()
-                {
-                    self.save_workspace();
-                    ui.close();
-                }
-                if ui
-                    .button(language.text("ワークスペースを開く…", "Open workspace…"))
-                    .clicked()
-                {
-                    self.load_workspace();
-                    ui.close();
-                }
-            });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.menu_button(language.text("日本語", "English"), |ui| {
                     ui.selectable_value(&mut self.language, UiLanguage::Japanese, "日本語");
@@ -3514,6 +3472,60 @@ impl App {
                 {
                     self.show_circles = !self.show_circles;
                 }
+                if egui_shadcn::button(
+                    ui,
+                    &shadcn,
+                    language.text("保存", "Save"),
+                    egui_shadcn::ControlVariant::Primary,
+                    egui_shadcn::ControlSize::Sm,
+                    true,
+                )
+                .clicked()
+                {
+                    match self.workspace_mode {
+                        WorkspaceMode::Shape => self.save_json(),
+                        WorkspaceMode::Font => self.save_font_project(),
+                    }
+                }
+                ui.menu_button(language.text("ファイル", "File"), |ui| {
+                    if ui.button(language.text("開く…", "Open…")).clicked() {
+                        match self.workspace_mode {
+                            WorkspaceMode::Shape => self.load_json(),
+                            WorkspaceMode::Font => self.load_font_project(),
+                        }
+                        ui.close();
+                    }
+                    if ui
+                        .button(language.text("SVGを書き出す…", "Export SVG…"))
+                        .clicked()
+                    {
+                        self.export_svg();
+                        ui.close();
+                    }
+                    if self.workspace_mode == WorkspaceMode::Font
+                        && ui
+                            .button(language.text("TTFを書き出す…", "Export TTF…"))
+                            .clicked()
+                    {
+                        self.export_font_ttf();
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui
+                        .button(language.text("ワークスペースを保存…", "Save workspace…"))
+                        .clicked()
+                    {
+                        self.save_workspace();
+                        ui.close();
+                    }
+                    if ui
+                        .button(language.text("ワークスペースを開く…", "Open workspace…"))
+                        .clicked()
+                    {
+                        self.load_workspace();
+                        ui.close();
+                    }
+                });
                 if let Some(operation) = &self.save_operation {
                     ui.add_sized(
                         [150.0, 18.0],
