@@ -865,8 +865,14 @@ impl App {
             vec![DockTab::Properties, DockTab::Grid, DockTab::Layers],
         );
         // split_left は画面上の左側（新規ノード）の比率を受け取る。
+        // モックの主比率は Project : Canvas : Inspector ≒ 29 : 46 : 25。
+        // 左を単なる細いナビゲーションにせず、グリフや文書構造を一覧できる
+        // Illustrator 系のプロジェクトパネルとして確保する。
         dock.main_surface_mut()
-            .split_left(center, 0.22, vec![DockTab::Project]);
+            .split_left(center, 0.39, vec![DockTab::Project]);
+        if let Some(location) = dock.find_tab(&DockTab::Layers) {
+            dock.set_active_tab(location);
+        }
         dock
     }
 
@@ -2233,10 +2239,7 @@ impl App {
                 self.undo = std::mem::take(&mut self.shape_undo);
                 self.redo = std::mem::take(&mut self.shape_redo);
                 self.reset_transient_editor();
-                if let Some(location) = self.dock.find_tab(&DockTab::Grid) {
-                    self.dock.set_active_tab(location);
-                }
-                if let Some(location) = self.dock.find_tab(&DockTab::Circles) {
+                if let Some(location) = self.dock.find_tab(&DockTab::Layers) {
                     self.dock.set_active_tab(location);
                 }
                 self.status = "シェイプモードに切り替えました".to_owned();
@@ -2257,7 +2260,13 @@ impl App {
                     }
                 }
                 self.load_active_glyph_session();
-                if let Some(location) = self.dock.find_tab(&DockTab::Glyphs) {
+                // フォント制作へ入った直後は「描く」作業を継続する。試し組みと
+                // フォント設定は隣接タブとして保持するが、モックどおり中央は
+                // Canvas、右はLayersを前面にする。
+                if let Some(location) = self.dock.find_tab(&DockTab::Canvas) {
+                    self.dock.set_active_tab(location);
+                }
+                if let Some(location) = self.dock.find_tab(&DockTab::Layers) {
                     self.dock.set_active_tab(location);
                 }
                 let glyph = &self.font_project.glyphs[self.font_project.active_glyph];
@@ -2698,28 +2707,30 @@ impl App {
                     })
                     .collect();
                 let mut switch_to = None;
-                let columns = (((ui.available_width() + 3.0) / 27.0).floor() as usize).max(4);
-                egui::Grid::new("project-glyph-grid")
-                    .num_columns(columns)
-                    .spacing(Vec2::new(3.0, 3.0))
-                    .show(ui, |ui| {
-                        for (position, (index, character, complete)) in
-                            glyphs.into_iter().enumerate()
-                        {
+                // モックと同じ5列を基準にし、列数を増やして情報密度だけを
+                // 上げない。余白はパネル幅へ均等配分する。
+                let columns = if ui.available_width() < 136.0 { 4 } else { 5 };
+                for row in glyphs.chunks(columns) {
+                    ui.columns(columns, |column_uis| {
+                        for (column, &(index, character, complete)) in row.iter().enumerate() {
                             let text = if character == ' ' {
                                 "␠".to_owned()
                             } else {
                                 character.to_string()
                             };
-                            let response = ui.add_sized(
-                                [24.0, 24.0],
-                                egui::Button::selectable(
-                                    index == self.font_project.active_glyph,
-                                    text,
-                                ),
-                            );
+                            let response = column_uis[column]
+                                .vertical_centered(|ui| {
+                                    ui.add_sized(
+                                        [24.0, 24.0],
+                                        egui::Button::selectable(
+                                            index == self.font_project.active_glyph,
+                                            text,
+                                        ),
+                                    )
+                                })
+                                .inner;
                             if complete {
-                                ui.painter().circle_filled(
+                                column_uis[column].painter().circle_filled(
                                     response.rect.right_bottom() - Vec2::new(4.0, 4.0),
                                     1.5,
                                     self.theme_colors().accent,
@@ -2728,11 +2739,10 @@ impl App {
                             if response.clicked() {
                                 switch_to = Some(index);
                             }
-                            if position % columns == columns - 1 {
-                                ui.end_row();
-                            }
                         }
                     });
+                    ui.add_space(2.0);
+                }
                 if let Some(index) = switch_to {
                     self.switch_glyph(index);
                 }
@@ -3272,9 +3282,17 @@ impl App {
     /// egui_dock のタブ幅制約を受けずに細いまま保てる（Illustrator のツールバー相当）
     fn tool_palette(&mut self, ctx: &egui::Context) {
         let colors = self.theme_colors();
+        let content_rect = ctx.content_rect();
+        // 既定位置は中央キャンバスの左上。固定座標にするとパネル比率や
+        // ウィンドウ幅の変更後にProjectパネルへ食い込むため、モックの
+        // 29:46:25レイアウトを基準に相対配置する。移動後の位置はAreaが保持する。
+        let default_position = Pos2::new(
+            content_rect.left() + content_rect.width() * 0.30 + 14.0,
+            content_rect.top() + 92.0,
+        );
         egui::Area::new(egui::Id::new("tool-palette"))
             .movable(true)
-            .default_pos(Pos2::new(210.0, 76.0))
+            .default_pos(default_position)
             .constrain(true)
             .show(ctx, |ui| {
                 egui::Frame::new()
@@ -3432,7 +3450,7 @@ impl App {
                 &shadcn,
                 language.text("シェイプ", "Shape"),
                 if shape_selected {
-                    egui_shadcn::ControlVariant::Primary
+                    egui_shadcn::ControlVariant::Secondary
                 } else {
                     egui_shadcn::ControlVariant::Ghost
                 },
@@ -3449,7 +3467,7 @@ impl App {
                 &shadcn,
                 language.text("フォント", "Font"),
                 if !shape_selected {
-                    egui_shadcn::ControlVariant::Primary
+                    egui_shadcn::ControlVariant::Secondary
                 } else {
                     egui_shadcn::ControlVariant::Ghost
                 },
@@ -3496,6 +3514,9 @@ impl App {
                     .corner_radius(6)
                     .inner_margin(egui::Margin::same(2))
                     .show(ui, |ui| {
+                        let colors = self.theme_colors();
+                        ui.visuals_mut().selection.bg_fill = colors.bg2;
+                        ui.visuals_mut().selection.stroke.color = colors.text1;
                         ui.spacing_mut().item_spacing.x = 2.0;
                         ui.horizontal(|ui| {
                             if ui
@@ -3565,16 +3586,25 @@ impl App {
                 {
                     self.show_circles = !self.show_circles;
                 }
-                if egui_shadcn::button(
-                    ui,
-                    &shadcn,
-                    language.text("保存", "Save"),
-                    egui_shadcn::ControlVariant::Primary,
-                    egui_shadcn::ControlSize::Sm,
-                    true,
-                )
-                .clicked()
-                {
+                let save_response = ui.add_sized(
+                    [
+                        if language == UiLanguage::Japanese {
+                            44.0
+                        } else {
+                            48.0
+                        },
+                        26.0,
+                    ],
+                    egui::Button::new(
+                        egui::RichText::new(language.text("保存", "Save"))
+                            .color(Color32::WHITE)
+                            .strong(),
+                    )
+                    .fill(self.theme_colors().accent)
+                    .stroke(Stroke::NONE)
+                    .corner_radius(6),
+                );
+                if save_response.clicked() {
                     match self.workspace_mode {
                         WorkspaceMode::Shape => self.save_json(),
                         WorkspaceMode::Font => self.save_font_project(),
@@ -4055,10 +4085,13 @@ impl App {
         }
         ui.separator();
         ui.horizontal(|ui| {
-            if ui
-                .button(language.text("＋ レイヤー", "+ Layer"))
-                .on_hover_text(language.text("空レイヤーを追加", "Add an empty layer"))
-                .clicked()
+            if layer_action_button(
+                ui,
+                LayerActionGlyph::Plus,
+                language.text("レイヤー", "Layer"),
+            )
+            .on_hover_text(language.text("空レイヤーを追加", "Add an empty layer"))
+            .clicked()
             {
                 let snapshot = self.doc.clone();
                 let id = self.doc.allocate_layer_item_id();
@@ -4071,13 +4104,16 @@ impl App {
                 });
                 self.push_history_snapshot(snapshot);
             }
-            if ui
-                .button(language.text("▣ フォルダ", "▣ Folder"))
-                .on_hover_text(language.text(
-                    "選択した面をフォルダへまとめる",
-                    "Group selected shapes in a folder",
-                ))
-                .clicked()
+            if layer_action_button(
+                ui,
+                LayerActionGlyph::Folder,
+                language.text("フォルダ", "Folder"),
+            )
+            .on_hover_text(language.text(
+                "選択した面をフォルダへまとめる",
+                "Group selected shapes in a folder",
+            ))
+            .clicked()
             {
                 let snapshot = self.doc.clone();
                 let id = self.doc.allocate_layer_item_id();
@@ -6503,13 +6539,13 @@ fn tool_icon_button(ui: &mut egui::Ui, active: bool, tool: Tool, tooltip: &str) 
     let visuals = ui.style().interact_selectable(&resp, active);
     if active {
         ui.painter()
-            .rect_filled(rect.shrink(1.0), 6.0, ui.visuals().selection.bg_fill);
+            .rect_filled(rect.shrink(1.0), 6.0, ui.visuals().widgets.active.bg_fill);
     } else if resp.hovered() {
         ui.painter()
             .rect_filled(rect.shrink(1.0), 6.0, visuals.bg_fill);
     }
     let color = if active {
-        ui.visuals().selection.stroke.color
+        ui.visuals().widgets.active.fg_stroke.color
     } else {
         visuals.fg_stroke.color
     };
@@ -6658,6 +6694,75 @@ fn panel_glyph(ui: &mut egui::Ui, glyph: PanelGlyph) -> egui::Response {
             );
         }
     }
+    response
+}
+
+#[derive(Clone, Copy)]
+enum LayerActionGlyph {
+    Plus,
+    Folder,
+}
+
+/// レイヤーパネルの追加操作。記号文字をラベルへ混ぜず、16pxのベクター
+/// アイコンとテキストを一つのボタンとして描く。
+fn layer_action_button(ui: &mut egui::Ui, glyph: LayerActionGlyph, label: &str) -> egui::Response {
+    let font_id = TextStyle::Button.resolve(ui.style());
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), font_id, ui.visuals().text_color());
+    let width = galley.size().x + 38.0;
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 26.0), Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+    });
+    let visuals = ui.style().interact(&response);
+    ui.painter().rect(
+        rect,
+        6.0,
+        visuals.weak_bg_fill,
+        visuals.bg_stroke,
+        egui::StrokeKind::Inside,
+    );
+
+    let icon_center = Pos2::new(rect.left() + 14.0, rect.center().y);
+    let color = visuals.fg_stroke.color;
+    let stroke = Stroke::new(1.35, color);
+    match glyph {
+        LayerActionGlyph::Plus => {
+            ui.painter().line_segment(
+                [
+                    icon_center - Vec2::new(5.0, 0.0),
+                    icon_center + Vec2::new(5.0, 0.0),
+                ],
+                stroke,
+            );
+            ui.painter().line_segment(
+                [
+                    icon_center - Vec2::new(0.0, 5.0),
+                    icon_center + Vec2::new(0.0, 5.0),
+                ],
+                stroke,
+            );
+        }
+        LayerActionGlyph::Folder => {
+            ui.painter().add(egui::Shape::closed_line(
+                vec![
+                    Pos2::new(icon_center.x - 6.5, icon_center.y - 4.0),
+                    Pos2::new(icon_center.x - 1.7, icon_center.y - 4.0),
+                    Pos2::new(icon_center.x + 0.4, icon_center.y - 1.8),
+                    Pos2::new(icon_center.x + 6.5, icon_center.y - 1.8),
+                    Pos2::new(icon_center.x + 6.5, icon_center.y + 4.5),
+                    Pos2::new(icon_center.x - 6.5, icon_center.y + 4.5),
+                ],
+                stroke,
+            ));
+        }
+    }
+    ui.painter().galley(
+        Pos2::new(rect.left() + 27.0, rect.center().y - galley.size().y * 0.5),
+        galley,
+        color,
+    );
     response
 }
 
