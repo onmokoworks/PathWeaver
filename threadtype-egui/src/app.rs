@@ -732,6 +732,7 @@ pub struct App {
     dark_theme: bool,
     language: UiLanguage,
     dock: DockState<DockTab>,
+    pending_panel_tab: Option<DockTab>,
     drag_snapshot: Option<Document>,
     grid_edit_orig: Option<Document>,
     /// 任意円編集中の (id)
@@ -800,6 +801,7 @@ impl App {
             dark_theme: true,
             language: UiLanguage::Japanese,
             dock: App::default_dock_layout(),
+            pending_panel_tab: None,
             drag_snapshot: None,
             grid_edit_orig: None,
             radius_edit_orig: None,
@@ -874,6 +876,19 @@ impl App {
             dock.set_active_tab(location);
         }
         dock
+    }
+
+    fn activate_panel_tab(&mut self, tab: DockTab) {
+        if self.dock.find_tab(&tab).is_none() {
+            if let Some((surface, node, _)) = self.dock.find_tab(&DockTab::Properties) {
+                self.dock[surface][node].append_tab(tab);
+            } else {
+                self.dock.add_window(vec![tab]);
+            }
+        }
+        if let Some(location) = self.dock.find_tab(&tab) {
+            self.dock.set_active_tab(location);
+        }
     }
 
     /// 描画中の Cmd+Z: 最後の巻き付きを解除する。同一円への即時再捕捉だけ
@@ -2710,41 +2725,93 @@ impl App {
                 // モックと同じ5列を基準にし、列数を増やして情報密度だけを
                 // 上げない。余白はパネル幅へ均等配分する。
                 let columns = if ui.available_width() < 136.0 { 4 } else { 5 };
-                for row in glyphs.chunks(columns) {
-                    ui.columns(columns, |column_uis| {
-                        for (column, &(index, character, complete)) in row.iter().enumerate() {
-                            let text = if character == ' ' {
-                                "␠".to_owned()
-                            } else {
-                                character.to_string()
-                            };
-                            let response = column_uis[column]
-                                .vertical_centered(|ui| {
-                                    ui.add_sized(
-                                        [24.0, 24.0],
-                                        egui::Button::selectable(
-                                            index == self.font_project.active_glyph,
-                                            text,
-                                        ),
-                                    )
-                                })
-                                .inner;
-                            if complete {
-                                column_uis[column].painter().circle_filled(
-                                    response.rect.right_bottom() - Vec2::new(4.0, 4.0),
-                                    1.5,
-                                    self.theme_colors().accent,
-                                );
-                            }
-                            if response.clicked() {
-                                switch_to = Some(index);
-                            }
+                let active_glyph = self.font_project.active_glyph;
+                let accent = self.theme_colors().accent;
+                egui::ScrollArea::vertical()
+                    .id_salt("project-glyph-scroll")
+                    .max_height(282.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        for row in glyphs.chunks(columns) {
+                            ui.columns(columns, |column_uis| {
+                                for (column, &(index, character, complete)) in
+                                    row.iter().enumerate()
+                                {
+                                    let text = if character == ' ' {
+                                        "␠".to_owned()
+                                    } else {
+                                        character.to_string()
+                                    };
+                                    let response = column_uis[column]
+                                        .vertical_centered(|ui| {
+                                            ui.add_sized(
+                                                [24.0, 24.0],
+                                                egui::Button::selectable(
+                                                    index == active_glyph,
+                                                    text,
+                                                ),
+                                            )
+                                        })
+                                        .inner;
+                                    if complete {
+                                        column_uis[column].painter().circle_filled(
+                                            response.rect.right_bottom() - Vec2::new(4.0, 4.0),
+                                            1.5,
+                                            accent,
+                                        );
+                                    }
+                                    if response.clicked() {
+                                        switch_to = Some(index);
+                                    }
+                                }
+                            });
+                            ui.add_space(2.0);
                         }
                     });
-                    ui.add_space(2.0);
-                }
                 if let Some(index) = switch_to {
                     self.switch_glyph(index);
+                }
+
+                ui.add_space(6.0);
+                ui.separator();
+                ui.label(
+                    egui::RichText::new(language.text("ドキュメント", "DOCUMENT"))
+                        .size(10.0)
+                        .strong()
+                        .color(self.theme_colors().text3),
+                );
+                for (tab, icon, label, value) in [
+                    (
+                        DockTab::Layers,
+                        PanelGlyph::Layers,
+                        language.text("レイヤー", "Layers"),
+                        (self.doc.faces.len() + self.doc.empty_layers.len()).to_string(),
+                    ),
+                    (
+                        DockTab::Circles,
+                        PanelGlyph::Peg,
+                        language.text("ペグ", "Pegs"),
+                        self.doc.custom_pegs.len().to_string(),
+                    ),
+                ] {
+                    let response = ui
+                        .horizontal(|ui| {
+                            panel_glyph(ui, icon);
+                            let response = ui.selectable_label(false, label);
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        egui::RichText::new(value).color(self.theme_colors().text3),
+                                    );
+                                },
+                            );
+                            response
+                        })
+                        .inner;
+                    if response.clicked() {
+                        self.pending_panel_tab = Some(tab);
+                    }
                 }
             }
         }
@@ -2763,16 +2830,20 @@ impl App {
             }
             return;
         }
-        ui.label(egui::RichText::new(language.text("フォント", "Font")).strong());
-        ui.add(
-            egui::TextEdit::singleline(&mut self.font_project.family_name)
-                .hint_text(language.text("ファミリー名", "Family name")),
+        section_header(ui, language.text("フォント", "Font"));
+        inspector_text_row(
+            ui,
+            language.text("ファミリー", "Family"),
+            &mut self.font_project.family_name,
+            language.text("ファミリー名", "Family name"),
         );
-        ui.add(
-            egui::TextEdit::singleline(&mut self.font_project.style_name)
-                .hint_text(language.text("スタイル名", "Style name")),
+        inspector_text_row(
+            ui,
+            language.text("スタイル", "Style"),
+            &mut self.font_project.style_name,
+            language.text("スタイル名", "Style name"),
         );
-        ui.add_space(8.0);
+        section_header(ui, language.text("グリフ", "Glyph"));
 
         let parameter_speed = if ui.input(|input| input.modifiers.shift) {
             8.0
@@ -2836,6 +2907,7 @@ impl App {
                 });
             });
         }
+        section_header(ui, language.text("オニオンスキン", "Onion skin"));
         ui.horizontal_wrapped(|ui| {
             ui.checkbox(&mut self.onion_skin, language.text("前", "Previous"));
             ui.color_edit_button_srgba(&mut self.onion_previous_color);
@@ -2847,10 +2919,7 @@ impl App {
                 .text(language.text("オニオン透明度", "Onion opacity"))
                 .fixed_decimals(2),
         );
-
-        ui.add_space(6.0);
-        ui.separator();
-        ui.label(egui::RichText::new(language.text("下書きフォント", "Reference font")).strong());
+        section_header(ui, language.text("下書きフォント", "Reference font"));
         ui.horizontal_wrapped(|ui| {
             if ui
                 .button(language.text("Macのフォントを選択…", "Choose Mac font…"))
@@ -2896,10 +2965,7 @@ impl App {
                 }
             });
         }
-
-        ui.add_space(6.0);
-        ui.separator();
-        ui.label(egui::RichText::new(language.text("メトリクス箱", "Font metrics")).strong());
+        section_header(ui, language.text("メトリクス箱", "Font metrics"));
         let metrics = &mut self.font_project.metrics;
         let mut metrics_changed = false;
         metrics_changed |= scrub_value(
@@ -2996,10 +3062,7 @@ impl App {
             .small()
             .color(colors.text2),
         );
-
-        ui.add_space(6.0);
-        ui.separator();
-        ui.label(egui::RichText::new(language.text("グリフを追加", "Add glyph")).strong());
+        section_header(ui, language.text("グリフを追加", "Add glyph"));
         ui.horizontal(|ui| {
             ui.label(language.text("追加", "Character"));
             ui.add_sized(
@@ -3730,9 +3793,21 @@ impl App {
             ui.label(egui::RichText::new(status).small());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
-                    egui::RichText::new(format!("{:.0}%", f64::from(self.view.zoom) * 100.0))
-                        .small()
-                        .monospace(),
+                    egui::RichText::new(if self.language == UiLanguage::Japanese {
+                        format!(
+                            "{:.0}% ・ グリッド {:.0}",
+                            f64::from(self.view.zoom) * 100.0,
+                            self.doc.grid.spacing
+                        )
+                    } else {
+                        format!(
+                            "{:.0}% · Grid {:.0}",
+                            f64::from(self.view.zoom) * 100.0,
+                            self.doc.grid.spacing
+                        )
+                    })
+                    .small()
+                    .monospace(),
                 );
             });
         });
@@ -6319,42 +6394,51 @@ impl App {
             ));
         }
 
-        // 左下: 表示倍率バー
-        egui::Area::new(egui::Id::new("zoom-bar"))
-            .fixed_pos(Pos2::new(rect.left() + 8.0, rect.bottom() - 34.0))
-            .show(&response.ctx, |ui| {
-                egui::Frame::popup(&ui.ctx().style().clone()).show(ui, |ui| {
-                    ui.spacing_mut().slider_width = 120.0;
-                    ui.horizontal(|ui| {
-                        let mut changed = false;
-                        if ui.add(egui::Button::new("−").small()).clicked() {
-                            changed |= self.set_zoom(origin, rect.center(), self.view.zoom * 0.9);
-                        }
-                        let mut pct = f64::from(self.view.zoom) * 100.0;
-                        let resp = ui.add(
-                            egui::Slider::new(&mut pct, 20.0..=400.0)
-                                .suffix("%")
-                                .fixed_decimals(0),
-                        );
-                        if resp.changed() {
-                            changed |= self.set_zoom(origin, rect.center(), (pct / 100.0) as f32);
-                        }
-                        if ui.add(egui::Button::new("＋").small()).clicked() {
-                            changed |= self.set_zoom(origin, rect.center(), self.view.zoom * 1.1);
-                        }
-                        if ui.add(egui::Button::new("100%").small()).clicked()
-                            && (self.view.zoom != 1.0 || self.view.offset != Vec2::ZERO)
-                        {
-                            self.view.zoom = 1.0;
-                            self.view.offset = Vec2::ZERO;
-                            changed = true;
-                        }
-                        if changed {
-                            self.view_overlay_timer = 1.0;
-                        }
+        // 通常時はモックどおり下端を空ける。ズーム操作直後、または左下の
+        // ホットゾーンへポインタを置いたときだけ詳細バーを出す。
+        let zoom_hot_zone = response.hover_pos().is_some_and(|pointer| {
+            pointer.x <= rect.left() + 270.0 && pointer.y >= rect.bottom() - 52.0
+        });
+        if self.view_overlay_timer > 0.0 || zoom_hot_zone {
+            egui::Area::new(egui::Id::new("zoom-bar"))
+                .fixed_pos(Pos2::new(rect.left() + 8.0, rect.bottom() - 34.0))
+                .show(&response.ctx, |ui| {
+                    egui::Frame::popup(&ui.ctx().style().clone()).show(ui, |ui| {
+                        ui.spacing_mut().slider_width = 120.0;
+                        ui.horizontal(|ui| {
+                            let mut changed = false;
+                            if ui.add(egui::Button::new("−").small()).clicked() {
+                                changed |=
+                                    self.set_zoom(origin, rect.center(), self.view.zoom * 0.9);
+                            }
+                            let mut pct = f64::from(self.view.zoom) * 100.0;
+                            let resp = ui.add(
+                                egui::Slider::new(&mut pct, 20.0..=400.0)
+                                    .suffix("%")
+                                    .fixed_decimals(0),
+                            );
+                            if resp.changed() {
+                                changed |=
+                                    self.set_zoom(origin, rect.center(), (pct / 100.0) as f32);
+                            }
+                            if ui.add(egui::Button::new("＋").small()).clicked() {
+                                changed |=
+                                    self.set_zoom(origin, rect.center(), self.view.zoom * 1.1);
+                            }
+                            if ui.add(egui::Button::new("100%").small()).clicked()
+                                && (self.view.zoom != 1.0 || self.view.offset != Vec2::ZERO)
+                            {
+                                self.view.zoom = 1.0;
+                                self.view.offset = Vec2::ZERO;
+                                changed = true;
+                            }
+                            if changed {
+                                self.view_overlay_timer = 1.0;
+                            }
+                        });
                     });
                 });
-            });
+        }
     }
 }
 
@@ -6483,6 +6567,9 @@ impl eframe::App for App {
             .show_leaf_collapse_buttons(false)
             .show(ctx, &mut AppTabViewer { app: self });
         self.dock = dock;
+        if let Some(tab) = self.pending_panel_tab.take() {
+            self.activate_panel_tab(tab);
+        }
         // Illustrator と同様、ツールはドックを圧迫せずキャンバス上で移動できる。
         // Area は最後に描画して、ドック内容より常に手前へ出す。
         if canvas_is_active {
@@ -6536,6 +6623,14 @@ impl TabViewer for AppTabViewer<'_> {
 fn tool_icon_button(ui: &mut egui::Ui, active: bool, tool: Tool, tooltip: &str) -> egui::Response {
     let size = Vec2::new(30.0, 28.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    resp.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::Button,
+            ui.is_enabled(),
+            active,
+            tooltip.lines().next().unwrap_or(tooltip),
+        )
+    });
     let visuals = ui.style().interact_selectable(&resp, active);
     if active {
         ui.painter()
@@ -6828,6 +6923,14 @@ fn align_icon_button(ui: &mut egui::Ui, axis: AlignAxis, tooltip: &str) -> egui:
 fn theme_icon_button(ui: &mut egui::Ui, dark: bool) -> egui::Response {
     let size = Vec2::splat(24.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let accessible_label = if dark {
+        "ライトモードへ"
+    } else {
+        "ダークモードへ"
+    };
+    resp.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), accessible_label)
+    });
     let visuals = ui.style().interact(&resp);
     if resp.hovered() {
         ui.painter()
@@ -6873,6 +6976,9 @@ fn icon_toggle_button(
 ) -> egui::Response {
     let size = Vec2::splat(24.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    resp.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), on, tooltip)
+    });
     if on {
         ui.painter()
             .rect_filled(rect.shrink(1.0), 4.0, ui.visuals().selection.bg_fill);
@@ -6922,9 +7028,33 @@ fn icon_toggle_button(
     resp.on_hover_text(tooltip)
 }
 
+/// インスペクタの文字列行。ラベル列を固定し、入力欄は残り幅を使う。
+fn inspector_text_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut String,
+    hint: &str,
+) -> egui::Response {
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [72.0, 24.0],
+            egui::Label::new(
+                egui::RichText::new(label)
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
+            ),
+        );
+        ui.add_sized(
+            [ui.available_width(), 24.0],
+            egui::TextEdit::singleline(value).hint_text(hint),
+        )
+    })
+    .inner
+}
+
 /// ラベル付きの数値スクラブ入力（デザインモックの scrub-input 相当）。
-/// 左に小さなラベルチップ、右にドラッグで増減できる数値。順序は常に
-/// [ラベル][値] で統一する。value を破壊的に更新し、変更/確定を返す
+/// 左に弱色のラベル、右端に同幅の数値欄を置き、縦に並べたときの軸を揃える。
+/// value を破壊的に更新し、変更/確定を返す。
 fn scrub_value(
     ui: &mut egui::Ui,
     label: &str,
@@ -6933,26 +7063,21 @@ fn scrub_value(
     range: std::ops::RangeInclusive<f64>,
 ) -> egui::Response {
     ui.horizontal(|ui| {
-        let colors_text3 = ui.visuals().weak_text_color();
-        // ラベルチップ
-        egui::Frame::new()
-            .fill(ui.visuals().faint_bg_color)
-            .corner_radius(egui::CornerRadius {
-                nw: 2,
-                sw: 2,
-                ne: 0,
-                se: 0,
-            })
-            .inner_margin(egui::Margin::symmetric(6, 2))
-            .show(ui, |ui| {
-                ui.label(egui::RichText::new(label).color(colors_text3).small());
-            });
-        ui.add(
-            egui::DragValue::new(value)
-                .speed(speed)
-                .range(range)
-                .fixed_decimals(1),
-        )
+        ui.label(
+            egui::RichText::new(label)
+                .small()
+                .color(ui.visuals().weak_text_color()),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add_sized(
+                [76.0, 24.0],
+                egui::DragValue::new(value)
+                    .speed(speed)
+                    .range(range)
+                    .fixed_decimals(1),
+            )
+        })
+        .inner
     })
     .inner
 }
@@ -6960,7 +7085,12 @@ fn scrub_value(
 /// パネル内のセクション見出し（小さめ・弱色 + 下線）
 fn section_header(ui: &mut egui::Ui, text: &str) {
     ui.add_space(2.0);
-    ui.label(egui::RichText::new(text).strong());
+    ui.label(
+        egui::RichText::new(text)
+            .size(11.5)
+            .strong()
+            .color(ui.visuals().text_color().gamma_multiply(0.68)),
+    );
     let sep = ui.visuals().widgets.noninteractive.bg_stroke.color;
     let rect = ui.max_rect();
     let y = ui.cursor().top() + 2.0;
@@ -7489,6 +7619,20 @@ mod tests {
     }
 
     #[test]
+    fn project_document_navigation_opens_and_activates_missing_panel() {
+        let mut app = test_app();
+        assert!(app.dock.find_tab(&DockTab::Circles).is_none());
+
+        app.activate_panel_tab(DockTab::Circles);
+
+        let (surface, node, _) = app.dock.find_tab(&DockTab::Circles).unwrap();
+        let egui_dock::Node::Leaf(leaf) = &app.dock[surface][node] else {
+            panic!("circle panel must open in a leaf");
+        };
+        assert_eq!(leaf.tabs.get(leaf.active.0), Some(&DockTab::Circles));
+    }
+
+    #[test]
     fn workspace_snapshot_contains_shape_and_live_active_glyph() {
         let mut app = test_app();
         app.doc.grid.radius = 41.0;
@@ -7727,6 +7871,7 @@ mod tests {
             draw: None,
             selection: Vec::new(),
             dock: App::default_dock_layout(),
+            pending_panel_tab: None,
             face_editor: None,
             face_name_snapshot: None,
             layer_item_editor: None,
