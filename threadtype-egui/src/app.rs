@@ -485,6 +485,90 @@ struct WorkspaceFile {
     show_circles: bool,
     #[serde(default)]
     language: UiLanguage,
+    #[serde(default)]
+    dock: WorkspaceDockLayout,
+    #[serde(default = "default_proof_text")]
+    proof_text: String,
+    #[serde(default = "default_proof_size")]
+    proof_size: f32,
+    #[serde(default)]
+    proof_tracking: f32,
+    #[serde(default)]
+    onion_skin: bool,
+    #[serde(default)]
+    onion_next: bool,
+    #[serde(default = "default_onion_opacity")]
+    onion_opacity: f32,
+    #[serde(default = "default_onion_previous_color")]
+    onion_previous_color: [u8; 4],
+    #[serde(default = "default_onion_next_color")]
+    onion_next_color: [u8; 4],
+    #[serde(default)]
+    reference_font_path: Option<PathBuf>,
+    #[serde(default)]
+    reference_font_face_index: u32,
+    #[serde(default = "default_reference_font_opacity")]
+    reference_font_opacity: f32,
+    #[serde(default = "default_reference_font_scale")]
+    reference_font_scale: f32,
+    #[serde(default)]
+    reference_font_offset: [f32; 2],
+}
+
+fn default_proof_text() -> String {
+    "Hamburgefontsiv 0123".to_owned()
+}
+
+const fn default_proof_size() -> f32 {
+    64.0
+}
+
+const fn default_onion_opacity() -> f32 {
+    0.42
+}
+
+const fn default_onion_previous_color() -> [u8; 4] {
+    [116, 184, 255, 255]
+}
+
+const fn default_onion_next_color() -> [u8; 4] {
+    [255, 137, 174, 255]
+}
+
+const fn default_reference_font_opacity() -> f32 {
+    0.28
+}
+
+const fn default_reference_font_scale() -> f32 {
+    1.0
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct FloatingDockWindow {
+    tabs: Vec<DockTab>,
+    position: [f32; 2],
+    size: [f32; 2],
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct WorkspaceDockLayout {
+    left_fraction: f32,
+    right_fraction: f32,
+    center_active: Option<DockTab>,
+    inspector_active: Option<DockTab>,
+    floating: Vec<FloatingDockWindow>,
+}
+
+impl Default for WorkspaceDockLayout {
+    fn default() -> Self {
+        Self {
+            left_fraction: 0.29,
+            right_fraction: 0.25,
+            center_active: Some(DockTab::Canvas),
+            inspector_active: Some(DockTab::Layers),
+            floating: Vec::new(),
+        }
+    }
 }
 
 const CURRENT_WORKSPACE_VERSION: u32 = 1;
@@ -509,7 +593,7 @@ enum AlignAxis {
     Bottom,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 enum DockTab {
     Project,
     Canvas,
@@ -595,6 +679,7 @@ struct ReferenceFont {
     name: String,
     data: Vec<u8>,
     face_index: u32,
+    path: PathBuf,
 }
 
 #[derive(Default)]
@@ -742,6 +827,7 @@ pub struct App {
     layer_item_name_snapshot: Option<Document>,
     draw: Option<ActiveDraw>,
     selection: Vec<Selection>,
+    selected_empty_layers: std::collections::HashSet<u64>,
     face_editor: Option<usize>,
     layer_item_editor: Option<u64>,
     tool: Tool,
@@ -810,6 +896,7 @@ impl App {
             layer_item_name_snapshot: None,
             draw: None,
             selection: Vec::new(),
+            selected_empty_layers: std::collections::HashSet::new(),
             face_editor: None,
             layer_item_editor: None,
             tool: Tool::Draw,
@@ -856,14 +943,16 @@ impl App {
         changed
     }
 
-    fn default_dock_layout() -> DockState<DockTab> {
+    fn dock_layout_with_fractions(left: f32, right: f32) -> DockState<DockTab> {
         // 試打はフォントモードでのみキャンバスの兄弟タブとして追加する。
         let mut dock = DockState::new(vec![DockTab::Canvas]);
         // 左はプロジェクト／素材、中央は制作面、右は選択内容のインスペクター。
         // 各タブは egui_dock のドラッグで従来どおり分離できる。
+        let right = right.clamp(0.18, 0.42);
+        let left = left.clamp(0.18, 0.42).min(0.78 - right);
         let [center, _right] = dock.main_surface_mut().split_right(
             NodeIndex::root(),
-            0.75,
+            1.0 - right,
             vec![DockTab::Properties, DockTab::Grid, DockTab::Layers],
         );
         // split_left は画面上の左側（新規ノード）の比率を受け取る。
@@ -871,11 +960,15 @@ impl App {
         // 左を単なる細いナビゲーションにせず、グリフや文書構造を一覧できる
         // Illustrator 系のプロジェクトパネルとして確保する。
         dock.main_surface_mut()
-            .split_left(center, 0.39, vec![DockTab::Project]);
+            .split_left(center, left / (1.0 - right), vec![DockTab::Project]);
         if let Some(location) = dock.find_tab(&DockTab::Layers) {
             dock.set_active_tab(location);
         }
         dock
+    }
+
+    fn default_dock_layout() -> DockState<DockTab> {
+        Self::dock_layout_with_fractions(0.29, 0.25)
     }
 
     fn activate_panel_tab(&mut self, tab: DockTab) {
@@ -889,6 +982,164 @@ impl App {
         if let Some(location) = self.dock.find_tab(&tab) {
             self.dock.set_active_tab(location);
         }
+    }
+
+    fn detach_panel_tab(&mut self, tab: DockTab, content_rect: Rect) -> bool {
+        let Some(location) = self.dock.find_tab(&tab) else {
+            return false;
+        };
+        if !location.0.is_main() || matches!(tab, DockTab::Canvas | DockTab::Proof) {
+            return false;
+        }
+        let size = Vec2::new(
+            340.0_f32.min(content_rect.width() - 32.0).max(260.0),
+            620.0_f32.min(content_rect.height() - 88.0).max(320.0),
+        );
+        let position = Pos2::new(
+            (content_rect.right() - size.x - 18.0).max(content_rect.left() + 18.0),
+            content_rect.top() + 54.0,
+        );
+        self.dock
+            .detach_tab(location, Rect::from_min_size(position, size));
+        true
+    }
+
+    fn restore_workspace_dock(
+        layout: WorkspaceDockLayout,
+        mode: WorkspaceMode,
+    ) -> DockState<DockTab> {
+        let mut dock =
+            Self::dock_layout_with_fractions(layout.left_fraction, layout.right_fraction);
+        match mode {
+            WorkspaceMode::Shape => {
+                for tab in [DockTab::Proof, DockTab::Glyphs] {
+                    if let Some(location) = dock.find_tab(&tab) {
+                        dock.remove_tab(location);
+                    }
+                }
+            }
+            WorkspaceMode::Font => {
+                if dock.find_tab(&DockTab::Proof).is_none() {
+                    if let Some((surface, node, _)) = dock.find_tab(&DockTab::Canvas) {
+                        dock[surface][node].append_tab(DockTab::Proof);
+                    }
+                }
+                if dock.find_tab(&DockTab::Glyphs).is_none() {
+                    if let Some((surface, node, _)) = dock.find_tab(&DockTab::Properties) {
+                        dock[surface][node].append_tab(DockTab::Glyphs);
+                    } else {
+                        dock.add_window(vec![DockTab::Glyphs]);
+                    }
+                }
+            }
+        }
+        for window in layout.floating {
+            let mut tabs = Vec::new();
+            for tab in window.tabs {
+                if matches!(tab, DockTab::Canvas | DockTab::Proof | DockTab::Project) {
+                    continue;
+                }
+                if let Some(location) = dock.find_tab(&tab) {
+                    dock.remove_tab(location);
+                }
+                if !tabs.contains(&tab) {
+                    tabs.push(tab);
+                }
+            }
+            if tabs.is_empty() {
+                continue;
+            }
+            let surface = dock.add_window(tabs);
+            if let Some(state) = dock.get_window_state_mut(surface) {
+                let position = Pos2::new(window.position[0], window.position[1]);
+                let size = Vec2::new(window.size[0].max(260.0), window.size[1].max(220.0));
+                if position.x.is_finite()
+                    && position.y.is_finite()
+                    && size.x.is_finite()
+                    && size.y.is_finite()
+                {
+                    state.set_position(position).set_size(size);
+                }
+            }
+        }
+        for active in [layout.center_active, layout.inspector_active]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(location) = dock.find_tab(&active) {
+                dock.set_active_tab(location);
+            }
+        }
+        dock
+    }
+
+    fn workspace_dock_layout(&self) -> WorkspaceDockLayout {
+        let mut layout = WorkspaceDockLayout::default();
+        let leaf_for = |tab: DockTab| {
+            self.dock
+                .find_tab(&tab)
+                .and_then(|(surface, node, _)| surface.is_main().then_some(node))
+        };
+        let project_node = leaf_for(DockTab::Project);
+        let center_node = leaf_for(DockTab::Canvas);
+        let inspector_node = [DockTab::Properties, DockTab::Grid, DockTab::Layers]
+            .into_iter()
+            .find_map(leaf_for);
+        if let (Some(project), Some(center), Some(inspector)) =
+            (project_node, center_node, inspector_node)
+        {
+            let project_width = self.dock.main_surface()[project]
+                .rect()
+                .map_or(0.0, |rect| rect.width());
+            let center_width = self.dock.main_surface()[center]
+                .rect()
+                .map_or(0.0, |rect| rect.width());
+            let inspector_width = self.dock.main_surface()[inspector]
+                .rect()
+                .map_or(0.0, |rect| rect.width());
+            let total = project_width + center_width + inspector_width;
+            if total.is_finite() && total > 100.0 {
+                layout.left_fraction = project_width / total;
+                layout.right_fraction = inspector_width / total;
+            }
+            if let egui_dock::Node::Leaf(leaf) = &self.dock.main_surface()[center] {
+                layout.center_active = leaf.tabs.get(leaf.active.0).copied();
+            }
+            if let egui_dock::Node::Leaf(leaf) = &self.dock.main_surface()[inspector] {
+                layout.inspector_active = leaf.tabs.get(leaf.active.0).copied();
+            }
+        }
+        layout.floating = self
+            .dock
+            .iter_surfaces()
+            .filter_map(|surface| match surface {
+                egui_dock::Surface::Window(tree, state) => {
+                    let rect = state.rect();
+                    let tabs: Vec<_> = tree
+                        .iter()
+                        .flat_map(|node| node.iter_tabs().copied())
+                        .collect();
+                    let has_valid_rect = rect.min.x.is_finite()
+                        && rect.min.y.is_finite()
+                        && rect.width().is_finite()
+                        && rect.height().is_finite()
+                        && rect.width() >= 1.0
+                        && rect.height() >= 1.0;
+                    let (position, size) = if has_valid_rect {
+                        ([rect.min.x, rect.min.y], [rect.width(), rect.height()])
+                    } else {
+                        ([80.0, 80.0], [340.0, 620.0])
+                    };
+                    (!tabs.is_empty()).then_some(FloatingDockWindow {
+                        tabs,
+                        position,
+                        size,
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+        layout
     }
 
     /// 描画中の Cmd+Z: 最後の巻き付きを解除する。同一円への即時再捕捉だけ
@@ -1050,12 +1301,14 @@ impl App {
 
     fn set_single_selection(&mut self, next: Option<Selection>) {
         self.selection.clear();
+        self.selected_empty_layers.clear();
         if let Some(next) = next {
             self.selection.push(next);
         }
     }
 
     fn toggle_selection(&mut self, target: Selection) {
+        self.selected_empty_layers.clear();
         if let Some(i) = self.selection.iter().position(|sel| *sel == target) {
             self.selection.remove(i);
         } else {
@@ -1096,6 +1349,24 @@ impl App {
 
     fn clear_selection(&mut self) {
         self.selection.clear();
+        self.selected_empty_layers.clear();
+    }
+
+    fn select_empty_layer(&mut self, id: u64, extend: bool) {
+        self.selection.clear();
+        if !extend {
+            self.selected_empty_layers.clear();
+        }
+        if extend && self.selected_empty_layers.contains(&id) {
+            self.selected_empty_layers.remove(&id);
+        } else {
+            self.selected_empty_layers.insert(id);
+        }
+        self.status = if self.language == UiLanguage::Japanese {
+            "空レイヤーを選択しました".to_owned()
+        } else {
+            "Empty layer selected".to_owned()
+        };
     }
 
     fn begin_drag(&mut self, ids: &[u64], anchor: Point, converted: bool) {
@@ -2382,14 +2653,31 @@ impl App {
             dark_theme: self.dark_theme,
             show_circles: self.show_circles,
             language: self.language,
+            dock: self.workspace_dock_layout(),
+            proof_text: self.proof_text.clone(),
+            proof_size: self.proof_size,
+            proof_tracking: self.proof_tracking,
+            onion_skin: self.onion_skin,
+            onion_next: self.onion_next,
+            onion_opacity: self.onion_opacity,
+            onion_previous_color: self.onion_previous_color.to_array(),
+            onion_next_color: self.onion_next_color.to_array(),
+            reference_font_path: self.reference_font.as_ref().map(|font| font.path.clone()),
+            reference_font_face_index: self
+                .reference_font
+                .as_ref()
+                .map_or(0, |font| font.face_index),
+            reference_font_opacity: self.reference_font_opacity,
+            reference_font_scale: self.reference_font_scale,
+            reference_font_offset: [self.reference_font_offset.x, self.reference_font_offset.y],
         }
     }
 
     fn save_workspace(&mut self) {
         let path = self.workspace_save_path.clone().or_else(|| {
             rfd::FileDialog::new()
-                .add_filter("ThreadShape workspace", &["json"])
-                .set_file_name("ThreadShape.workspace.json")
+                .add_filter("ThreadType workspace", &["json"])
+                .set_file_name("ThreadType.workspace.json")
                 .save_file()
         });
         if let Some(path) = path {
@@ -2404,7 +2692,7 @@ impl App {
 
     fn load_workspace(&mut self) {
         let Some(path) = rfd::FileDialog::new()
-            .add_filter("ThreadShape workspace", &["json"])
+            .add_filter("ThreadType workspace", &["json"])
             .pick_file()
         else {
             return;
@@ -2438,6 +2726,34 @@ impl App {
                 self.dark_theme = workspace.dark_theme;
                 self.show_circles = workspace.show_circles;
                 self.language = workspace.language;
+                self.dock = Self::restore_workspace_dock(workspace.dock, self.workspace_mode);
+                self.proof_text = workspace.proof_text;
+                self.proof_size = workspace.proof_size.clamp(20.0, 500.0);
+                self.proof_tracking = workspace.proof_tracking.clamp(-40.0, 120.0);
+                self.onion_skin = workspace.onion_skin;
+                self.onion_next = workspace.onion_next;
+                self.onion_opacity = workspace.onion_opacity.clamp(0.05, 0.9);
+                self.onion_previous_color = Color32::from_rgba_unmultiplied(
+                    workspace.onion_previous_color[0],
+                    workspace.onion_previous_color[1],
+                    workspace.onion_previous_color[2],
+                    workspace.onion_previous_color[3],
+                );
+                self.onion_next_color = Color32::from_rgba_unmultiplied(
+                    workspace.onion_next_color[0],
+                    workspace.onion_next_color[1],
+                    workspace.onion_next_color[2],
+                    workspace.onion_next_color[3],
+                );
+                self.reference_font = workspace.reference_font_path.and_then(|path| {
+                    Self::read_reference_font(path, workspace.reference_font_face_index)
+                });
+                self.reference_font_opacity = workspace.reference_font_opacity.clamp(0.03, 0.8);
+                self.reference_font_scale = workspace.reference_font_scale.clamp(0.25, 2.0);
+                self.reference_font_offset = Vec2::new(
+                    workspace.reference_font_offset[0],
+                    workspace.reference_font_offset[1],
+                );
                 self.shape_undo.clear();
                 self.shape_redo.clear();
                 self.glyph_undo = vec![Vec::new(); self.font_project.glyphs.len()];
@@ -2821,11 +3137,21 @@ impl App {
         let colors = self.theme_colors();
         let language = self.language;
         if self.workspace_mode == WorkspaceMode::Shape {
-            ui.label(egui::RichText::new("フォント制作").size(18.0).strong());
+            ui.label(
+                egui::RichText::new(language.text("フォント制作", "Font workspace"))
+                    .size(18.0)
+                    .strong(),
+            );
             ui.add_space(6.0);
-            ui.label("現在は単体シェイプを整形するモードです。フォントモードでは、シェイプとは独立した a–z・約物のグリフセットを編集できます。");
+            ui.label(language.text(
+                "現在は単体シェイプを整形するモードです。フォントモードでは、シェイプとは独立した a–z・約物のグリフセットを編集できます。",
+                "Shape mode edits a standalone shape. Font mode edits an independent glyph set including letters and punctuation.",
+            ));
             ui.add_space(10.0);
-            if ui.button("フォントモードへ").clicked() {
+            if ui
+                .button(language.text("フォントモードへ", "Open font workspace"))
+                .clicked()
+            {
                 self.switch_workspace_mode(WorkspaceMode::Font);
             }
             return;
@@ -2873,7 +3199,10 @@ impl App {
                         parameter_speed,
                         100.0..=1200.0,
                     )
-                    .on_hover_text("ドラッグで微調整 / Shift+ドラッグで高速")
+                    .on_hover_text(language.text(
+                        "ドラッグで微調整 / Shift+ドラッグで高速",
+                        "Drag to adjust · Shift-drag for larger steps",
+                    ))
                     .changed()
                     {
                         glyph.advance_width = advance.round() as u16;
@@ -2888,7 +3217,10 @@ impl App {
                         parameter_speed,
                         -300.0..=600.0,
                     )
-                    .on_hover_text("グリフを右へ送る余白 / Shift+ドラッグで高速")
+                    .on_hover_text(language.text(
+                        "グリフを右へ送る余白 / Shift+ドラッグで高速",
+                        "Space before the glyph · Shift-drag for larger steps",
+                    ))
                     .changed();
                     let right_changed = scrub_value(
                         ui,
@@ -2897,7 +3229,10 @@ impl App {
                         parameter_speed,
                         -300.0..=600.0,
                     )
-                    .on_hover_text("次の文字までの右余白 / Shift+ドラッグで高速")
+                    .on_hover_text(language.text(
+                        "次の文字までの右余白 / Shift+ドラッグで高速",
+                        "Space after the glyph · Shift-drag for larger steps",
+                    ))
                     .changed();
                     if left_changed || right_changed {
                         glyph.left_side_bearing = left.round() as i16;
@@ -2975,7 +3310,10 @@ impl App {
             parameter_speed,
             -400.0..=1600.0,
         )
-        .on_hover_text("ドラッグで微調整 / Shift+ドラッグで高速")
+        .on_hover_text(language.text(
+            "ドラッグで微調整 / Shift+ドラッグで高速",
+            "Drag to adjust · Shift-drag for larger steps",
+        ))
         .changed();
         metrics_changed |= scrub_value(
             ui,
@@ -2984,7 +3322,10 @@ impl App {
             parameter_speed,
             -400.0..=2000.0,
         )
-        .on_hover_text("フォント全体で共有 / ドラッグで微調整 / Shiftで高速")
+        .on_hover_text(language.text(
+            "フォント全体で共有 / ドラッグで微調整 / Shiftで高速",
+            "Shared across the font · Shift-drag for larger steps",
+        ))
         .changed();
         metrics_changed |= scrub_value(
             ui,
@@ -2993,7 +3334,10 @@ impl App {
             parameter_speed,
             -400.0..=1600.0,
         )
-        .on_hover_text("ドラッグで微調整 / Shift+ドラッグで高速")
+        .on_hover_text(language.text(
+            "ドラッグで微調整 / Shift+ドラッグで高速",
+            "Drag to adjust · Shift-drag for larger steps",
+        ))
         .changed();
         metrics_changed |= scrub_value(
             ui,
@@ -3002,7 +3346,10 @@ impl App {
             parameter_speed,
             -400.0..=1600.0,
         )
-        .on_hover_text("ドラッグで微調整 / Shift+ドラッグで高速")
+        .on_hover_text(language.text(
+            "ドラッグで微調整 / Shift+ドラッグで高速",
+            "Drag to adjust · Shift-drag for larger steps",
+        ))
         .changed();
         metrics_changed |= scrub_value(
             ui,
@@ -3011,7 +3358,10 @@ impl App {
             parameter_speed,
             -400.0..=1600.0,
         )
-        .on_hover_text("ドラッグで微調整 / Shift+ドラッグで高速")
+        .on_hover_text(language.text(
+            "ドラッグで微調整 / Shift+ドラッグで高速",
+            "Drag to adjust · Shift-drag for larger steps",
+        ))
         .changed();
         metrics_changed |= scrub_value(
             ui,
@@ -3020,7 +3370,10 @@ impl App {
             parameter_speed,
             -400.0..=1600.0,
         )
-        .on_hover_text("ドラッグで微調整 / Shift+ドラッグで高速")
+        .on_hover_text(language.text(
+            "ドラッグで微調整 / Shift+ドラッグで高速",
+            "Drag to adjust · Shift-drag for larger steps",
+        ))
         .changed();
         if metrics_changed {
             metrics.origin_x = metrics.origin_x.min(metrics.right_x - 40.0);
@@ -3108,8 +3461,17 @@ impl App {
         if self.workspace_mode != WorkspaceMode::Font {
             ui.centered_and_justified(|ui| {
                 ui.vertical_centered(|ui| {
-                    ui.label(egui::RichText::new("試打はフォントモードで使えます").strong());
-                    if ui.button("フォントモードへ").clicked() {
+                    ui.label(
+                        egui::RichText::new(language.text(
+                            "試し組みはフォントモードで使えます",
+                            "Proof is available in the font workspace",
+                        ))
+                        .strong(),
+                    );
+                    if ui
+                        .button(language.text("フォントモードへ", "Open font workspace"))
+                        .clicked()
+                    {
                         self.switch_workspace_mode(WorkspaceMode::Font);
                     }
                 });
@@ -3345,6 +3707,7 @@ impl App {
     /// egui_dock のタブ幅制約を受けずに細いまま保てる（Illustrator のツールバー相当）
     fn tool_palette(&mut self, ctx: &egui::Context) {
         let colors = self.theme_colors();
+        let language = self.language;
         let content_rect = ctx.content_rect();
         // 既定位置は中央キャンバスの左上。固定座標にするとパネル比率や
         // ウィンドウ幅の変更後にProjectパネルへ食い込むため、モックの
@@ -3391,19 +3754,31 @@ impl App {
                             for (tool, tooltip) in [
                                 (
                                     Tool::Select,
-                                    "選択 (V)\nレイヤー・任意円をクリックで選択、ドラッグで移動",
+                                    language.text(
+                                        "選択 (V)\nレイヤー・任意円をクリックで選択、ドラッグで移動",
+                                        "Selection (V)\nSelect layers or pegs; drag to move",
+                                    ),
                                 ),
                                 (
                                     Tool::DirectSelect,
-                                    "ダイレクト選択 (A)\n構成する円を個別に選択・移動",
+                                    language.text(
+                                        "ダイレクト選択 (A)\n構成する円を個別に選択・移動",
+                                        "Direct selection (A)\nSelect and move construction pegs",
+                                    ),
                                 ),
                                 (
                                     Tool::Draw,
-                                    "描画 (P)\n十字点から線を引き、円に引っ掛けて始点で閉じる",
+                                    language.text(
+                                        "描画 (P)\n十字点から線を引き、円に引っ掛けて始点で閉じる",
+                                        "Draw (P)\nStart at a port, wrap pegs, and close at the start",
+                                    ),
                                 ),
                                 (
                                     Tool::CustomPeg,
-                                    "任意円 (C)\nクリックで円を配置（緑=配置可 / 赤=不可）",
+                                    language.text(
+                                        "任意円 (C)\nクリックで円を配置（緑=配置可 / 赤=不可）",
+                                        "Custom peg (C)\nClick to place; green is valid and red overlaps",
+                                    ),
                                 ),
                             ] {
                                 if tool_icon_button(ui, self.tool == tool, tool, tooltip).clicked()
@@ -3520,7 +3895,10 @@ impl App {
                 egui_shadcn::ControlSize::Sm,
                 true,
             )
-            .on_hover_text("単体のパス／シェイプを制作する独立ワークスペース")
+            .on_hover_text(language.text(
+                "単体のパス／シェイプを制作する独立ワークスペース",
+                "Workspace for a standalone path or shape",
+            ))
             .clicked()
             {
                 self.switch_workspace_mode(WorkspaceMode::Shape);
@@ -3537,7 +3915,10 @@ impl App {
                 egui_shadcn::ControlSize::Sm,
                 true,
             )
-            .on_hover_text("A–Z・a–z・0–9・約物を制作し、フォントとして保存する")
+            .on_hover_text(language.text(
+                "A–Z・a–z・0–9・約物を制作し、フォントとして保存する",
+                "Build letters, numbers, and punctuation, then export a font",
+            ))
             .clicked()
             {
                 self.switch_workspace_mode(WorkspaceMode::Font);
@@ -3558,7 +3939,10 @@ impl App {
                 egui_shadcn::ControlSize::Sm,
                 sel_faces >= 2,
             )
-            .on_hover_text("選択した2つ以上のレイヤーをパス結合する")
+            .on_hover_text(language.text(
+                "選択した2つ以上のレイヤーをパス結合する",
+                "Union two or more selected layers",
+            ))
             .clicked()
             {
                 self.merge_selected();
@@ -3567,7 +3951,8 @@ impl App {
                 ui.separator();
                 ui.add_sized(
                     [190.0, 22.0],
-                    egui::Slider::new(&mut self.custom_radius, 4.0..=120.0).text("新規円 半径"),
+                    egui::Slider::new(&mut self.custom_radius, 4.0..=120.0)
+                        .text(language.text("新規円 半径", "New peg radius")),
                 );
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -3621,10 +4006,31 @@ impl App {
                         ),
                         (DockTab::Grid, language.text("グリッド", "Grid")),
                     ] {
-                        let open = self.dock.find_tab(&tab).is_some();
-                        if ui.add_enabled(!open, egui::Button::new(label)).clicked() {
+                        let location = self.dock.find_tab(&tab);
+                        if location.is_none() && ui.button(label).clicked() {
                             self.dock.add_window(vec![tab]);
                             ui.close();
+                        } else if location.is_some_and(|location| location.0.is_main())
+                            && ui
+                                .button(if language == UiLanguage::Japanese {
+                                    format!("{label}を分離")
+                                } else {
+                                    format!("{label} — Detach")
+                                })
+                                .clicked()
+                        {
+                            let content_rect = ui.ctx().content_rect();
+                            self.detach_panel_tab(tab, content_rect);
+                            ui.close();
+                        } else if location.is_some_and(|location| !location.0.is_main()) {
+                            ui.add_enabled(
+                                false,
+                                egui::Button::new(if language == UiLanguage::Japanese {
+                                    format!("{label}（分離中）")
+                                } else {
+                                    format!("{label} — Floating")
+                                }),
+                            );
                         }
                     }
                     ui.separator();
@@ -3632,11 +4038,24 @@ impl App {
                         .button(language.text("標準レイアウトに戻す", "Reset layout"))
                         .clicked()
                     {
-                        self.dock = Self::default_dock_layout();
+                        self.dock = Self::restore_workspace_dock(
+                            WorkspaceDockLayout::default(),
+                            self.workspace_mode,
+                        );
                         ui.close();
                     }
                 });
-                if theme_icon_button(ui, self.dark_theme).clicked() {
+                if theme_icon_button(
+                    ui,
+                    self.dark_theme,
+                    if self.dark_theme {
+                        language.text("ライトモードへ", "Switch to light mode")
+                    } else {
+                        language.text("ダークモードへ", "Switch to dark mode")
+                    },
+                )
+                .clicked()
+                {
                     self.dark_theme = !self.dark_theme;
                 }
                 if icon_toggle_button(
@@ -3773,22 +4192,89 @@ impl App {
         }
     }
 
-    fn status_bar(&mut self, ui: &mut egui::Ui) {
-        let status = if self.language == UiLanguage::Japanese {
-            self.status.clone()
-        } else if self.status.starts_with("フォントモード:") {
-            self.status.replacen("フォントモード:", "Font mode:", 1)
-        } else {
-            match self.status.as_str() {
-                "クリックで線を引き始め、始点に戻ってクリックで面を閉じます" => {
-                    "Click to start a thread; return to the start to close the face".to_owned()
-                }
-                "シェイプモードに切り替えました" => "Shape mode".to_owned(),
-                "元に戻しました" => "Undone".to_owned(),
-                "やり直しました" => "Redone".to_owned(),
-                _ => "Ready".to_owned(),
+    fn displayed_status(&self) -> String {
+        if self.language == UiLanguage::Japanese {
+            return self.status.clone();
+        }
+        if let Some(rest) = self.status.strip_prefix("フォントモード:") {
+            return format!("Font mode:{rest}");
+        }
+        if let Some(rest) = self.status.strip_prefix("グリフ ") {
+            if let Some(glyph) = rest.strip_suffix(" を編集中") {
+                return format!("Editing glyph {glyph}");
             }
-        };
+            if let Some(glyph) = rest.strip_suffix(" を追加しました") {
+                return format!("Added glyph {glyph}");
+            }
+        }
+        match self.status.as_str() {
+            "クリックで線を引き始め、始点に戻ってクリックで面を閉じます" => {
+                "Click to start a thread; return to the start to close the face"
+            }
+            "直前の引っ掛かりを解除しました" => "Removed the last wrap",
+            "解除できる引っ掛かりがありません" => "No wrap to remove",
+            "元に戻しました" => "Undone",
+            "やり直しました" => "Redone",
+            "描画中は削除できません" => "Finish drawing before deleting",
+            "削除対象がありません" => "Nothing to delete",
+            "参照中の円は削除できません" => "A peg used by a shape cannot be deleted",
+            "グリフをクリアしました" => "Glyph cleared",
+            "整列するレイヤーを2つ以上選んでください" => {
+                "Select at least two layers to align"
+            }
+            "レイヤーを整列しました（グリッド単位）" => {
+                "Layers aligned to the grid"
+            }
+            "整列対象はすでに同じ位置です" => {
+                "The selected layers are already aligned"
+            }
+            "マージするレイヤーを2つ以上選んでください" => {
+                "Select at least two layers to merge"
+            }
+            "マージできませんでした" => "The selected layers could not be merged",
+            "レイヤーをマージしました" => "Layers merged",
+            "保存処理が進行中です" => "A save is already in progress",
+            "シェイプモードに切り替えました" => "Shape mode",
+            "ワークスペースを読み込みました" => "Workspace loaded",
+            "未対応バージョンのワークスペースです" => {
+                "Unsupported workspace version"
+            }
+            "下書きフォントを解除しました" => "Reference font removed",
+            "フォントメトリクスを変更しました" => "Font metrics updated",
+            "空レイヤーを追加しました" => "Empty layer added",
+            "フォルダを追加しました" => "Folder added",
+            "選択中のレイヤーを表示" => "Selected layers shown",
+            "選択中のレイヤーを非表示" => "Selected layers hidden",
+            "任意円を変更しました" => "Custom peg updated",
+            "無効化したグリッド円を戻しました" => "Disabled grid pegs restored",
+            "グリッド変更のため描画中の線をキャンセルしました" => {
+                "Drawing cancelled after a grid change"
+            }
+            "円同士が重ならない安全な半径へ自動調整しました" => {
+                "Radius clamped to prevent overlapping pegs"
+            }
+            "メトリクスガイドを移動しました" => "Metric guide moved",
+            "移動を取り消しました" => "Move cancelled",
+            "任意円を移動しました" => "Custom peg moved",
+            "描画をキャンセルしました" => "Drawing cancelled",
+            "選択していません" => "Nothing selected",
+            "任意円を配置しました" => "Custom peg added",
+            "この位置には配置できません（重なり）" => {
+                "A peg cannot be placed here because it overlaps"
+            }
+            "外周線を閉じてレイヤーを確定しました" => {
+                "Closed the outline and created a layer"
+            }
+            "Pin を追加しました" => "Pin added",
+            // Status produced while already in English is kept verbatim. Unknown
+            // legacy Japanese messages are also kept instead of lying with “Ready”.
+            other => other,
+        }
+        .to_owned()
+    }
+
+    fn status_bar(&mut self, ui: &mut egui::Ui) {
+        let status = self.displayed_status();
         ui.horizontal_centered(|ui| {
             ui.label(egui::RichText::new(status).small());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -3840,6 +4326,67 @@ impl App {
         self.layer_item_editor = None;
     }
 
+    fn add_empty_layer(&mut self) -> u64 {
+        let snapshot = self.doc.clone();
+        let id = self.doc.allocate_layer_item_id();
+        let number = self.doc.empty_layers.len() + self.doc.faces.len() + 1;
+        self.doc.empty_layers.push(EmptyLayer {
+            id,
+            name: format!("{} {number}", self.language.text("レイヤー", "Layer")),
+            visible: true,
+            folder_id: None,
+        });
+        self.push_history_snapshot(snapshot);
+        self.selection.clear();
+        self.selected_empty_layers.clear();
+        self.selected_empty_layers.insert(id);
+        self.status = self
+            .language
+            .text("空レイヤーを追加しました", "Empty layer added")
+            .to_owned();
+        id
+    }
+
+    fn add_layer_folder(&mut self) -> u64 {
+        let snapshot = self.doc.clone();
+        let id = self.doc.allocate_layer_item_id();
+        let mut face_indices: Vec<usize> = self
+            .selection
+            .iter()
+            .filter_map(|selection| match selection {
+                Selection::Face(index) => Some(*index),
+                _ => None,
+            })
+            .collect();
+        face_indices.sort_unstable();
+        face_indices.dedup();
+        for folder in &mut self.doc.layer_folders {
+            folder
+                .face_indices
+                .retain(|index| !face_indices.contains(index));
+        }
+        for layer in &mut self.doc.empty_layers {
+            if self.selected_empty_layers.contains(&layer.id) {
+                layer.folder_id = Some(id);
+            }
+        }
+        let number = self.doc.layer_folders.len() + 1;
+        self.doc.layer_folders.push(LayerFolder {
+            id,
+            name: format!("{} {number}", self.language.text("フォルダ", "Folder")),
+            visible: true,
+            expanded: true,
+            face_indices,
+        });
+        self.push_history_snapshot(snapshot);
+        self.clear_selection();
+        self.status = self
+            .language
+            .text("フォルダを追加しました", "Folder added")
+            .to_owned();
+        id
+    }
+
     fn render_layers_tab(&mut self, ui: &mut egui::Ui) {
         let language = self.language;
         let shift = ui.input(|i| i.modifiers.shift);
@@ -3849,6 +4396,7 @@ impl App {
         let mut remove_folder: Option<u64> = None;
         let mut remove_empty: Option<u64> = None;
         let mut toggle_empty_visibility: Option<u64> = None;
+        let mut select_empty_layer: Option<u64> = None;
         let mut begin_layer_item_edit: Option<u64> = None;
         let mut commit_layer_item_edit = false;
         let grouped_faces: std::collections::HashSet<usize> = self
@@ -3918,25 +4466,70 @@ impl App {
                             if face_idx >= self.doc.faces.len() {
                                 continue;
                             }
-                            ui.horizontal(|ui| {
+                            let selected = self.is_selected(Selection::Face(face_idx));
+                            let editing = self.face_editor == Some(face_idx);
+                            let name = if self.doc.faces[face_idx].name.is_empty() {
+                                format!("{} {}", language.text("レイヤー", "Layer"), face_idx + 1)
+                            } else {
+                                self.doc.faces[face_idx].name.clone()
+                            };
+                            row_frame(ui, selected, |ui| {
                                 ui.add_space(18.0);
-                                let selected = self.is_selected(Selection::Face(face_idx));
-                                let name = if self.doc.faces[face_idx].name.is_empty() {
-                                    format!(
-                                        "{} {}",
-                                        language.text("レイヤー", "Layer"),
-                                        face_idx + 1
-                                    )
-                                } else {
-                                    self.doc.faces[face_idx].name.clone()
-                                };
-                                if ui.selectable_label(selected, name).clicked() {
-                                    if shift {
-                                        self.toggle_selection(Selection::Face(face_idx));
-                                    } else {
-                                        self.set_single_selection(Some(Selection::Face(face_idx)));
-                                    }
+                                let visible = self.doc.faces[face_idx].visible;
+                                if eye_button(ui, visible).clicked() {
+                                    let snapshot = self.doc.clone();
+                                    self.doc.faces[face_idx].visible = !visible;
+                                    self.push_history_snapshot(snapshot);
                                 }
+                                self.face_preview_widget(ui, face_idx, 20.0);
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if delete_button(ui).clicked() {
+                                            remove_face = Some(face_idx);
+                                        }
+                                        let width = ui.available_width();
+                                        if editing {
+                                            let response = ui.add_sized(
+                                                [width, 22.0],
+                                                egui::TextEdit::singleline(
+                                                    &mut self.doc.faces[face_idx].name,
+                                                ),
+                                            );
+                                            if response.lost_focus() {
+                                                self.commit_face_name_edit();
+                                            }
+                                            response.request_focus();
+                                        } else {
+                                            let text = if selected {
+                                                egui::RichText::new(name)
+                                                    .color(ui.visuals().strong_text_color())
+                                            } else {
+                                                egui::RichText::new(name)
+                                            };
+                                            let response = ui.add_sized(
+                                                [width, 22.0],
+                                                egui::Label::new(text)
+                                                    .sense(Sense::click())
+                                                    .selectable(false),
+                                            );
+                                            if response.clicked() {
+                                                if shift {
+                                                    self.toggle_selection(Selection::Face(
+                                                        face_idx,
+                                                    ));
+                                                } else {
+                                                    self.set_single_selection(Some(
+                                                        Selection::Face(face_idx),
+                                                    ));
+                                                }
+                                            }
+                                            if response.double_clicked() {
+                                                self.begin_face_edit(face_idx);
+                                            }
+                                        }
+                                    },
+                                );
                             });
                         }
                         let folder_empty_layers: Vec<_> = self
@@ -3947,37 +4540,60 @@ impl App {
                             .cloned()
                             .collect();
                         for empty in folder_empty_layers {
-                            ui.horizontal(|ui| {
+                            let selected = self.selected_empty_layers.contains(&empty.id);
+                            row_frame(ui, selected, |ui| {
                                 ui.add_space(18.0);
+                                if eye_button(ui, empty.visible).clicked() {
+                                    toggle_empty_visibility = Some(empty.id);
+                                }
                                 panel_glyph(ui, PanelGlyph::EmptyLayer);
-                                if self.layer_item_editor == Some(empty.id) {
-                                    if let Some(target) = self
-                                        .doc
-                                        .empty_layers
-                                        .iter_mut()
-                                        .find(|target| target.id == empty.id)
-                                    {
-                                        let response = ui.add_sized(
-                                            [ui.available_width() - 24.0, 22.0],
-                                            egui::TextEdit::singleline(&mut target.name),
-                                        );
-                                        response.request_focus();
-                                        if response.lost_focus()
-                                            || ui.input(|input| input.key_pressed(Key::Enter))
-                                        {
-                                            commit_layer_item_edit = true;
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if delete_button(ui).clicked() {
+                                            remove_empty = Some(empty.id);
                                         }
-                                    }
-                                } else {
-                                    let response =
-                                        ui.add(egui::Label::new(&empty.name).sense(Sense::click()));
-                                    if response.double_clicked() {
-                                        begin_layer_item_edit = Some(empty.id);
-                                    }
-                                }
-                                if delete_button(ui).clicked() {
-                                    remove_empty = Some(empty.id);
-                                }
+                                        let width = ui.available_width();
+                                        if self.layer_item_editor == Some(empty.id) {
+                                            if let Some(target) = self
+                                                .doc
+                                                .empty_layers
+                                                .iter_mut()
+                                                .find(|target| target.id == empty.id)
+                                            {
+                                                let response = ui.add_sized(
+                                                    [width, 22.0],
+                                                    egui::TextEdit::singleline(&mut target.name),
+                                                );
+                                                response.request_focus();
+                                                if response.lost_focus()
+                                                    || ui.input(|input| {
+                                                        input.key_pressed(Key::Enter)
+                                                    })
+                                                {
+                                                    commit_layer_item_edit = true;
+                                                }
+                                            }
+                                        } else {
+                                            let text = if selected {
+                                                egui::RichText::new(&empty.name)
+                                                    .color(ui.visuals().strong_text_color())
+                                            } else {
+                                                egui::RichText::new(&empty.name)
+                                            };
+                                            let response = ui.add_sized(
+                                                [width, 22.0],
+                                                egui::Label::new(text).sense(Sense::click()),
+                                            );
+                                            if response.clicked() {
+                                                select_empty_layer = Some(empty.id);
+                                            }
+                                            if response.double_clicked() {
+                                                begin_layer_item_edit = Some(empty.id);
+                                            }
+                                        }
+                                    },
+                                );
                             });
                         }
                     }
@@ -4053,7 +4669,8 @@ impl App {
                     .cloned()
                     .collect();
                 for empty in root_empty_layers {
-                    row_frame(ui, false, |ui| {
+                    let selected = self.selected_empty_layers.contains(&empty.id);
+                    row_frame(ui, selected, |ui| {
                         if eye_button(ui, empty.visible).clicked() {
                             toggle_empty_visibility = Some(empty.id);
                         }
@@ -4082,10 +4699,19 @@ impl App {
                                     }
                                 }
                             } else {
+                                let text = if selected {
+                                    egui::RichText::new(&empty.name)
+                                        .color(ui.visuals().strong_text_color())
+                                } else {
+                                    egui::RichText::new(&empty.name)
+                                };
                                 let response = ui.add_sized(
                                     [width, 22.0],
-                                    egui::Label::new(&empty.name).sense(Sense::click()),
+                                    egui::Label::new(text).sense(Sense::click()),
                                 );
+                                if response.clicked() {
+                                    select_empty_layer = Some(empty.id);
+                                }
                                 if response.double_clicked() {
                                     begin_layer_item_edit = Some(empty.id);
                                 }
@@ -4094,6 +4720,9 @@ impl App {
                     });
                 }
             });
+        if let Some(id) = select_empty_layer {
+            self.select_empty_layer(id, shift);
+        }
         if let Some(id) = begin_layer_item_edit {
             self.begin_layer_item_edit(id);
         }
@@ -4128,6 +4757,11 @@ impl App {
                         face.visible = folder.visible;
                     }
                 }
+                for layer in &mut self.doc.empty_layers {
+                    if layer.folder_id == Some(folder.id) {
+                        layer.visible = folder.visible;
+                    }
+                }
                 self.push_history_snapshot(snapshot);
             }
         }
@@ -4144,6 +4778,7 @@ impl App {
         if let Some(id) = remove_empty {
             let snapshot = self.doc.clone();
             self.doc.empty_layers.retain(|layer| layer.id != id);
+            self.selected_empty_layers.remove(&id);
             self.push_history_snapshot(snapshot);
         }
         if let Some(id) = toggle_empty_visibility {
@@ -4168,16 +4803,7 @@ impl App {
             .on_hover_text(language.text("空レイヤーを追加", "Add an empty layer"))
             .clicked()
             {
-                let snapshot = self.doc.clone();
-                let id = self.doc.allocate_layer_item_id();
-                let number = self.doc.empty_layers.len() + self.doc.faces.len() + 1;
-                self.doc.empty_layers.push(EmptyLayer {
-                    id,
-                    name: format!("{} {number}", language.text("レイヤー", "Layer")),
-                    visible: true,
-                    folder_id: None,
-                });
-                self.push_history_snapshot(snapshot);
+                self.add_empty_layer();
             }
             if layer_action_button(
                 ui,
@@ -4185,37 +4811,12 @@ impl App {
                 language.text("フォルダ", "Folder"),
             )
             .on_hover_text(language.text(
-                "選択した面をフォルダへまとめる",
-                "Group selected shapes in a folder",
+                "選択したレイヤーをフォルダへまとめる",
+                "Group selected layers in a folder",
             ))
             .clicked()
             {
-                let snapshot = self.doc.clone();
-                let id = self.doc.allocate_layer_item_id();
-                let mut face_indices: Vec<usize> = self
-                    .selection
-                    .iter()
-                    .filter_map(|selection| match selection {
-                        Selection::Face(index) => Some(*index),
-                        _ => None,
-                    })
-                    .collect();
-                face_indices.sort_unstable();
-                face_indices.dedup();
-                for folder in &mut self.doc.layer_folders {
-                    folder
-                        .face_indices
-                        .retain(|index| !face_indices.contains(index));
-                }
-                let number = self.doc.layer_folders.len() + 1;
-                self.doc.layer_folders.push(LayerFolder {
-                    id,
-                    name: format!("{} {number}", language.text("フォルダ", "Folder")),
-                    visible: true,
-                    expanded: true,
-                    face_indices,
-                });
-                self.push_history_snapshot(snapshot);
+                self.add_layer_folder();
             }
         });
     }
@@ -4458,12 +5059,12 @@ impl App {
                 let mut bevel = self.doc.faces[face_idx].baked.as_ref().unwrap().bevel;
                 let resp = ui
                     .add(
-                        egui::Slider::new(&mut bevel, 0.0..=200.0)
+                        egui::Slider::new(&mut bevel, 0.0..=1000.0)
                             .text(language.text("丸ベベル", "Round bevel")),
                     )
                     .on_hover_text(language.text(
-                        "最大200。実際の丸みは各辺長の49%まで安全に制限されます",
-                        "Maximum 200; each corner is limited to 49% of its adjacent edges",
+                        "最大1000。実際の丸みは各辺長の49%まで安全に制限されます",
+                        "Maximum 1000; each corner is limited to 49% of its adjacent edges",
                     ));
                 if resp.changed() {
                     if self.bevel_edit_orig.is_none() {
@@ -4504,7 +5105,7 @@ impl App {
             );
             if ENABLE_EXPERIMENTAL_SQUARE_PEGS {
                 ui.horizontal(|ui| {
-                    ui.label("ピン形状");
+                    ui.label(language.text("ピン形状", "Peg shape"));
                     ui.radio_value(
                         &mut self.doc.peg_appearance.shape,
                         crate::model::PegShape::Circle,
@@ -4519,7 +5120,7 @@ impl App {
                 if self.doc.peg_appearance.shape == crate::model::PegShape::RoundedSquare {
                     ui.add(
                         egui::Slider::new(&mut self.doc.peg_appearance.rounding, 0.0..=100.0)
-                            .text("角のラウンド"),
+                            .text(language.text("角のラウンド", "Corner roundness")),
                     );
                 }
             }
@@ -4691,6 +5292,29 @@ impl App {
         }
     }
 
+    fn read_reference_font(path: PathBuf, preferred_face_index: u32) -> Option<ReferenceFont> {
+        let data = std::fs::read(&path).ok()?;
+        let face_count = ttf_parser::fonts_in_collection(&data).unwrap_or(1);
+        let face_index = if preferred_face_index < face_count
+            && ttf_parser::Face::parse(&data, preferred_face_index).is_ok()
+        {
+            preferred_face_index
+        } else {
+            (0..face_count).find(|index| ttf_parser::Face::parse(&data, *index).is_ok())?
+        };
+        let name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("Font")
+            .to_owned();
+        Some(ReferenceFont {
+            name,
+            data,
+            face_index,
+            path,
+        })
+    }
+
     fn choose_reference_font(&mut self) {
         let mut dialog =
             rfd::FileDialog::new().add_filter("OpenType font", &["ttf", "otf", "ttc", "otc"]);
@@ -4698,29 +5322,15 @@ impl App {
         let Some(path) = dialog.pick_file() else {
             return;
         };
-        match std::fs::read(&path) {
-            Ok(data) => {
-                let face_count = ttf_parser::fonts_in_collection(&data).unwrap_or(1);
-                let face_index =
-                    (0..face_count).find(|index| ttf_parser::Face::parse(&data, *index).is_ok());
-                if let Some(face_index) = face_index {
-                    let name = path
-                        .file_name()
-                        .and_then(|value| value.to_str())
-                        .unwrap_or("Font")
-                        .to_owned();
-                    self.reference_font = Some(ReferenceFont {
-                        name: name.clone(),
-                        data,
-                        face_index,
-                    });
-                    self.reference_font_offset = Vec2::ZERO;
-                    self.status = format!("{name} を下書きに設定しました");
-                } else {
-                    self.status = "このフォントの輪郭を読み取れませんでした".to_owned();
-                }
-            }
-            Err(error) => self.status = format!("フォントを開けません: {error}"),
+        if let Some(font) = Self::read_reference_font(path.clone(), 0) {
+            let name = font.name.clone();
+            self.reference_font = Some(font);
+            self.reference_font_offset = Vec2::ZERO;
+            self.status = format!("{name} を下書きに設定しました");
+        } else if path.exists() {
+            self.status = "このフォントの輪郭を読み取れませんでした".to_owned();
+        } else {
+            self.status = "フォントを開けません".to_owned();
         }
     }
 
@@ -6920,16 +7530,11 @@ fn align_icon_button(ui: &mut egui::Ui, axis: AlignAxis, tooltip: &str) -> egui:
 }
 
 /// テーマ切替アイコン（月/太陽）
-fn theme_icon_button(ui: &mut egui::Ui, dark: bool) -> egui::Response {
+fn theme_icon_button(ui: &mut egui::Ui, dark: bool, tooltip: &str) -> egui::Response {
     let size = Vec2::splat(24.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-    let accessible_label = if dark {
-        "ライトモードへ"
-    } else {
-        "ダークモードへ"
-    };
     resp.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), accessible_label)
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), tooltip)
     });
     let visuals = ui.style().interact(&resp);
     if resp.hovered() {
@@ -6954,11 +7559,7 @@ fn theme_icon_button(ui: &mut egui::Ui, dark: bool) -> egui::Response {
         p.circle_filled(c, 6.0, color);
         p.circle_filled(Pos2::new(c.x + 3.0, c.y - 2.2), 5.4, bg);
     }
-    resp.on_hover_text(if dark {
-        "ライトモードへ"
-    } else {
-        "ダークモードへ"
-    })
+    resp.on_hover_text(tooltip)
 }
 
 #[derive(Clone, Copy)]
@@ -7108,8 +7709,25 @@ fn row_frame<R>(ui: &mut egui::Ui, selected: bool, add: impl FnOnce(&mut egui::U
     let (bg_rect, _) = ui.allocate_exact_size(Vec2::new(full_w, 26.0), Sense::hover());
     let hovered = ui.rect_contains_pointer(bg_rect);
     if selected {
-        ui.painter()
-            .rect_filled(bg_rect, 5.0, ui.visuals().selection.bg_fill);
+        let selected_fill = if ui.visuals().dark_mode {
+            Color32::from_rgb(38, 54, 82)
+        } else {
+            Color32::from_rgb(219, 234, 254)
+        };
+        let accent = if ui.visuals().dark_mode {
+            Color32::from_rgb(10, 132, 255)
+        } else {
+            Color32::from_rgb(0, 122, 255)
+        };
+        ui.painter().rect_filled(bg_rect, 5.0, selected_fill);
+        ui.painter().rect_filled(
+            Rect::from_min_max(
+                bg_rect.left_top(),
+                Pos2::new(bg_rect.left() + 2.0, bg_rect.bottom()),
+            ),
+            1.0,
+            accent,
+        );
     } else if hovered {
         ui.painter().rect_filled(
             bg_rect,
@@ -7633,11 +8251,82 @@ mod tests {
     }
 
     #[test]
+    fn panel_command_detaches_layers_into_a_window() {
+        let mut app = test_app();
+        assert!(app.detach_panel_tab(
+            DockTab::Layers,
+            Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 900.0)),
+        ));
+        let (surface, _, _) = app.dock.find_tab(&DockTab::Layers).unwrap();
+        assert!(!surface.is_main());
+        assert!(!app.detach_panel_tab(
+            DockTab::Layers,
+            Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 900.0)),
+        ));
+    }
+
+    #[test]
+    fn workspace_round_trip_restores_detached_panel_layout() {
+        let mut app = test_app();
+        app.detach_panel_tab(
+            DockTab::Layers,
+            Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 900.0)),
+        );
+
+        let json = serde_json::to_string(&app.workspace_snapshot()).unwrap();
+        let workspace: WorkspaceFile = serde_json::from_str(&json).unwrap();
+        let dock = App::restore_workspace_dock(workspace.dock, workspace.mode);
+        let (surface, _, _) = dock.find_tab(&DockTab::Layers).unwrap();
+        assert!(!surface.is_main());
+    }
+
+    #[test]
+    fn restored_font_layout_keeps_proof_and_font_inspector() {
+        let dock = App::restore_workspace_dock(WorkspaceDockLayout::default(), WorkspaceMode::Font);
+        assert!(dock.find_tab(&DockTab::Proof).is_some());
+        assert!(dock.find_tab(&DockTab::Glyphs).is_some());
+    }
+
+    #[test]
+    fn english_status_describes_actions_instead_of_falling_back_to_ready() {
+        let mut app = test_app();
+        app.language = UiLanguage::English;
+        app.status = "レイヤーをマージしました".to_owned();
+        assert_eq!(app.displayed_status(), "Layers merged");
+        app.status = "グリフ A を編集中".to_owned();
+        assert_eq!(app.displayed_status(), "Editing glyph A");
+    }
+
+    #[test]
+    fn empty_layers_can_be_selected_and_grouped_into_a_folder() {
+        let mut app = test_app();
+        let first = app.add_empty_layer();
+        let second = app.add_empty_layer();
+
+        app.select_empty_layer(first, false);
+        app.select_empty_layer(second, true);
+        let folder_id = app.add_layer_folder();
+
+        assert_eq!(app.doc.layer_folders.len(), 1);
+        assert!(app.selected_empty_layers.is_empty());
+        assert!(app
+            .doc
+            .empty_layers
+            .iter()
+            .all(|layer| layer.folder_id == Some(folder_id)));
+    }
+
+    #[test]
     fn workspace_snapshot_contains_shape_and_live_active_glyph() {
         let mut app = test_app();
         app.doc.grid.radius = 41.0;
         app.switch_workspace_mode(WorkspaceMode::Font);
         app.doc.grid.radius = 27.0;
+        app.proof_text = "AV test".to_owned();
+        app.proof_size = 132.0;
+        app.proof_tracking = 14.0;
+        app.onion_skin = true;
+        app.onion_opacity = 0.31;
 
         let snapshot = app.workspace_snapshot();
         assert_eq!(snapshot.shape.grid.radius, 41.0);
@@ -7652,6 +8341,41 @@ mod tests {
         let decoded: WorkspaceFile = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded.mode, WorkspaceMode::Font);
         assert_eq!(decoded.shape.grid.radius, 41.0);
+        assert_eq!(decoded.proof_text, "AV test");
+        assert_eq!(decoded.proof_size, 132.0);
+        assert_eq!(decoded.proof_tracking, 14.0);
+        assert!(decoded.onion_skin);
+        assert_eq!(decoded.onion_opacity, 0.31);
+    }
+
+    #[test]
+    fn legacy_workspace_defaults_new_editor_settings() {
+        let app = test_app();
+        let mut value = serde_json::to_value(app.workspace_snapshot()).unwrap();
+        let object = value.as_object_mut().unwrap();
+        for key in [
+            "dock",
+            "proof_text",
+            "proof_size",
+            "proof_tracking",
+            "onion_skin",
+            "onion_next",
+            "onion_opacity",
+            "onion_previous_color",
+            "onion_next_color",
+            "reference_font_path",
+            "reference_font_face_index",
+            "reference_font_opacity",
+            "reference_font_scale",
+            "reference_font_offset",
+        ] {
+            object.remove(key);
+        }
+        let restored: WorkspaceFile = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.proof_text, default_proof_text());
+        assert_eq!(restored.proof_size, default_proof_size());
+        assert_eq!(restored.dock.left_fraction, 0.29);
+        assert_eq!(restored.reference_font_scale, 1.0);
     }
 
     #[test]
@@ -7870,6 +8594,7 @@ mod tests {
             bevel_edit_orig: None,
             draw: None,
             selection: Vec::new(),
+            selected_empty_layers: std::collections::HashSet::new(),
             dock: App::default_dock_layout(),
             pending_panel_tab: None,
             face_editor: None,

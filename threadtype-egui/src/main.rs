@@ -12,7 +12,7 @@ fn main() -> eframe::Result<()> {
     std::panic::set_hook(Box::new(move |info| {
         let backtrace = std::backtrace::Backtrace::force_capture();
         let msg = format!("{info}\n\n{backtrace}\n");
-        let _ = std::fs::write("/tmp/threadshape-panic.log", &msg);
+        let _ = std::fs::write("/tmp/threadtype-panic.log", &msg);
         default_hook(info);
     }));
 
@@ -20,11 +20,11 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1320.0, 900.0])
             .with_min_inner_size([900.0, 620.0])
-            .with_title("ThreadShape"),
+            .with_title("ThreadType"),
         ..Default::default()
     };
     eframe::run_native(
-        "ThreadShape",
+        "ThreadType",
         options,
         Box::new(|cc| Ok(Box::new(app::App::new(cc)))),
     )
