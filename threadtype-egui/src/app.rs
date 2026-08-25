@@ -7,9 +7,9 @@ use crate::geometry::{
     union_polygon_ring_sets, union_visible_ring_sets, update_thread_ignoring, Peg, Seg, Thread,
 };
 use crate::model::{
-    glyph_name, resolve_peg, CustomPeg, Document, Element, Face, FontProject, FontRenderStyle,
-    GlyphRecord, GridSettings, PegRef, Port, ScaleAnchor, StartAnchor, CURRENT_DOCUMENT_VERSION,
-    CURRENT_FONT_PROJECT_VERSION,
+    glyph_name, resolve_peg, CustomPeg, Document, Element, EmptyLayer, Face, FontProject,
+    FontRenderStyle, GlyphRecord, GridSettings, LayerFolder, PegRef, Port, ScaleAnchor,
+    StartAnchor, CURRENT_DOCUMENT_VERSION, CURRENT_FONT_PROJECT_VERSION,
 };
 use egui::{
     Color32, FontFamily, FontId, Id, Key, KeyboardShortcut, Modifiers, Pos2, Rect, Sense, Stroke,
@@ -459,6 +459,22 @@ enum WorkspaceMode {
     Font,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum UiLanguage {
+    #[default]
+    Japanese,
+    English,
+}
+
+impl UiLanguage {
+    fn text<'a>(self, japanese: &'a str, english: &'a str) -> &'a str {
+        match self {
+            Self::Japanese => japanese,
+            Self::English => english,
+        }
+    }
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct WorkspaceFile {
     version: u32,
@@ -467,6 +483,8 @@ struct WorkspaceFile {
     mode: WorkspaceMode,
     dark_theme: bool,
     show_circles: bool,
+    #[serde(default)]
+    language: UiLanguage,
 }
 
 const CURRENT_WORKSPACE_VERSION: u32 = 1;
@@ -711,6 +729,7 @@ pub struct App {
     view_overlay_timer: f32,
     show_circles: bool,
     dark_theme: bool,
+    language: UiLanguage,
     dock: DockState<DockTab>,
     drag_snapshot: Option<Document>,
     grid_edit_orig: Option<Document>,
@@ -776,6 +795,7 @@ impl App {
             view_overlay_timer: 0.0,
             show_circles: true,
             dark_theme: true,
+            language: UiLanguage::Japanese,
             dock: App::default_dock_layout(),
             drag_snapshot: None,
             grid_edit_orig: None,
@@ -1173,6 +1193,7 @@ impl App {
         self.push_history();
         face_indices.sort_unstable_by(|a, b| b.cmp(a));
         for face_idx in &face_indices {
+            self.doc.remove_face_from_layer_metadata(*face_idx);
             self.doc.faces.remove(*face_idx);
         }
         for id in &peg_ids {
@@ -2321,6 +2342,7 @@ impl App {
             mode: self.workspace_mode,
             dark_theme: self.dark_theme,
             show_circles: self.show_circles,
+            language: self.language,
         }
     }
 
@@ -2376,6 +2398,7 @@ impl App {
                 self.workspace_mode = workspace.mode;
                 self.dark_theme = workspace.dark_theme;
                 self.show_circles = workspace.show_circles;
+                self.language = workspace.language;
                 self.shape_undo.clear();
                 self.shape_redo.clear();
                 self.glyph_undo = vec![Vec::new(); self.font_project.glyphs.len()];
@@ -3206,6 +3229,7 @@ impl App {
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
+        let language = self.language;
         let shadcn = egui_shadcn::Theme::new(if self.dark_theme {
             egui_shadcn::ColorPalette::shadcn_dark(egui_shadcn::ShadcnBaseColor::Zinc)
         } else {
@@ -3216,7 +3240,7 @@ impl App {
             if egui_shadcn::button(
                 ui,
                 &shadcn,
-                "シェイプ",
+                language.text("シェイプ", "Shape"),
                 if shape_selected {
                     egui_shadcn::ControlVariant::Primary
                 } else {
@@ -3233,7 +3257,7 @@ impl App {
             if egui_shadcn::button(
                 ui,
                 &shadcn,
-                "フォント",
+                language.text("フォント", "Font"),
                 if !shape_selected {
                     egui_shadcn::ControlVariant::Primary
                 } else {
@@ -3258,7 +3282,7 @@ impl App {
             if egui_shadcn::button(
                 ui,
                 &shadcn,
-                "マージ",
+                language.text("マージ", "Merge"),
                 egui_shadcn::ControlVariant::Secondary,
                 egui_shadcn::ControlSize::Sm,
                 sel_faces >= 2,
@@ -3281,7 +3305,7 @@ impl App {
                     if egui_shadcn::button(
                         ui,
                         &shadcn,
-                        "SVG書き出し",
+                        language.text("SVG書き出し", "Export SVG"),
                         egui_shadcn::ControlVariant::Outline,
                         egui_shadcn::ControlSize::Sm,
                         true,
@@ -3293,7 +3317,7 @@ impl App {
                     if egui_shadcn::button(
                         ui,
                         &shadcn,
-                        "保存",
+                        language.text("保存", "Save"),
                         egui_shadcn::ControlVariant::Primary,
                         egui_shadcn::ControlSize::Sm,
                         true,
@@ -3305,7 +3329,7 @@ impl App {
                     if egui_shadcn::button(
                         ui,
                         &shadcn,
-                        "開く",
+                        language.text("開く", "Open"),
                         egui_shadcn::ControlVariant::Ghost,
                         egui_shadcn::ControlSize::Sm,
                         true,
@@ -3319,7 +3343,7 @@ impl App {
                     if egui_shadcn::button(
                         ui,
                         &shadcn,
-                        "現在をSVG",
+                        language.text("現在をSVG", "Export SVG"),
                         egui_shadcn::ControlVariant::Outline,
                         egui_shadcn::ControlSize::Sm,
                         true,
@@ -3331,7 +3355,7 @@ impl App {
                     if egui_shadcn::button(
                         ui,
                         &shadcn,
-                        "保存",
+                        language.text("保存", "Save"),
                         egui_shadcn::ControlVariant::Primary,
                         egui_shadcn::ControlSize::Sm,
                         true,
@@ -3343,7 +3367,7 @@ impl App {
                     if egui_shadcn::button(
                         ui,
                         &shadcn,
-                        "開く",
+                        language.text("開く", "Open"),
                         egui_shadcn::ControlVariant::Ghost,
                         egui_shadcn::ControlSize::Sm,
                         true,
@@ -3355,7 +3379,7 @@ impl App {
                     if egui_shadcn::button(
                         ui,
                         &shadcn,
-                        "TTF書き出し",
+                        language.text("TTF書き出し", "Export TTF"),
                         egui_shadcn::ControlVariant::Secondary,
                         egui_shadcn::ControlSize::Sm,
                         true,
@@ -3367,7 +3391,7 @@ impl App {
                 }
             }
             ui.separator();
-            ui.menu_button("ワークスペース", |ui| {
+            ui.menu_button(language.text("ワークスペース", "Workspace"), |ui| {
                 if ui.button("すべて保存…").clicked() {
                     self.save_workspace();
                     ui.close();
@@ -3384,7 +3408,11 @@ impl App {
                 );
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.menu_button("パネル", |ui| {
+                ui.menu_button(language.text("日本語", "English"), |ui| {
+                    ui.selectable_value(&mut self.language, UiLanguage::Japanese, "日本語");
+                    ui.selectable_value(&mut self.language, UiLanguage::English, "English");
+                });
+                ui.menu_button(language.text("パネル", "Panels"), |ui| {
                     for (tab, label) in [
                         (DockTab::Glyphs, "グリフ"),
                         (DockTab::Layers, "レイヤー"),
@@ -3504,12 +3532,104 @@ impl App {
     fn render_layers_tab(&mut self, ui: &mut egui::Ui) {
         let shift = ui.input(|i| i.modifiers.shift);
         let mut remove_face: Option<usize> = None;
+        let mut toggle_folder: Option<u64> = None;
+        let mut toggle_folder_visibility: Option<u64> = None;
+        let mut remove_folder: Option<u64> = None;
+        let mut remove_empty: Option<u64> = None;
+        let mut toggle_empty_visibility: Option<u64> = None;
+        let grouped_faces: std::collections::HashSet<usize> = self
+            .doc
+            .layer_folders
+            .iter()
+            .flat_map(|folder| folder.face_indices.iter().copied())
+            .collect();
 
         ui.add_space(8.0);
         egui::ScrollArea::vertical()
             .id_salt("layer-list")
             .show(ui, |ui| {
+                for folder in self.doc.layer_folders.clone().into_iter().rev() {
+                    row_frame(ui, false, |ui| {
+                        if eye_button(ui, folder.visible).clicked() {
+                            toggle_folder_visibility = Some(folder.id);
+                        }
+                        let disclosure = if folder.expanded { "▾" } else { "▸" };
+                        if ui.small_button(disclosure).clicked() {
+                            toggle_folder = Some(folder.id);
+                        }
+                        ui.label("▣");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if delete_button(ui).clicked() {
+                                remove_folder = Some(folder.id);
+                            }
+                            let mut folder_name = folder.name.clone();
+                            let response = ui.add_sized(
+                                [ui.available_width(), 22.0],
+                                egui::TextEdit::singleline(&mut folder_name).hint_text(format!(
+                                    "フォルダ · {}項目",
+                                    folder.face_indices.len()
+                                        + self
+                                            .doc
+                                            .empty_layers
+                                            .iter()
+                                            .filter(|layer| layer.folder_id == Some(folder.id))
+                                            .count()
+                                )),
+                            );
+                            if response.changed() {
+                                if let Some(target) = self
+                                    .doc
+                                    .layer_folders
+                                    .iter_mut()
+                                    .find(|target| target.id == folder.id)
+                                {
+                                    target.name = folder_name;
+                                }
+                            }
+                        });
+                    });
+                    if folder.expanded {
+                        for face_idx in folder.face_indices.iter().rev().copied() {
+                            if face_idx >= self.doc.faces.len() {
+                                continue;
+                            }
+                            ui.horizontal(|ui| {
+                                ui.add_space(18.0);
+                                let selected = self.is_selected(Selection::Face(face_idx));
+                                let name = if self.doc.faces[face_idx].name.is_empty() {
+                                    format!("レイヤー {}", face_idx + 1)
+                                } else {
+                                    self.doc.faces[face_idx].name.clone()
+                                };
+                                if ui.selectable_label(selected, name).clicked() {
+                                    if shift {
+                                        self.toggle_selection(Selection::Face(face_idx));
+                                    } else {
+                                        self.set_single_selection(Some(Selection::Face(face_idx)));
+                                    }
+                                }
+                            });
+                        }
+                        for empty in self
+                            .doc
+                            .empty_layers
+                            .iter()
+                            .filter(|layer| layer.folder_id == Some(folder.id))
+                        {
+                            ui.horizontal(|ui| {
+                                ui.add_space(18.0);
+                                ui.label(format!("□  {}", empty.name));
+                                if delete_button(ui).clicked() {
+                                    remove_empty = Some(empty.id);
+                                }
+                            });
+                        }
+                    }
+                }
                 for i in (0..self.doc.faces.len()).rev() {
+                    if grouped_faces.contains(&i) {
+                        continue;
+                    }
                     let name = if self.doc.faces[i].name.is_empty() {
                         format!("レイヤー {}", i + 1)
                     } else {
@@ -3569,11 +3689,135 @@ impl App {
                         });
                     });
                 }
+                for empty in self
+                    .doc
+                    .empty_layers
+                    .iter()
+                    .filter(|layer| layer.folder_id.is_none())
+                {
+                    row_frame(ui, false, |ui| {
+                        if eye_button(ui, empty.visible).clicked() {
+                            toggle_empty_visibility = Some(empty.id);
+                        }
+                        ui.label("□");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if delete_button(ui).clicked() {
+                                remove_empty = Some(empty.id);
+                            }
+                            ui.label(&empty.name);
+                        });
+                    });
+                }
             });
         if let Some(i) = remove_face {
             self.set_single_selection(Some(Selection::Face(i)));
             self.delete_selected();
         }
+        if let Some(id) = toggle_folder {
+            if let Some(folder) = self
+                .doc
+                .layer_folders
+                .iter_mut()
+                .find(|folder| folder.id == id)
+            {
+                folder.expanded = !folder.expanded;
+            }
+        }
+        if let Some(id) = toggle_folder_visibility {
+            let snapshot = self.doc.clone();
+            if let Some(folder) = self
+                .doc
+                .layer_folders
+                .iter_mut()
+                .find(|folder| folder.id == id)
+            {
+                folder.visible = !folder.visible;
+                for face_idx in &folder.face_indices {
+                    if let Some(face) = self.doc.faces.get_mut(*face_idx) {
+                        face.visible = folder.visible;
+                    }
+                }
+                self.push_history_snapshot(snapshot);
+            }
+        }
+        if let Some(id) = remove_folder {
+            let snapshot = self.doc.clone();
+            self.doc.layer_folders.retain(|folder| folder.id != id);
+            for layer in &mut self.doc.empty_layers {
+                if layer.folder_id == Some(id) {
+                    layer.folder_id = None;
+                }
+            }
+            self.push_history_snapshot(snapshot);
+        }
+        if let Some(id) = remove_empty {
+            let snapshot = self.doc.clone();
+            self.doc.empty_layers.retain(|layer| layer.id != id);
+            self.push_history_snapshot(snapshot);
+        }
+        if let Some(id) = toggle_empty_visibility {
+            let snapshot = self.doc.clone();
+            if let Some(layer) = self
+                .doc
+                .empty_layers
+                .iter_mut()
+                .find(|layer| layer.id == id)
+            {
+                layer.visible = !layer.visible;
+                self.push_history_snapshot(snapshot);
+            }
+        }
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui
+                .button("＋ レイヤー")
+                .on_hover_text("空レイヤーを追加")
+                .clicked()
+            {
+                let snapshot = self.doc.clone();
+                let id = self.doc.allocate_layer_item_id();
+                let number = self.doc.empty_layers.len() + self.doc.faces.len() + 1;
+                self.doc.empty_layers.push(EmptyLayer {
+                    id,
+                    name: format!("レイヤー {number}"),
+                    visible: true,
+                    folder_id: None,
+                });
+                self.push_history_snapshot(snapshot);
+            }
+            if ui
+                .button("▣ フォルダ")
+                .on_hover_text("選択した面をフォルダへまとめる")
+                .clicked()
+            {
+                let snapshot = self.doc.clone();
+                let id = self.doc.allocate_layer_item_id();
+                let mut face_indices: Vec<usize> = self
+                    .selection
+                    .iter()
+                    .filter_map(|selection| match selection {
+                        Selection::Face(index) => Some(*index),
+                        _ => None,
+                    })
+                    .collect();
+                face_indices.sort_unstable();
+                face_indices.dedup();
+                for folder in &mut self.doc.layer_folders {
+                    folder
+                        .face_indices
+                        .retain(|index| !face_indices.contains(index));
+                }
+                let number = self.doc.layer_folders.len() + 1;
+                self.doc.layer_folders.push(LayerFolder {
+                    id,
+                    name: format!("フォルダ {number}"),
+                    visible: true,
+                    expanded: true,
+                    face_indices,
+                });
+                self.push_history_snapshot(snapshot);
+            }
+        });
     }
 
     fn render_circles_tab(&mut self, ui: &mut egui::Ui) {
@@ -5800,7 +6044,7 @@ impl eframe::App for App {
             .style(dock_style)
             // 常時表示の×ボタンは煩いので消す（パネルの開閉は上部「パネル」メニュー）
             .show_close_buttons(false)
-            .show_window_close_buttons(false)
+            .show_leaf_close_all_buttons(false)
             .show(ctx, &mut AppTabViewer { app: self });
         self.dock = dock;
         // Illustrator と同様、ツールはドックを圧迫せずキャンバス上で移動できる。
@@ -5824,14 +6068,15 @@ impl TabViewer for AppTabViewer<'_> {
     type Tab = DockTab;
 
     fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
+        let language = self.app.language;
         match tab {
-            DockTab::Canvas => "キャンバス".into(),
-            DockTab::Proof => "試打".into(),
-            DockTab::Glyphs => "グリフ".into(),
-            DockTab::Layers => "レイヤー".into(),
-            DockTab::Circles => "円".into(),
-            DockTab::Properties => "プロパティ".into(),
-            DockTab::Grid => "グリッド".into(),
+            DockTab::Canvas => language.text("キャンバス", "Canvas").into(),
+            DockTab::Proof => language.text("試し組み", "Proof").into(),
+            DockTab::Glyphs => language.text("グリフ", "Glyphs").into(),
+            DockTab::Layers => language.text("レイヤー", "Layers").into(),
+            DockTab::Circles => language.text("円", "Pegs").into(),
+            DockTab::Properties => language.text("プロパティ", "Properties").into(),
+            DockTab::Grid => language.text("グリッド", "Grid").into(),
         }
     }
 
@@ -6858,6 +7103,7 @@ mod tests {
             view_overlay_timer: 0.0,
             show_circles: true,
             dark_theme: true,
+            language: UiLanguage::Japanese,
             drag_snapshot: None,
             grid_edit_orig: None,
             radius_edit_orig: None,

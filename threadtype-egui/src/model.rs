@@ -125,6 +125,29 @@ pub struct Face {
     pub ignored_pegs: Vec<PegRef>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LayerFolder {
+    pub id: u64,
+    pub name: String,
+    #[serde(default = "default_true")]
+    pub visible: bool,
+    #[serde(default = "default_true")]
+    pub expanded: bool,
+    /// `Document::faces` のインデックス。面の削除時にDocument側で詰め直す。
+    #[serde(default)]
+    pub face_indices: Vec<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EmptyLayer {
+    pub id: u64,
+    pub name: String,
+    #[serde(default = "default_true")]
+    pub visible: bool,
+    #[serde(default)]
+    pub folder_id: Option<u64>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GridSettings {
     pub spacing: f64,
@@ -194,6 +217,12 @@ pub struct Document {
     pub peg_appearance: PegAppearance,
     #[serde(default)]
     pub disabled_pegs: Vec<PegRef>,
+    #[serde(default)]
+    pub layer_folders: Vec<LayerFolder>,
+    #[serde(default)]
+    pub empty_layers: Vec<EmptyLayer>,
+    #[serde(default)]
+    pub next_layer_item_id: u64,
 }
 
 impl Default for Document {
@@ -206,6 +235,28 @@ impl Default for Document {
             faces: Vec::new(),
             peg_appearance: PegAppearance::default(),
             disabled_pegs: Vec::new(),
+            layer_folders: Vec::new(),
+            empty_layers: Vec::new(),
+            next_layer_item_id: 1,
+        }
+    }
+}
+
+impl Document {
+    pub fn allocate_layer_item_id(&mut self) -> u64 {
+        let id = self.next_layer_item_id.max(1);
+        self.next_layer_item_id = id.saturating_add(1);
+        id
+    }
+
+    pub fn remove_face_from_layer_metadata(&mut self, removed: usize) {
+        for folder in &mut self.layer_folders {
+            folder.face_indices.retain(|index| *index != removed);
+            for index in &mut folder.face_indices {
+                if *index > removed {
+                    *index -= 1;
+                }
+            }
         }
     }
 }
@@ -797,5 +848,32 @@ mod tests {
         let restored: Document = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.version, CURRENT_DOCUMENT_VERSION);
         assert_eq!(restored.faces[0].ignored_pegs, doc.faces[0].ignored_pegs);
+    }
+
+    #[test]
+    fn legacy_document_defaults_layer_metadata() {
+        let mut value = serde_json::to_value(Document::default()).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("layer_folders");
+        object.remove("empty_layers");
+        object.remove("next_layer_item_id");
+        let restored: Document = serde_json::from_value(value).unwrap();
+        assert!(restored.layer_folders.is_empty());
+        assert!(restored.empty_layers.is_empty());
+        assert_eq!(restored.next_layer_item_id, 0);
+    }
+
+    #[test]
+    fn removing_face_reindexes_folder_members() {
+        let mut document = Document::default();
+        document.layer_folders.push(LayerFolder {
+            id: 1,
+            name: "group".to_owned(),
+            visible: true,
+            expanded: true,
+            face_indices: vec![0, 2, 3],
+        });
+        document.remove_face_from_layer_metadata(2);
+        assert_eq!(document.layer_folders[0].face_indices, vec![0, 2]);
     }
 }
