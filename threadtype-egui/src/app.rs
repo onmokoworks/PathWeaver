@@ -5801,7 +5801,9 @@ impl App {
             self.delete_selected();
         }
 
-        painter.rect_filled(rect, 0.0, colors.bg);
+        // 制作面はパネルや入力欄とは別の専用フラット色を使う。
+        // グラデーションは入れず、モック同様に中央だけ一段深く見せる。
+        painter.rect_filled(rect, 0.0, colors.canvas);
 
         let selected_peg_refs: Vec<PegRef> = self
             .selection
@@ -6421,7 +6423,7 @@ impl eframe::App for App {
         dock_style.tab_bar.corner_radius = egui::CornerRadius::same(0);
         dock_style.tab_bar.show_scroll_bar_on_overflow = true;
         dock_style.tab.spacing = 2.0;
-        dock_style.tab.active.bg_fill = colors.panel;
+        dock_style.tab.active.bg_fill = colors.bg2;
         dock_style.tab.active.text_color = colors.text1;
         dock_style.tab.active.corner_radius = egui::CornerRadius::same(5);
         dock_style.tab.active.outline_color = colors.border;
@@ -6430,7 +6432,7 @@ impl eframe::App for App {
         dock_style.tab.inactive.text_color = colors.text2;
         dock_style.tab.inactive.corner_radius = egui::CornerRadius::same(5);
         dock_style.tab.inactive.outline_color = Color32::TRANSPARENT;
-        dock_style.tab.hovered.bg_fill = colors.panel;
+        dock_style.tab.hovered.bg_fill = colors.bg2;
         dock_style.tab.hovered.text_color = colors.text1;
         dock_style.tab.hovered.corner_radius = egui::CornerRadius::same(5);
         dock_style.tab.hovered.outline_color = colors.border;
