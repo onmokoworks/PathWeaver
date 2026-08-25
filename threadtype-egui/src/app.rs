@@ -300,8 +300,8 @@ impl Theme {
             text1: Color32::from_rgb(245, 245, 247),
             text2: Color32::from_rgb(161, 161, 166),
             text3: Color32::from_rgb(99, 99, 102),
-            accent: Color32::from_rgb(10, 132, 255),
-            accent_bg: Color32::from_rgb(38, 54, 82),
+            accent: Color32::from_rgb(94, 106, 210),
+            accent_bg: Color32::from_rgb(45, 47, 72),
             warning: Color32::from_rgb(255, 160, 10),
             error: Color32::from_rgb(255, 69, 58),
             bg: Color32::from_rgb(45, 45, 45),
@@ -311,9 +311,9 @@ impl Theme {
             face_fill: Color32::from_rgb(61, 61, 64),
             thread: Color32::from_rgb(232, 232, 232),
             anchor: Color32::from_rgb(232, 232, 232),
-            close_ok: Color32::from_rgb(10, 132, 255),
+            close_ok: Color32::from_rgb(94, 106, 210),
             close_ng: Color32::from_rgb(255, 69, 58),
-            select: Color32::from_rgb(10, 132, 255),
+            select: Color32::from_rgb(94, 106, 210),
             start: Color32::from_rgb(160, 160, 184),
             start_highlight: Color32::from_rgb(255, 255, 255),
             cmd_green: Color32::from_rgb(255, 159, 10),
@@ -331,8 +331,8 @@ impl Theme {
             text1: Color32::from_rgb(29, 29, 31),
             text2: Color32::from_rgb(110, 110, 115),
             text3: Color32::from_rgb(174, 174, 178),
-            accent: Color32::from_rgb(0, 122, 255),
-            accent_bg: Color32::from_rgb(219, 234, 254),
+            accent: Color32::from_rgb(82, 91, 194),
+            accent_bg: Color32::from_rgb(234, 235, 250),
             warning: Color32::from_rgb(255, 159, 10),
             error: Color32::from_rgb(255, 59, 48),
             bg: Color32::from_rgb(239, 239, 239),
@@ -342,9 +342,9 @@ impl Theme {
             face_fill: Color32::from_rgb(212, 212, 216),
             thread: Color32::from_rgb(22, 22, 22),
             anchor: Color32::from_rgb(22, 22, 22),
-            close_ok: Color32::from_rgb(0, 122, 255),
+            close_ok: Color32::from_rgb(82, 91, 194),
             close_ng: Color32::from_rgb(255, 59, 48),
-            select: Color32::from_rgb(0, 122, 255),
+            select: Color32::from_rgb(82, 91, 194),
             start: Color32::from_rgb(102, 102, 124),
             start_highlight: Color32::from_rgb(24, 24, 24),
             cmd_green: Color32::from_rgb(255, 159, 10),
@@ -828,6 +828,7 @@ pub struct App {
     draw: Option<ActiveDraw>,
     selection: Vec<Selection>,
     selected_empty_layers: std::collections::HashSet<u64>,
+    selected_layer_folders: std::collections::HashSet<u64>,
     face_editor: Option<usize>,
     layer_item_editor: Option<u64>,
     tool: Tool,
@@ -897,10 +898,11 @@ impl App {
             draw: None,
             selection: Vec::new(),
             selected_empty_layers: std::collections::HashSet::new(),
+            selected_layer_folders: std::collections::HashSet::new(),
             face_editor: None,
             layer_item_editor: None,
-            tool: Tool::Draw,
-            status: "クリックで線を引き始め、始点に戻ってクリックで面を閉じます".to_owned(),
+            tool: Tool::Select,
+            status: "選択ツール・レイヤーまたは円をクリックして選択".to_owned(),
             shape_save_path: None,
             font_save_path: None,
             workspace_save_path: None,
@@ -1302,6 +1304,7 @@ impl App {
     fn set_single_selection(&mut self, next: Option<Selection>) {
         self.selection.clear();
         self.selected_empty_layers.clear();
+        self.selected_layer_folders.clear();
         if let Some(next) = next {
             self.selection.push(next);
         }
@@ -1309,6 +1312,7 @@ impl App {
 
     fn toggle_selection(&mut self, target: Selection) {
         self.selected_empty_layers.clear();
+        self.selected_layer_folders.clear();
         if let Some(i) = self.selection.iter().position(|sel| *sel == target) {
             self.selection.remove(i);
         } else {
@@ -1350,10 +1354,12 @@ impl App {
     fn clear_selection(&mut self) {
         self.selection.clear();
         self.selected_empty_layers.clear();
+        self.selected_layer_folders.clear();
     }
 
     fn select_empty_layer(&mut self, id: u64, extend: bool) {
         self.selection.clear();
+        self.selected_layer_folders.clear();
         if !extend {
             self.selected_empty_layers.clear();
         }
@@ -1367,6 +1373,23 @@ impl App {
         } else {
             "Empty layer selected".to_owned()
         };
+    }
+
+    fn select_layer_folder(&mut self, id: u64, extend: bool) {
+        self.selection.clear();
+        self.selected_empty_layers.clear();
+        if !extend {
+            self.selected_layer_folders.clear();
+        }
+        if extend && self.selected_layer_folders.contains(&id) {
+            self.selected_layer_folders.remove(&id);
+        } else {
+            self.selected_layer_folders.insert(id);
+        }
+        self.status = self
+            .language
+            .text("フォルダを選択しました", "Folder selected")
+            .to_owned();
     }
 
     fn begin_drag(&mut self, ids: &[u64], anchor: Point, converted: bool) {
@@ -1439,7 +1462,9 @@ impl App {
             return;
         }
         let selections = self.selection.clone();
-        if selections.is_empty() {
+        let empty_layer_ids: Vec<u64> = self.selected_empty_layers.iter().copied().collect();
+        let folder_ids: Vec<u64> = self.selected_layer_folders.iter().copied().collect();
+        if selections.is_empty() && empty_layer_ids.is_empty() && folder_ids.is_empty() {
             self.status = "削除対象がありません".to_owned();
             return;
         }
@@ -1475,7 +1500,12 @@ impl App {
             }
         }
 
-        if face_indices.is_empty() && peg_ids.is_empty() && peg_refs.is_empty() {
+        if face_indices.is_empty()
+            && peg_ids.is_empty()
+            && peg_refs.is_empty()
+            && empty_layer_ids.is_empty()
+            && folder_ids.is_empty()
+        {
             if skip_count > 0 {
                 self.status = "参照中の円は削除できません".to_owned();
             } else {
@@ -1485,6 +1515,24 @@ impl App {
         }
 
         self.push_history();
+        if !folder_ids.is_empty() {
+            self.doc
+                .layer_folders
+                .retain(|folder| !folder_ids.contains(&folder.id));
+            for layer in &mut self.doc.empty_layers {
+                if layer
+                    .folder_id
+                    .is_some_and(|folder_id| folder_ids.contains(&folder_id))
+                {
+                    layer.folder_id = None;
+                }
+            }
+        }
+        if !empty_layer_ids.is_empty() {
+            self.doc
+                .empty_layers
+                .retain(|layer| !empty_layer_ids.contains(&layer.id));
+        }
         face_indices.sort_unstable_by(|a, b| b.cmp(a));
         for face_idx in &face_indices {
             self.doc.remove_face_from_layer_metadata(*face_idx);
@@ -1508,6 +1556,10 @@ impl App {
             self.doc.next_peg_id = self.next_peg_id();
         }
         self.reindex_faces_after_deletion(&face_indices);
+        self.selected_empty_layers
+            .retain(|id| !empty_layer_ids.contains(id));
+        self.selected_layer_folders
+            .retain(|id| !folder_ids.contains(id));
         let faces_len = self.doc.faces.len();
         self.sync_selection(|sel| match sel {
             Selection::Peg(id) => !peg_ids.contains(id),
@@ -1516,14 +1568,10 @@ impl App {
         });
         self.status = if skip_count > 0 {
             "一部の項目は参照中のため削除しませんでした".to_owned()
-        } else if peg_ids.is_empty() && face_indices.is_empty() && peg_refs.is_empty() {
-            "削除対象がありません".to_owned()
+        } else if peg_refs.is_empty() {
+            "選択項目を削除しました".to_owned()
         } else {
-            if peg_refs.is_empty() {
-                "選択項目を削除しました".to_owned()
-            } else {
-                "選択したグリッド円を無効化し、糸を張り直しました".to_owned()
-            }
+            "選択したグリッド円を無効化し、糸を張り直しました".to_owned()
         };
         if !peg_refs.is_empty() {
             self.rebuild_pegs(self.canvas_size);
@@ -1531,12 +1579,29 @@ impl App {
     }
 
     fn clear_glyph(&mut self) {
-        if !self.doc.faces.is_empty() || self.draw.is_some() {
+        if !self.doc.faces.is_empty()
+            || !self.doc.custom_pegs.is_empty()
+            || !self.doc.disabled_pegs.is_empty()
+            || !self.doc.layer_folders.is_empty()
+            || !self.doc.empty_layers.is_empty()
+            || self.draw.is_some()
+        {
             self.push_history();
             self.doc.faces.clear();
+            self.doc.custom_pegs.clear();
+            self.doc.disabled_pegs.clear();
+            self.doc.layer_folders.clear();
+            self.doc.empty_layers.clear();
+            self.doc.next_peg_id = 0;
+            self.doc.next_layer_item_id = 1;
             self.draw = None;
             self.clear_selection();
-            self.status = "グリフをクリアしました".to_owned();
+            self.rebuild_pegs(self.canvas_size);
+            self.status = match self.workspace_mode {
+                WorkspaceMode::Shape => "シェイプをクリアしました",
+                WorkspaceMode::Font => "グリフをクリアしました",
+            }
+            .to_owned();
         }
     }
 
@@ -2972,30 +3037,44 @@ impl App {
                 );
                 ui.add_space(8.0);
                 ui.separator();
-                for (icon, label, value) in [
+                for (tab, icon, label, value) in [
                     (
+                        DockTab::Layers,
                         PanelGlyph::Layers,
                         language.text("レイヤー", "Layers"),
                         (self.doc.faces.len() + self.doc.empty_layers.len()).to_string(),
                     ),
                     (
+                        DockTab::Circles,
                         PanelGlyph::Peg,
                         language.text("任意円", "Custom pegs"),
                         self.doc.custom_pegs.len().to_string(),
                     ),
                     (
+                        DockTab::Grid,
                         PanelGlyph::Grid,
                         language.text("グリッド", "Grid"),
                         format!("{:.0}", self.doc.grid.spacing),
                     ),
                 ] {
-                    ui.horizontal(|ui| {
-                        panel_glyph(ui, icon);
-                        ui.label(label);
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(egui::RichText::new(value).color(self.theme_colors().text3));
-                        });
-                    });
+                    let response = ui
+                        .horizontal(|ui| {
+                            panel_glyph(ui, icon);
+                            let response = ui.selectable_label(false, label);
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        egui::RichText::new(value).color(self.theme_colors().text3),
+                                    );
+                                },
+                            );
+                            response
+                        })
+                        .inner;
+                    if response.clicked() {
+                        self.pending_panel_tab = Some(tab);
+                    }
                 }
                 ui.add_space(10.0);
                 if ui
@@ -3478,99 +3557,104 @@ impl App {
             });
             return;
         }
-        ui.label(
-            egui::RichText::new(language.text("試し組み", "Proof"))
-                .size(16.0)
-                .strong(),
+        let thread_on = matches!(
+            self.font_project.render_style,
+            FontRenderStyle::Thread | FontRenderStyle::FillAndThread
         );
-        ui.add_space(2.0);
-        ui.label(
-            egui::RichText::new(language.text("表示", "APPEARANCE"))
-                .size(10.0)
-                .strong()
-                .color(colors.text3),
-        );
+        let fixed_width = 58.0 + 58.0 + 106.0 + if thread_on { 58.0 } else { 0.0 };
+        let gaps = if thread_on { 32.0 } else { 24.0 };
+        let text_width = (ui.available_width() - fixed_width - gaps).max(104.0);
         ui.horizontal(|ui| {
-            let (swatch_rect, _) = ui.allocate_exact_size(Vec2::new(46.0, 38.0), Sense::hover());
-            let fill_on = matches!(
-                self.font_project.render_style,
-                FontRenderStyle::Fill | FontRenderStyle::FillAndThread
-            );
-            let thread_on = matches!(
-                self.font_project.render_style,
-                FontRenderStyle::Thread | FontRenderStyle::FillAndThread
-            );
-            let back =
-                Rect::from_min_size(swatch_rect.min + Vec2::new(14.0, 2.0), Vec2::splat(22.0));
-            let front =
-                Rect::from_min_size(swatch_rect.min + Vec2::new(4.0, 12.0), Vec2::splat(22.0));
-            ui.painter()
-                .rect_filled(back, 1.0, if fill_on { colors.thread } else { colors.bg });
-            ui.painter().rect_stroke(
-                back,
-                1.0,
-                Stroke::new(1.0, colors.text2),
-                egui::StrokeKind::Inside,
-            );
-            ui.painter().rect_filled(front, 1.0, colors.bg);
-            ui.painter().rect_stroke(
-                front,
-                1.0,
-                Stroke::new(if thread_on { 3.0 } else { 1.0 }, colors.thread),
-                egui::StrokeKind::Inside,
-            );
             ui.vertical(|ui| {
-                ui.horizontal(|ui| {
-                    ui.selectable_value(
-                        &mut self.font_project.render_style,
-                        FontRenderStyle::Fill,
-                        language.text("塗り", "Fill"),
+                ui.label(
+                    egui::RichText::new(language.text("試し組みテキスト", "PROOF TEXT"))
+                        .size(9.0)
+                        .color(colors.text3),
+                );
+                ui.add_sized(
+                    [text_width, 27.0],
+                    egui::TextEdit::singleline(&mut self.proof_text)
+                        .hint_text(language.text("文字を入力", "Type text")),
+                );
+            });
+            ui.vertical(|ui| {
+                ui.label(
+                    egui::RichText::new(language.text("サイズ", "SIZE"))
+                        .size(9.0)
+                        .color(colors.text3),
+                );
+                ui.add_sized(
+                    [58.0, 27.0],
+                    egui::DragValue::new(&mut self.proof_size)
+                        .range(20.0..=500.0)
+                        .speed(1.0)
+                        .suffix(" px"),
+                );
+            });
+            ui.vertical(|ui| {
+                ui.label(
+                    egui::RichText::new(language.text("字間", "TRACKING"))
+                        .size(9.0)
+                        .color(colors.text3),
+                );
+                ui.add_sized(
+                    [58.0, 27.0],
+                    egui::DragValue::new(&mut self.proof_tracking)
+                        .range(-40.0..=120.0)
+                        .speed(1.0),
+                );
+            });
+            ui.vertical(|ui| {
+                ui.label(
+                    egui::RichText::new(language.text("表示", "DISPLAY"))
+                        .size(9.0)
+                        .color(colors.text3),
+                );
+                let selected_style = match self.font_project.render_style {
+                    FontRenderStyle::Fill => language.text("塗り", "Fill"),
+                    FontRenderStyle::Thread => language.text("糸", "Thread"),
+                    FontRenderStyle::FillAndThread => language.text("塗り＋糸", "Fill + thread"),
+                };
+                egui::ComboBox::from_id_salt("proof-render-style")
+                    .width(106.0)
+                    .selected_text(selected_style)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.font_project.render_style,
+                            FontRenderStyle::Fill,
+                            language.text("塗り", "Fill"),
+                        );
+                        ui.selectable_value(
+                            &mut self.font_project.render_style,
+                            FontRenderStyle::Thread,
+                            language.text("線", "Thread"),
+                        );
+                        ui.selectable_value(
+                            &mut self.font_project.render_style,
+                            FontRenderStyle::FillAndThread,
+                            language.text("塗り＋糸", "Fill + thread"),
+                        );
+                    });
+            });
+            if thread_on {
+                ui.vertical(|ui| {
+                    ui.label(
+                        egui::RichText::new(language.text("線幅", "WIDTH"))
+                            .size(9.0)
+                            .color(colors.text3),
                     );
-                    ui.selectable_value(
-                        &mut self.font_project.render_style,
-                        FontRenderStyle::Thread,
-                        language.text("線", "Thread"),
-                    );
-                    ui.selectable_value(
-                        &mut self.font_project.render_style,
-                        FontRenderStyle::FillAndThread,
-                        language.text("塗り＋線", "Fill + thread"),
+                    ui.add_sized(
+                        [58.0, 27.0],
+                        egui::DragValue::new(&mut self.font_project.thread_width)
+                            .range(0.5..=24.0)
+                            .speed(0.2),
                     );
                 });
-                if thread_on {
-                    ui.add(
-                        egui::Slider::new(&mut self.font_project.thread_width, 0.5..=24.0)
-                            .text(language.text("線幅", "Width"))
-                            .fixed_decimals(1),
-                    );
-                }
-            });
+            }
         });
-        ui.add_space(4.0);
-        ui.label(
-            egui::RichText::new(language.text("テキスト", "TEXT"))
-                .size(10.0)
-                .strong()
-                .color(colors.text3),
-        );
-        ui.add(
-            egui::TextEdit::multiline(&mut self.proof_text)
-                .desired_rows(2)
-                .desired_width(f32::INFINITY)
-                .hint_text(language.text("ここに試したい文字を入力", "Type proof text")),
-        );
-        ui.horizontal_wrapped(|ui| {
-            ui.add(
-                egui::Slider::new(&mut self.proof_size, 20.0..=500.0)
-                    .text(language.text("サイズ", "Size"))
-                    .fixed_decimals(0),
-            );
-            ui.add(
-                egui::Slider::new(&mut self.proof_tracking, -40.0..=120.0)
-                    .text(language.text("字間", "Tracking"))
-                    .fixed_decimals(0),
-            );
-        });
+        ui.add_space(6.0);
+        ui.separator();
+        ui.add_space(6.0);
 
         let text = self.proof_text.clone();
         let size = self.proof_size;
@@ -3578,19 +3662,21 @@ impl App {
         let unit_scale = size / 1000.0;
         let line_height = size * 1.35;
         let line_count = text.lines().count().max(1) as f32;
-        let mut widest = 0.0_f32;
-        for line in text.split('\n') {
-            let width = line.chars().fold(0.0, |sum, character| {
-                let advance = self
-                    .font_project
-                    .glyphs
-                    .iter()
-                    .find(|glyph| glyph.character == character)
-                    .map_or(600.0, |glyph| f32::from(glyph.advance_width));
-                sum + advance * unit_scale + tracking
-            });
-            widest = widest.max(width);
-        }
+        let line_widths: Vec<f32> = text
+            .split('\n')
+            .map(|line| {
+                line.chars().fold(0.0, |sum, character| {
+                    let advance = self
+                        .font_project
+                        .glyphs
+                        .iter()
+                        .find(|glyph| glyph.character == character)
+                        .map_or(600.0, |glyph| f32::from(glyph.advance_width));
+                    sum + advance * unit_scale + tracking
+                })
+            })
+            .collect();
+        let widest = line_widths.iter().copied().fold(0.0_f32, f32::max);
         let desired_width = widest.max(ui.available_width() - 8.0) + 32.0;
         let preview_height = ui.available_height().max(180.0);
         let desired_height = (line_count * line_height + 40.0).max(preview_height);
@@ -3609,8 +3695,14 @@ impl App {
                     egui::StrokeKind::Inside,
                 );
                 let metrics = self.font_project.metrics;
-                let mut pen_x = rect.left() + 16.0;
-                let mut baseline = rect.top() + size + 16.0;
+                let line_origin = |index: usize| {
+                    let width = line_widths.get(index).copied().unwrap_or_default();
+                    (rect.center().x - width * 0.5).max(rect.left() + 16.0)
+                };
+                let mut line_index = 0_usize;
+                let mut pen_x = line_origin(line_index);
+                let mut baseline =
+                    rect.center().y - (line_count - 1.0) * line_height * 0.5 + size * 0.4;
                 for line in 0..line_count as usize {
                     let y = baseline + line as f32 * line_height;
                     ui.painter().add(egui::Shape::dashed_line(
@@ -3626,7 +3718,8 @@ impl App {
                 let mut frame_rings: HashMap<usize, Arc<Vec<Vec<Point>>>> = HashMap::new();
                 for character in text.chars() {
                     if character == '\n' {
-                        pen_x = rect.left() + 16.0;
+                        line_index += 1;
+                        pen_x = line_origin(line_index);
                         baseline += line_height;
                         continue;
                     }
@@ -3792,69 +3885,6 @@ impl App {
             });
     }
 
-    #[allow(dead_code)]
-    fn left_tool_sidebar(&mut self, ui: &mut egui::Ui) {
-        ui.vertical_centered(|ui| {
-            ui.add_space(8.0);
-            ui.label(egui::RichText::new("TOOLS").size(9.0).weak().strong());
-            ui.add_space(8.0);
-            for (tool, tooltip) in [
-                (Tool::Select, "選択 (V)\nレイヤー・任意円を選択して移動"),
-                (
-                    Tool::DirectSelect,
-                    "ダイレクト選択 (A)\n構成する円を個別に編集",
-                ),
-                (Tool::Draw, "描画 (P)\n円へ糸を掛けてシェイプを作成"),
-                (Tool::CustomPeg, "任意円 (C)\nキャンバスへ円を追加"),
-            ] {
-                if tool_icon_button(ui, self.tool == tool, tool, tooltip).clicked() {
-                    self.tool = tool;
-                }
-                ui.add_space(5.0);
-            }
-
-            let selected_faces = self
-                .selection
-                .iter()
-                .filter(|selection| matches!(selection, Selection::Face(_)))
-                .count();
-            if self.tool == Tool::Select && selected_faces >= 2 {
-                ui.add_space(10.0);
-                ui.separator();
-                ui.add_space(8.0);
-                ui.label(egui::RichText::new("ALIGN").size(9.0).weak().strong());
-                ui.add_space(5.0);
-                let mut clicked = None;
-                egui::Grid::new("fixed-alignment-grid")
-                    .num_columns(2)
-                    .spacing(Vec2::new(3.0, 3.0))
-                    .show(ui, |ui| {
-                        for (index, (axis, tip)) in [
-                            (AlignAxis::Left, "左揃え"),
-                            (AlignAxis::CenterX, "左右中央揃え"),
-                            (AlignAxis::Right, "右揃え"),
-                            (AlignAxis::Top, "上揃え"),
-                            (AlignAxis::CenterY, "上下中央揃え"),
-                            (AlignAxis::Bottom, "下揃え"),
-                        ]
-                        .into_iter()
-                        .enumerate()
-                        {
-                            if align_icon_button(ui, axis, tip).clicked() {
-                                clicked = Some(axis);
-                            }
-                            if index % 2 == 1 {
-                                ui.end_row();
-                            }
-                        }
-                    });
-                if let Some(axis) = clicked {
-                    self.align_selected_faces(axis);
-                }
-            }
-        });
-    }
-
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         let language = self.language;
         let shadcn = egui_shadcn::Theme::new(if self.dark_theme {
@@ -3863,6 +3893,16 @@ impl App {
             egui_shadcn::ColorPalette::shadcn_light(egui_shadcn::ShadcnBaseColor::Zinc)
         });
         ui.horizontal_centered(|ui| {
+            let (mark_rect, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+            ui.painter()
+                .rect_filled(mark_rect, 5.0, self.theme_colors().accent);
+            ui.painter().text(
+                mark_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "T",
+                FontId::proportional(12.0),
+                Color32::WHITE,
+            );
             ui.label(egui::RichText::new("ThreadType").strong());
             ui.label(egui::RichText::new("/").weak());
             ui.label(
@@ -4093,6 +4133,31 @@ impl App {
                     }
                 }
                 ui.menu_button(language.text("ファイル", "File"), |ui| {
+                    if ui
+                        .add_enabled(
+                            !self.undo.is_empty() || self.draw.is_some(),
+                            egui::Button::new(language.text("元に戻す  ⌘Z", "Undo  ⌘Z")),
+                        )
+                        .clicked()
+                    {
+                        if self.draw.is_some() {
+                            self.undo_last_catch();
+                        } else {
+                            self.do_undo();
+                        }
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(
+                            !self.redo.is_empty(),
+                            egui::Button::new(language.text("やり直す  ⇧⌘Z", "Redo  ⇧⌘Z")),
+                        )
+                        .clicked()
+                    {
+                        self.do_redo();
+                        ui.close();
+                    }
+                    ui.separator();
                     if ui.button(language.text("開く…", "Open…")).clicked() {
                         match self.workspace_mode {
                             WorkspaceMode::Shape => self.load_json(),
@@ -4145,53 +4210,6 @@ impl App {
         });
     }
 
-    /// 選択ツール時だけ表示する、Illustrator風のフローティング整列パレット。
-    #[allow(dead_code)]
-    fn alignment_palette(&mut self, ctx: &egui::Context) {
-        if self.tool != Tool::Select
-            || self
-                .selection
-                .iter()
-                .filter(|s| matches!(s, Selection::Face(_)))
-                .count()
-                < 2
-        {
-            return;
-        }
-        let mut clicked = None;
-        egui::Area::new(egui::Id::new("alignment-palette"))
-            .movable(true)
-            .default_pos(Pos2::new(94.0, 44.0))
-            .constrain(true)
-            .show(ctx, |ui| {
-                let colors = self.theme_colors();
-                egui::Frame::new()
-                    .fill(colors.panel)
-                    .stroke(Stroke::new(1.0, colors.border))
-                    .corner_radius(8)
-                    .inner_margin(egui::Margin::symmetric(5, 5))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            for (axis, tip) in [
-                                (AlignAxis::Left, "左揃え"),
-                                (AlignAxis::CenterX, "左右中央揃え"),
-                                (AlignAxis::Right, "右揃え"),
-                                (AlignAxis::Top, "上揃え"),
-                                (AlignAxis::CenterY, "上下中央揃え"),
-                                (AlignAxis::Bottom, "下揃え"),
-                            ] {
-                                if align_icon_button(ui, axis, tip).clicked() {
-                                    clicked = Some(axis);
-                                }
-                            }
-                        });
-                    });
-            });
-        if let Some(axis) = clicked {
-            self.align_selected_faces(axis);
-        }
-    }
-
     fn displayed_status(&self) -> String {
         if self.language == UiLanguage::Japanese {
             return self.status.clone();
@@ -4211,6 +4229,9 @@ impl App {
             "クリックで線を引き始め、始点に戻ってクリックで面を閉じます" => {
                 "Click to start a thread; return to the start to close the face"
             }
+            "選択ツール・レイヤーまたは円をクリックして選択" => {
+                "Selection tool · Click a layer or peg to select"
+            }
             "直前の引っ掛かりを解除しました" => "Removed the last wrap",
             "解除できる引っ掛かりがありません" => "No wrap to remove",
             "元に戻しました" => "Undone",
@@ -4218,6 +4239,10 @@ impl App {
             "描画中は削除できません" => "Finish drawing before deleting",
             "削除対象がありません" => "Nothing to delete",
             "参照中の円は削除できません" => "A peg used by a shape cannot be deleted",
+            "選択項目を削除しました" => "Selected items deleted",
+            "空レイヤーを選択しました" => "Empty layer selected",
+            "フォルダを選択しました" => "Folder selected",
+            "シェイプをクリアしました" => "Shape cleared",
             "グリフをクリアしました" => "Glyph cleared",
             "整列するレイヤーを2つ以上選んでください" => {
                 "Select at least two layers to align"
@@ -4330,15 +4355,19 @@ impl App {
         let snapshot = self.doc.clone();
         let id = self.doc.allocate_layer_item_id();
         let number = self.doc.empty_layers.len() + self.doc.faces.len() + 1;
+        let folder_id = (self.selected_layer_folders.len() == 1)
+            .then(|| self.selected_layer_folders.iter().copied().next())
+            .flatten();
         self.doc.empty_layers.push(EmptyLayer {
             id,
             name: format!("{} {number}", self.language.text("レイヤー", "Layer")),
             visible: true,
-            folder_id: None,
+            folder_id,
         });
         self.push_history_snapshot(snapshot);
         self.selection.clear();
         self.selected_empty_layers.clear();
+        self.selected_layer_folders.clear();
         self.selected_empty_layers.insert(id);
         self.status = self
             .language
@@ -4380,6 +4409,7 @@ impl App {
         });
         self.push_history_snapshot(snapshot);
         self.clear_selection();
+        self.selected_layer_folders.insert(id);
         self.status = self
             .language
             .text("フォルダを追加しました", "Folder added")
@@ -4397,6 +4427,7 @@ impl App {
         let mut remove_empty: Option<u64> = None;
         let mut toggle_empty_visibility: Option<u64> = None;
         let mut select_empty_layer: Option<u64> = None;
+        let mut select_layer_folder: Option<u64> = None;
         let mut begin_layer_item_edit: Option<u64> = None;
         let mut commit_layer_item_edit = false;
         let grouped_faces: std::collections::HashSet<usize> = self
@@ -4406,15 +4437,25 @@ impl App {
             .flat_map(|folder| folder.face_indices.iter().copied())
             .collect();
 
-        ui.add_space(8.0);
+        let layer_count = self.doc.faces.len() + self.doc.empty_layers.len();
+        ui.label(
+            egui::RichText::new(if language == UiLanguage::Japanese {
+                format!("レイヤー {layer_count}・名前はダブルクリックで変更")
+            } else if layer_count == 1 {
+                "1 layer · Double-click a name to rename".to_owned()
+            } else {
+                format!("{layer_count} layers · Double-click a name to rename")
+            })
+            .size(10.0)
+            .color(self.theme_colors().text3),
+        );
+        ui.add_space(4.0);
         egui::ScrollArea::vertical()
             .id_salt("layer-list")
             .show(ui, |ui| {
                 for folder in self.doc.layer_folders.clone().into_iter().rev() {
-                    row_frame(ui, false, |ui| {
-                        if eye_button(ui, folder.visible).clicked() {
-                            toggle_folder_visibility = Some(folder.id);
-                        }
+                    let folder_selected = self.selected_layer_folders.contains(&folder.id);
+                    row_frame(ui, folder_selected, |ui| {
                         if disclosure_button(ui, folder.expanded).clicked() {
                             toggle_folder = Some(folder.id);
                         }
@@ -4422,6 +4463,9 @@ impl App {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if delete_button(ui).clicked() {
                                 remove_folder = Some(folder.id);
+                            }
+                            if eye_button(ui, folder.visible).clicked() {
+                                toggle_folder_visibility = Some(folder.id);
                             }
                             let width = ui.available_width();
                             if self.layer_item_editor == Some(folder.id) {
@@ -4450,11 +4494,23 @@ impl App {
                                         .iter()
                                         .filter(|layer| layer.folder_id == Some(folder.id))
                                         .count();
-                                let response = ui.add_sized(
-                                    [width, 22.0],
-                                    egui::Label::new(format!("{}  ·  {}", folder.name, item_count))
-                                        .sense(Sense::click()),
+                                let kind = if language == UiLanguage::Japanese {
+                                    format!("フォルダ・{item_count}項目")
+                                } else if item_count == 1 {
+                                    "Folder · 1 item".to_owned()
+                                } else {
+                                    format!("Folder · {item_count} items")
+                                };
+                                let response = layer_item_label(
+                                    ui,
+                                    width,
+                                    &folder.name,
+                                    &kind,
+                                    folder_selected,
                                 );
+                                if response.clicked() {
+                                    select_layer_folder = Some(folder.id);
+                                }
                                 if response.double_clicked() {
                                     begin_layer_item_edit = Some(folder.id);
                                 }
@@ -4473,20 +4529,25 @@ impl App {
                             } else {
                                 self.doc.faces[face_idx].name.clone()
                             };
+                            let kind = if self.doc.faces[face_idx].baked.is_some() {
+                                language.text("結合シェイプ", "Merged shape")
+                            } else {
+                                language.text("シェイプ", "Shape")
+                            };
                             row_frame(ui, selected, |ui| {
-                                ui.add_space(18.0);
-                                let visible = self.doc.faces[face_idx].visible;
-                                if eye_button(ui, visible).clicked() {
-                                    let snapshot = self.doc.clone();
-                                    self.doc.faces[face_idx].visible = !visible;
-                                    self.push_history_snapshot(snapshot);
-                                }
+                                ui.add_space(17.0);
                                 self.face_preview_widget(ui, face_idx, 20.0);
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
                                         if delete_button(ui).clicked() {
                                             remove_face = Some(face_idx);
+                                        }
+                                        let visible = self.doc.faces[face_idx].visible;
+                                        if eye_button(ui, visible).clicked() {
+                                            let snapshot = self.doc.clone();
+                                            self.doc.faces[face_idx].visible = !visible;
+                                            self.push_history_snapshot(snapshot);
                                         }
                                         let width = ui.available_width();
                                         if editing {
@@ -4501,18 +4562,8 @@ impl App {
                                             }
                                             response.request_focus();
                                         } else {
-                                            let text = if selected {
-                                                egui::RichText::new(name)
-                                                    .color(ui.visuals().strong_text_color())
-                                            } else {
-                                                egui::RichText::new(name)
-                                            };
-                                            let response = ui.add_sized(
-                                                [width, 22.0],
-                                                egui::Label::new(text)
-                                                    .sense(Sense::click())
-                                                    .selectable(false),
-                                            );
+                                            let response =
+                                                layer_item_label(ui, width, &name, kind, selected);
                                             if response.clicked() {
                                                 if shift {
                                                     self.toggle_selection(Selection::Face(
@@ -4542,16 +4593,16 @@ impl App {
                         for empty in folder_empty_layers {
                             let selected = self.selected_empty_layers.contains(&empty.id);
                             row_frame(ui, selected, |ui| {
-                                ui.add_space(18.0);
-                                if eye_button(ui, empty.visible).clicked() {
-                                    toggle_empty_visibility = Some(empty.id);
-                                }
+                                ui.add_space(17.0);
                                 panel_glyph(ui, PanelGlyph::EmptyLayer);
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
                                         if delete_button(ui).clicked() {
                                             remove_empty = Some(empty.id);
+                                        }
+                                        if eye_button(ui, empty.visible).clicked() {
+                                            toggle_empty_visibility = Some(empty.id);
                                         }
                                         let width = ui.available_width();
                                         if self.layer_item_editor == Some(empty.id) {
@@ -4575,15 +4626,12 @@ impl App {
                                                 }
                                             }
                                         } else {
-                                            let text = if selected {
-                                                egui::RichText::new(&empty.name)
-                                                    .color(ui.visuals().strong_text_color())
-                                            } else {
-                                                egui::RichText::new(&empty.name)
-                                            };
-                                            let response = ui.add_sized(
-                                                [width, 22.0],
-                                                egui::Label::new(text).sense(Sense::click()),
+                                            let response = layer_item_label(
+                                                ui,
+                                                width,
+                                                &empty.name,
+                                                language.text("空レイヤー", "Empty layer"),
+                                                selected,
                                             );
                                             if response.clicked() {
                                                 select_empty_layer = Some(empty.id);
@@ -4609,18 +4657,23 @@ impl App {
                     };
                     let selected = self.is_selected(Selection::Face(i));
                     let editing = self.face_editor == Some(i);
+                    let kind = if self.doc.faces[i].baked.is_some() {
+                        language.text("結合シェイプ", "Merged shape")
+                    } else {
+                        language.text("シェイプ", "Shape")
+                    };
                     row_frame(ui, selected, |ui| {
-                        let visible = self.doc.faces[i].visible;
-                        if eye_button(ui, visible).clicked() {
-                            let snapshot = self.doc.clone();
-                            self.doc.faces[i].visible = !visible;
-                            self.push_history_snapshot(snapshot);
-                        }
                         self.face_preview_widget(ui, i, 20.0);
                         // × を右端に固定し、名前は残り幅いっぱいに広げる
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if delete_button(ui).clicked() {
                                 remove_face = Some(i);
+                            }
+                            let visible = self.doc.faces[i].visible;
+                            if eye_button(ui, visible).clicked() {
+                                let snapshot = self.doc.clone();
+                                self.doc.faces[i].visible = !visible;
+                                self.push_history_snapshot(snapshot);
                             }
                             let w = ui.available_width();
                             if editing {
@@ -4635,18 +4688,7 @@ impl App {
                             } else {
                                 // 選択ハイライトは行フレームが全幅で描くので、ここは
                                 // 背景なしのクリック可能ラベルにする（二重の枠を避ける）
-                                let txt = if selected {
-                                    egui::RichText::new(name)
-                                        .color(ui.visuals().strong_text_color())
-                                } else {
-                                    egui::RichText::new(name)
-                                };
-                                let resp = ui.add_sized(
-                                    [w, 22.0],
-                                    egui::Label::new(txt)
-                                        .sense(Sense::click())
-                                        .selectable(false),
-                                );
+                                let resp = layer_item_label(ui, w, &name, kind, selected);
                                 if resp.clicked() {
                                     if shift {
                                         self.toggle_selection(Selection::Face(i));
@@ -4671,13 +4713,13 @@ impl App {
                 for empty in root_empty_layers {
                     let selected = self.selected_empty_layers.contains(&empty.id);
                     row_frame(ui, selected, |ui| {
-                        if eye_button(ui, empty.visible).clicked() {
-                            toggle_empty_visibility = Some(empty.id);
-                        }
                         panel_glyph(ui, PanelGlyph::EmptyLayer);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if delete_button(ui).clicked() {
                                 remove_empty = Some(empty.id);
+                            }
+                            if eye_button(ui, empty.visible).clicked() {
+                                toggle_empty_visibility = Some(empty.id);
                             }
                             let width = ui.available_width();
                             if self.layer_item_editor == Some(empty.id) {
@@ -4699,15 +4741,12 @@ impl App {
                                     }
                                 }
                             } else {
-                                let text = if selected {
-                                    egui::RichText::new(&empty.name)
-                                        .color(ui.visuals().strong_text_color())
-                                } else {
-                                    egui::RichText::new(&empty.name)
-                                };
-                                let response = ui.add_sized(
-                                    [width, 22.0],
-                                    egui::Label::new(text).sense(Sense::click()),
+                                let response = layer_item_label(
+                                    ui,
+                                    width,
+                                    &empty.name,
+                                    language.text("空レイヤー", "Empty layer"),
+                                    selected,
                                 );
                                 if response.clicked() {
                                     select_empty_layer = Some(empty.id);
@@ -4722,6 +4761,9 @@ impl App {
             });
         if let Some(id) = select_empty_layer {
             self.select_empty_layer(id, shift);
+        }
+        if let Some(id) = select_layer_folder {
+            self.select_layer_folder(id, shift);
         }
         if let Some(id) = begin_layer_item_edit {
             self.begin_layer_item_edit(id);
@@ -4768,6 +4810,7 @@ impl App {
         if let Some(id) = remove_folder {
             let snapshot = self.doc.clone();
             self.doc.layer_folders.retain(|folder| folder.id != id);
+            self.selected_layer_folders.remove(&id);
             for layer in &mut self.doc.empty_layers {
                 if layer.folder_id == Some(id) {
                     layer.folder_id = None;
@@ -4883,6 +4926,8 @@ impl App {
 
     fn render_properties_tab(&mut self, ui: &mut egui::Ui) {
         let language = self.language;
+        let folder_ids: Vec<u64> = self.selected_layer_folders.iter().copied().collect();
+        let empty_layer_ids: Vec<u64> = self.selected_empty_layers.iter().copied().collect();
         let face_indices: Vec<_> = self
             .selection
             .iter()
@@ -4907,6 +4952,207 @@ impl App {
             .collect();
 
         ui.add_space(2.0);
+        if !folder_ids.is_empty() {
+            if folder_ids.len() > 1 {
+                section_header(
+                    ui,
+                    &format!(
+                        "{} {}",
+                        language.text("フォルダ", "Folders"),
+                        folder_ids.len()
+                    ),
+                );
+                ui.horizontal(|ui| {
+                    for (visible, label) in [
+                        (true, language.text("すべて表示", "Show all")),
+                        (false, language.text("すべて非表示", "Hide all")),
+                    ] {
+                        if ui.button(label).clicked() {
+                            let snapshot = self.doc.clone();
+                            let mut changed = false;
+                            for folder in &mut self.doc.layer_folders {
+                                if folder_ids.contains(&folder.id) {
+                                    changed |= folder.visible != visible;
+                                    folder.visible = visible;
+                                    for face_idx in &folder.face_indices {
+                                        if let Some(face) = self.doc.faces.get_mut(*face_idx) {
+                                            face.visible = visible;
+                                        }
+                                    }
+                                    for layer in &mut self.doc.empty_layers {
+                                        if layer.folder_id == Some(folder.id) {
+                                            layer.visible = visible;
+                                        }
+                                    }
+                                }
+                            }
+                            if changed {
+                                self.push_history_snapshot(snapshot);
+                            }
+                        }
+                    }
+                });
+            } else if let Some(folder_idx) = self
+                .doc
+                .layer_folders
+                .iter()
+                .position(|folder| folder.id == folder_ids[0])
+            {
+                let item_count = self.doc.layer_folders[folder_idx].face_indices.len()
+                    + self
+                        .doc
+                        .empty_layers
+                        .iter()
+                        .filter(|layer| layer.folder_id == Some(folder_ids[0]))
+                        .count();
+                let title = self.doc.layer_folders[folder_idx].name.clone();
+                section_header(ui, &title);
+                ui.label(
+                    egui::RichText::new(if language == UiLanguage::Japanese {
+                        format!("フォルダ・{item_count}項目")
+                    } else if item_count == 1 {
+                        "Folder · 1 item".to_owned()
+                    } else {
+                        format!("Folder · {item_count} items")
+                    })
+                    .small()
+                    .color(self.theme_colors().text2),
+                );
+                let before_name = self.doc.clone();
+                let name_response = ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(language.text("名前", "Name"))
+                            .weak()
+                            .small(),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.doc.layer_folders[folder_idx].name)
+                            .desired_width(ui.available_width()),
+                    )
+                });
+                if name_response.inner.changed() && self.layer_item_name_snapshot.is_none() {
+                    self.layer_item_name_snapshot = Some(before_name);
+                }
+                if name_response.inner.lost_focus() {
+                    self.commit_layer_item_edit();
+                }
+                let visibility_snapshot = self.doc.clone();
+                let mut visible = self.doc.layer_folders[folder_idx].visible;
+                if ui
+                    .checkbox(&mut visible, language.text("表示", "Visible"))
+                    .changed()
+                {
+                    self.doc.layer_folders[folder_idx].visible = visible;
+                    let face_indices = self.doc.layer_folders[folder_idx].face_indices.clone();
+                    for face_idx in face_indices {
+                        if let Some(face) = self.doc.faces.get_mut(face_idx) {
+                            face.visible = visible;
+                        }
+                    }
+                    for layer in &mut self.doc.empty_layers {
+                        if layer.folder_id == Some(folder_ids[0]) {
+                            layer.visible = visible;
+                        }
+                    }
+                    self.push_history_snapshot(visibility_snapshot);
+                }
+            }
+            return;
+        }
+
+        if !empty_layer_ids.is_empty() {
+            if empty_layer_ids.len() > 1 {
+                section_header(
+                    ui,
+                    &format!(
+                        "{} {}",
+                        language.text("空レイヤー", "Empty layers"),
+                        empty_layer_ids.len()
+                    ),
+                );
+                ui.horizontal(|ui| {
+                    for (visible, label) in [
+                        (true, language.text("すべて表示", "Show all")),
+                        (false, language.text("すべて非表示", "Hide all")),
+                    ] {
+                        if ui.button(label).clicked() {
+                            let snapshot = self.doc.clone();
+                            let mut changed = false;
+                            for layer in &mut self.doc.empty_layers {
+                                if empty_layer_ids.contains(&layer.id) {
+                                    changed |= layer.visible != visible;
+                                    layer.visible = visible;
+                                }
+                            }
+                            if changed {
+                                self.push_history_snapshot(snapshot);
+                            }
+                        }
+                    }
+                });
+            } else if let Some(layer_idx) = self
+                .doc
+                .empty_layers
+                .iter()
+                .position(|layer| layer.id == empty_layer_ids[0])
+            {
+                let title = self.doc.empty_layers[layer_idx].name.clone();
+                section_header(ui, &title);
+                ui.label(
+                    egui::RichText::new(language.text("空レイヤー", "Empty layer"))
+                        .small()
+                        .color(self.theme_colors().text2),
+                );
+                let before_name = self.doc.clone();
+                let name_response = ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(language.text("名前", "Name"))
+                            .weak()
+                            .small(),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.doc.empty_layers[layer_idx].name)
+                            .desired_width(ui.available_width()),
+                    )
+                });
+                if name_response.inner.changed() && self.layer_item_name_snapshot.is_none() {
+                    self.layer_item_name_snapshot = Some(before_name);
+                }
+                if name_response.inner.lost_focus() {
+                    self.commit_layer_item_edit();
+                }
+                let visibility_snapshot = self.doc.clone();
+                if ui
+                    .checkbox(
+                        &mut self.doc.empty_layers[layer_idx].visible,
+                        language.text("表示", "Visible"),
+                    )
+                    .changed()
+                {
+                    self.push_history_snapshot(visibility_snapshot);
+                }
+                let location = self.doc.empty_layers[layer_idx]
+                    .folder_id
+                    .and_then(|id| {
+                        self.doc
+                            .layer_folders
+                            .iter()
+                            .find(|folder| folder.id == id)
+                            .map(|folder| folder.name.as_str())
+                    })
+                    .unwrap_or_else(|| language.text("最上位", "Root"));
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{}: {location}",
+                        language.text("場所", "Location")
+                    ))
+                    .small()
+                    .color(self.theme_colors().text2),
+                );
+            }
+            return;
+        }
+
         if let Some(peg_id) = peg_indices.first().copied() {
             let Some(peg_idx) = self.doc.custom_pegs.iter().position(|peg| peg.id == peg_id) else {
                 return;
@@ -5011,6 +5257,32 @@ impl App {
                     self.status = "選択中のレイヤーを非表示".to_owned();
                 }
             });
+            ui.add_space(8.0);
+            section_header(ui, language.text("整列", "Align"));
+            let mut align = None;
+            ui.horizontal(|ui| {
+                for (axis, tooltip) in [
+                    (AlignAxis::Left, language.text("左揃え", "Align left")),
+                    (
+                        AlignAxis::CenterX,
+                        language.text("左右中央揃え", "Align horizontal centers"),
+                    ),
+                    (AlignAxis::Right, language.text("右揃え", "Align right")),
+                    (AlignAxis::Top, language.text("上揃え", "Align top")),
+                    (
+                        AlignAxis::CenterY,
+                        language.text("上下中央揃え", "Align vertical centers"),
+                    ),
+                    (AlignAxis::Bottom, language.text("下揃え", "Align bottom")),
+                ] {
+                    if align_icon_button(ui, axis, tooltip).clicked() {
+                        align = Some(axis);
+                    }
+                }
+            });
+            if let Some(axis) = align {
+                self.align_selected_faces(axis);
+            }
             return;
         }
 
@@ -7220,12 +7492,12 @@ impl TabViewer for AppTabViewer<'_> {
         self.app.render_tab_content(ui, *tab);
     }
 
-    fn closeable(&mut self, tab: &mut Self::Tab) -> bool {
-        !matches!(*tab, DockTab::Canvas | DockTab::Proof)
+    fn is_closeable(&self, tab: &Self::Tab) -> bool {
+        !matches!(*tab, DockTab::Project | DockTab::Canvas | DockTab::Proof)
     }
 
     fn allowed_in_windows(&self, tab: &mut Self::Tab) -> bool {
-        !matches!(*tab, DockTab::Canvas | DockTab::Proof)
+        !matches!(*tab, DockTab::Project | DockTab::Canvas | DockTab::Proof)
     }
 }
 
@@ -7408,28 +7680,19 @@ enum LayerActionGlyph {
     Folder,
 }
 
-/// レイヤーパネルの追加操作。記号文字をラベルへ混ぜず、16pxのベクター
-/// アイコンとテキストを一つのボタンとして描く。
+/// レイヤーパネルの追加操作。モック同様、24pxのアイコンボタンに揃え、
+/// 説明はツールチップとアクセシビリティ名へ持たせる。
 fn layer_action_button(ui: &mut egui::Ui, glyph: LayerActionGlyph, label: &str) -> egui::Response {
-    let font_id = TextStyle::Button.resolve(ui.style());
-    let galley = ui
-        .painter()
-        .layout_no_wrap(label.to_owned(), font_id, ui.visuals().text_color());
-    let width = galley.size().x + 38.0;
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 26.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(26.0, 24.0), Sense::click());
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
     });
     let visuals = ui.style().interact(&response);
-    ui.painter().rect(
-        rect,
-        6.0,
-        visuals.weak_bg_fill,
-        visuals.bg_stroke,
-        egui::StrokeKind::Inside,
-    );
+    if response.hovered() {
+        ui.painter().rect_filled(rect, 5.0, visuals.weak_bg_fill);
+    }
 
-    let icon_center = Pos2::new(rect.left() + 14.0, rect.center().y);
+    let icon_center = rect.center();
     let color = visuals.fg_stroke.color;
     let stroke = Stroke::new(1.35, color);
     match glyph {
@@ -7463,10 +7726,38 @@ fn layer_action_button(ui: &mut egui::Ui, glyph: LayerActionGlyph, label: &str) 
             ));
         }
     }
-    ui.painter().galley(
-        Pos2::new(rect.left() + 27.0, rect.center().y - galley.size().y * 0.5),
-        galley,
-        color,
+    response
+}
+
+/// レイヤー名と種類を二段で描く。狭いパネルでも種類が消えず、
+/// フォルダ／結合済み／通常／空レイヤーの違いを走査できる。
+fn layer_item_label(
+    ui: &mut egui::Ui,
+    width: f32,
+    name: &str,
+    kind: &str,
+    selected: bool,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width.max(8.0), 32.0), Sense::click());
+    let painter = ui.painter().with_clip_rect(rect);
+    let name_color = if selected {
+        ui.visuals().strong_text_color()
+    } else {
+        ui.visuals().text_color()
+    };
+    painter.text(
+        Pos2::new(rect.left(), rect.top() + 3.0),
+        egui::Align2::LEFT_TOP,
+        name,
+        FontId::proportional(11.5),
+        name_color,
+    );
+    painter.text(
+        Pos2::new(rect.left(), rect.bottom() - 2.0),
+        egui::Align2::LEFT_BOTTOM,
+        kind,
+        FontId::proportional(9.5),
+        ui.visuals().weak_text_color(),
     );
     response
 }
@@ -7702,22 +7993,22 @@ fn section_header(ui: &mut egui::Ui, text: &str) {
     ui.add_space(6.0);
 }
 
-/// リスト行の共通フレーム。全幅・26px 高で、選択時は accent 背景、
+/// リスト行の共通フレーム。全幅・36px 高で、選択時は accent 背景、
 /// ホバー時は淡い背景を敷いてから中身を左右レイアウトで並べる
 fn row_frame<R>(ui: &mut egui::Ui, selected: bool, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     let full_w = ui.available_width();
-    let (bg_rect, _) = ui.allocate_exact_size(Vec2::new(full_w, 26.0), Sense::hover());
+    let (bg_rect, _) = ui.allocate_exact_size(Vec2::new(full_w, 36.0), Sense::hover());
     let hovered = ui.rect_contains_pointer(bg_rect);
     if selected {
         let selected_fill = if ui.visuals().dark_mode {
-            Color32::from_rgb(38, 54, 82)
+            Color32::from_rgb(34, 34, 40)
         } else {
-            Color32::from_rgb(219, 234, 254)
+            Color32::from_rgb(234, 235, 250)
         };
         let accent = if ui.visuals().dark_mode {
-            Color32::from_rgb(10, 132, 255)
+            Color32::from_rgb(94, 106, 210)
         } else {
-            Color32::from_rgb(0, 122, 255)
+            Color32::from_rgb(82, 91, 194)
         };
         ui.painter().rect_filled(bg_rect, 5.0, selected_fill);
         ui.painter().rect_filled(
@@ -7735,7 +8026,7 @@ fn row_frame<R>(ui: &mut egui::Ui, selected: bool, add: impl FnOnce(&mut egui::U
             ui.visuals().widgets.hovered.bg_fill.gamma_multiply(0.5),
         );
     }
-    let inner = bg_rect.shrink2(Vec2::new(6.0, 2.0));
+    let inner = bg_rect.shrink2(Vec2::new(7.0, 1.0));
     let mut child = ui.new_child(
         egui::UiBuilder::new()
             .max_rect(inner)
@@ -8112,6 +8403,45 @@ mod tests {
     }
 
     #[test]
+    fn align_selected_faces_moves_baked_layers_on_the_grid() {
+        let mut app = test_app();
+        app.doc.grid.spacing = 200.0;
+        for offset in [0.0, 200.0] {
+            app.doc.faces.push(Face {
+                start: StartAnchor {
+                    peg: PegRef::Grid { row: 0, col: 0 },
+                    port: Port::Top,
+                },
+                elements: Vec::new(),
+                name: String::new(),
+                visible: true,
+                baked: Some(crate::model::BakedShape {
+                    rings: vec![vec![
+                        Point::new(offset, 0.0),
+                        Point::new(offset + 100.0, 0.0),
+                        Point::new(offset + 100.0, 100.0),
+                        Point::new(offset, 100.0),
+                    ]],
+                    bevel: 0.0,
+                }),
+                ignored_pegs: Vec::new(),
+            });
+        }
+        app.set_single_selection(Some(Selection::Face(0)));
+        app.toggle_selection(Selection::Face(1));
+
+        app.align_selected_faces(AlignAxis::Left);
+
+        let second = &app.doc.faces[1].baked.as_ref().unwrap().rings[0];
+        let left = second
+            .iter()
+            .map(|point| point.x)
+            .fold(f64::INFINITY, f64::min);
+        assert_eq!(left, 0.0);
+        assert_eq!(app.undo.len(), 1);
+    }
+
+    #[test]
     fn app_grid_scrub_pipeline_does_not_panic() {
         let mut app = test_app();
         app.canvas_size = Vec2::new(1280.0, 800.0);
@@ -8309,11 +8639,72 @@ mod tests {
 
         assert_eq!(app.doc.layer_folders.len(), 1);
         assert!(app.selected_empty_layers.is_empty());
+        assert!(app.selected_layer_folders.contains(&folder_id));
         assert!(app
             .doc
             .empty_layers
             .iter()
             .all(|layer| layer.folder_id == Some(folder_id)));
+    }
+
+    #[test]
+    fn keyboard_delete_handles_folders_and_empty_layers_with_undo() {
+        let mut app = test_app();
+        let layer_id = app.add_empty_layer();
+        let folder_id = app.add_layer_folder();
+
+        app.select_layer_folder(folder_id, false);
+        app.delete_selected();
+        assert!(app.doc.layer_folders.is_empty());
+        assert_eq!(app.doc.empty_layers[0].folder_id, None);
+
+        app.do_undo();
+        assert_eq!(app.doc.layer_folders.len(), 1);
+        assert_eq!(app.doc.empty_layers[0].folder_id, Some(folder_id));
+
+        app.select_empty_layer(layer_id, false);
+        app.delete_selected();
+        assert!(app.doc.empty_layers.is_empty());
+    }
+
+    #[test]
+    fn adding_an_empty_layer_to_a_selected_folder_places_it_inside() {
+        let mut app = test_app();
+        let folder_id = app.add_layer_folder();
+
+        let layer_id = app.add_empty_layer();
+
+        let layer = app
+            .doc
+            .empty_layers
+            .iter()
+            .find(|layer| layer.id == layer_id)
+            .unwrap();
+        assert_eq!(layer.folder_id, Some(folder_id));
+    }
+
+    #[test]
+    fn clear_glyph_removes_all_document_content_but_keeps_grid_settings() {
+        let mut app = test_app();
+        app.doc.grid.spacing = 240.0;
+        app.add_empty_layer();
+        app.add_layer_folder();
+        app.doc.custom_pegs.push(CustomPeg {
+            id: 7,
+            center: Point::new(80.0, 80.0),
+            radius: 18.0,
+            visible: true,
+        });
+        app.doc.disabled_pegs.push(PegRef::Grid { row: 2, col: 3 });
+
+        app.clear_glyph();
+
+        assert!(app.doc.faces.is_empty());
+        assert!(app.doc.custom_pegs.is_empty());
+        assert!(app.doc.disabled_pegs.is_empty());
+        assert!(app.doc.layer_folders.is_empty());
+        assert!(app.doc.empty_layers.is_empty());
+        assert_eq!(app.doc.grid.spacing, 240.0);
     }
 
     #[test]
@@ -8595,6 +8986,7 @@ mod tests {
             draw: None,
             selection: Vec::new(),
             selected_empty_layers: std::collections::HashSet::new(),
+            selected_layer_folders: std::collections::HashSet::new(),
             dock: App::default_dock_layout(),
             pending_panel_tab: None,
             face_editor: None,
