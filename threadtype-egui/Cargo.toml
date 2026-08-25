@@ -5,16 +5,18 @@ edition = "2021"
 description = "円形ペグ・フォント制作ツール（タウトストリング方式）"
 
 [dependencies]
-eframe = "0.29"
-egui = "0.29"
-egui_dock = "0.14"
+eframe = "=0.33.3"
+egui = "=0.33.3"
+egui_dock = "=0.18.0"
+egui-shadcn = "=0.3.1"
 kurbo = { version = "0.11", features = ["serde"] }
 lyon = "1.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rfd = "0.15"
+rfd = "=0.16.0"
 ab_glyph = "0.2"
 geo = "0.29"
+ttf-parser = "0.25.1"
 
 [profile.dev]
 opt-level = 1

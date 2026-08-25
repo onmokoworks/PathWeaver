@@ -8,9 +8,9 @@
 //! `exit` を別々に持つ。巻き付き量は `s * (exit - entry)` で、これが 0 を
 //! 割った巻きは解放される。半周以上（2π 超の多重巻き）もこの表現で扱える。
 
+use crate::model::{Element, Face, PegRef, PegShape, Port};
 use kurbo::Point;
 use serde::{Deserialize, Serialize};
-use crate::model::{Element, Face, PegRef, PegShape, Port};
 use std::f64::consts::PI;
 
 /// 巻き付き量がこの値以下になったら解放（たるみ判定）
@@ -50,9 +50,17 @@ pub struct Thread {
 /// 一本の外周線を構成する区間。直線（接線）と円弧の列
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum Seg {
-    Line { from: Point, to: Point },
+    Line {
+        from: Point,
+        to: Point,
+    },
     /// start/end はアンラップ済み角度。end - start が符号付き掃引量（2π 超も可）
-    Arc { center: Point, radius: f64, start: f64, end: f64 },
+    Arc {
+        center: Point,
+        radius: f64,
+        start: f64,
+        end: f64,
+    },
 }
 
 pub fn angle_from(center: Point, p: Point) -> f64 {
@@ -60,7 +68,10 @@ pub fn angle_from(center: Point, p: Point) -> f64 {
 }
 
 pub fn on_circle(center: Point, radius: f64, angle: f64) -> Point {
-    Point::new(center.x + radius * angle.cos(), center.y + radius * angle.sin())
+    Point::new(
+        center.x + radius * angle.cos(),
+        center.y + radius * angle.sin(),
+    )
 }
 
 pub fn peg_signed_distance(peg: &Peg, point: Point) -> f64 {
@@ -89,7 +100,11 @@ pub fn on_peg(peg: &Peg, angle: f64) -> Point {
     for _ in 0..36 {
         let mid = (lo + hi) * 0.5;
         let point = Point::new(peg.center.x + dx * mid, peg.center.y + dy * mid);
-        if peg_signed_distance(peg, point) <= 0.0 { lo = mid; } else { hi = mid; }
+        if peg_signed_distance(peg, point) <= 0.0 {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
     }
     Point::new(peg.center.x + dx * lo, peg.center.y + dy * lo)
 }
@@ -112,14 +127,21 @@ fn tangent_angle_from_seed(point: Point, peg: &Peg, seed: f64) -> f64 {
     for i in -48..=48 {
         let candidate = seed + i as f64 * PI / 192.0;
         let candidate_score = objective(candidate);
-        if candidate_score < score { best = candidate; score = candidate_score; }
+        if candidate_score < score {
+            best = candidate;
+            score = candidate_score;
+        }
     }
     let mut step = PI / 192.0;
     for _ in 0..18 {
         let left = best - step;
         let right = best + step;
-        if objective(left) < objective(best) { best = left; }
-        if objective(right) < objective(best) { best = right; }
+        if objective(left) < objective(best) {
+            best = left;
+        }
+        if objective(right) < objective(best) {
+            best = right;
+        }
         step *= 0.5;
     }
     best
@@ -166,7 +188,11 @@ fn point_tangent_entry(p: Point, peg: &Peg, s: f64) -> f64 {
     let d = p.distance(peg.center).max(peg.radius);
     let beta = (peg.radius / d).clamp(-1.0, 1.0).acos();
     let seed = angle_from(peg.center, p) + s * beta;
-    if peg.shape == PegShape::Circle { seed } else { tangent_angle_from_seed(p, peg, seed) }
+    if peg.shape == PegShape::Circle {
+        seed
+    } else {
+        tangent_angle_from_seed(p, peg, seed)
+    }
 }
 
 /// ペグから方向 s の巻きを解いて外部点 p へ離脱するときの接線角
@@ -174,7 +200,11 @@ fn point_tangent_exit(p: Point, peg: &Peg, s: f64) -> f64 {
     let d = p.distance(peg.center).max(peg.radius);
     let beta = (peg.radius / d).clamp(-1.0, 1.0).acos();
     let seed = angle_from(peg.center, p) - s * beta;
-    if peg.shape == PegShape::Circle { seed } else { tangent_angle_from_seed(p, peg, seed) }
+    if peg.shape == PegShape::Circle {
+        seed
+    } else {
+        tangent_angle_from_seed(p, peg, seed)
+    }
 }
 
 /// ペグ1（方向 s1）からペグ2（方向 s2）への共通接線。
@@ -217,7 +247,9 @@ fn circle_circle_tangent(p1: &Peg, s1: f64, p2: &Peg, s2: f64) -> Option<(f64, f
     let (mut a1, mut a2) = seed;
     for _ in 0..14 {
         let (f1, f2) = residual(a1, a2);
-        if f1.abs().max(f2.abs()) < 1e-7 { break; }
+        if f1.abs().max(f2.abs()) < 1e-7 {
+            break;
+        }
         let h = 1e-5;
         let (x1, x2) = residual(a1 + h, a2);
         let (y1, y2) = residual(a1, a2 + h);
@@ -226,7 +258,9 @@ fn circle_circle_tangent(p1: &Peg, s1: f64, p2: &Peg, s2: f64) -> Option<(f64, f
         let j12 = (y1 - f1) / h;
         let j22 = (y2 - f2) / h;
         let det = j11 * j22 - j12 * j21;
-        if det.abs() < 1e-10 { break; }
+        if det.abs() < 1e-10 {
+            break;
+        }
         let da1 = (-f1 * j22 + j12 * f2) / det;
         let da2 = (-j11 * f2 + f1 * j21) / det;
         a1 += da1.clamp(-0.25, 0.25);
@@ -257,7 +291,11 @@ fn segment_first_entry(a: Point, b: Point, peg: &Peg) -> Option<f64> {
             let mut hi = t;
             for _ in 0..24 {
                 let mid = (lo + hi) * 0.5;
-                if peg_signed_distance(peg, a + d * mid) < -PENETRATION_EPS { hi = mid; } else { lo = mid; }
+                if peg_signed_distance(peg, a + d * mid) < -PENETRATION_EPS {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
             }
             return Some(hi);
         }
@@ -285,7 +323,9 @@ fn first_hit(
         if Some(i) == exclude || ignored.contains(&i) {
             continue;
         }
-        let Some(t_in) = segment_first_entry(a, b, peg) else { continue };
+        let Some(t_in) = segment_first_entry(a, b, peg) else {
+            continue;
+        };
         if t_in >= 1.0 {
             continue;
         }
@@ -294,14 +334,24 @@ fn first_hit(
         let cross = d.x * (peg.center.y - a.y) - d.y * (peg.center.x - a.x);
         let side = if cross >= 0.0 { 1.0 } else { -1.0 };
         if best.as_ref().map_or(true, |h| t_in < h.t) {
-            best = Some(Hit { peg: i, t: t_in, side });
+            best = Some(Hit {
+                peg: i,
+                t: t_in,
+                side,
+            });
         }
     }
     best
 }
 
 /// 線分を通過するペグのインデックスを、進行方向順で返す
-pub fn pegs_penetrated_by_line(a: Point, b: Point, pegs: &[Peg], exclude: Option<usize>, ignored: &[usize]) -> Vec<usize> {
+pub fn pegs_penetrated_by_line(
+    a: Point,
+    b: Point,
+    pegs: &[Peg],
+    exclude: Option<usize>,
+    ignored: &[usize],
+) -> Vec<usize> {
     let d = b - a;
     let len2 = d.dot(d);
     if len2 < 1e-12 {
@@ -313,7 +363,9 @@ pub fn pegs_penetrated_by_line(a: Point, b: Point, pegs: &[Peg], exclude: Option
         if Some(i) == exclude || ignored.contains(&i) {
             continue;
         }
-        let Some(t_in) = segment_first_entry(a, b, peg) else { continue };
+        let Some(t_in) = segment_first_entry(a, b, peg) else {
+            continue;
+        };
         if t_in > EPS_T && t_in < 1.0 - EPS_T {
             out.push((t_in, i));
         }
@@ -329,7 +381,12 @@ pub fn segments_penetrate_pegs(segs: &[Seg], pegs: &[Peg]) -> bool {
         Seg::Line { from, to } => pegs
             .iter()
             .any(|peg| segment_first_entry(from, to, peg).is_some()),
-        Seg::Arc { center, radius, start, end } => {
+        Seg::Arc {
+            center,
+            radius,
+            start,
+            end,
+        } => {
             let sweep = end - start;
             let length = sweep.abs() * radius;
             let steps = (length / 2.0).ceil().clamp(16.0, 2048.0) as usize;
@@ -346,7 +403,11 @@ pub fn segments_penetrate_pegs(segs: &[Seg], pegs: &[Peg]) -> bool {
 
 impl Thread {
     pub fn new(anchor: Point) -> Self {
-        Thread { anchor, wraps: Vec::new(), tip: anchor }
+        Thread {
+            anchor,
+            wraps: Vec::new(),
+            tip: anchor,
+        }
     }
 
     /// 自由区間の付け根（最後の巻きの離脱点、巻きが無ければアンカー）
@@ -376,12 +437,17 @@ pub fn update_thread_ignoring(th: &mut Thread, cursor: Point, pegs: &[Peg], igno
         let head = th.head(pegs);
         let exclude = th.wraps.last().map(|w| w.peg);
         let Some(hit) = first_hit(head, th.tip, pegs, exclude, ignored) else {
-            break
+            break;
         };
         let peg = pegs[hit.peg];
         if th.wraps.is_empty() {
             let entry = point_tangent_entry(th.anchor, &peg, hit.side);
-            th.wraps.push(Wrap { peg: hit.peg, s: hit.side, entry, exit: entry });
+            th.wraps.push(Wrap {
+                peg: hit.peg,
+                s: hit.side,
+                entry,
+                exit: entry,
+            });
         } else {
             // 摩擦モデル: 前の巻きは現在の把持点で凍結する。共通接線まで
             // 滑らせる（純タウトストリング）と、開始点が共通接線上に乗る
@@ -390,7 +456,12 @@ pub fn update_thread_ignoring(th: &mut Thread, cursor: Point, pegs: &[Peg], igno
             let p1 = pegs[prev.peg];
             let grip = on_peg(&p1, prev.exit);
             let entry = point_tangent_entry(grip, &peg, hit.side);
-            th.wraps.push(Wrap { peg: hit.peg, s: hit.side, entry, exit: entry });
+            th.wraps.push(Wrap {
+                peg: hit.peg,
+                s: hit.side,
+                entry,
+                exit: entry,
+            });
         }
     }
 }
@@ -425,7 +496,12 @@ pub fn append_closing_hug(th: &mut Thread, pegs: &[Peg], start_peg: usize, ancho
     }
     if let Some((sweep, s, entry)) = best {
         if sweep > 1e-4 && sweep <= PI + 0.2 {
-            th.wraps.push(Wrap { peg: start_peg, s, entry, exit: entry + sweep * s });
+            th.wraps.push(Wrap {
+                peg: start_peg,
+                s,
+                entry,
+                exit: entry + sweep * s,
+            });
         }
     }
 }
@@ -443,7 +519,12 @@ pub fn materialize(th: &Thread, pegs: &[Peg], end: Point) -> Vec<Seg> {
         if cur.distance(pin) > 0.01 {
             segs.push(Seg::Line { from: cur, to: pin });
         }
-        segs.push(Seg::Arc { center: peg.center, radius: peg.radius, start: w.entry, end: w.exit });
+        segs.push(Seg::Arc {
+            center: peg.center,
+            radius: peg.radius,
+            start: w.entry,
+            end: w.exit,
+        });
         cur = on_peg(&peg, w.exit);
     }
     if cur.distance(end) > 0.01 {
@@ -452,10 +533,17 @@ pub fn materialize(th: &Thread, pegs: &[Peg], end: Point) -> Vec<Seg> {
     segs
 }
 
-pub fn materialize_face(face: &Face, resolve: &impl Fn(&PegRef) -> Option<Peg>) -> Option<Vec<Seg>> {
+pub fn materialize_face(
+    face: &Face,
+    resolve: &impl Fn(&PegRef) -> Option<Peg>,
+) -> Option<Vec<Seg>> {
     // 完成した閉路では作図開始ポートはUI上の入口にすぎない。円だけの面は
     // 全ペグ間の共通接線を循環計算し、8方向ポートを固定アンカーとして残さない。
-    if face.elements.iter().all(|element| matches!(element, Element::Wrap { .. })) {
+    if face
+        .elements
+        .iter()
+        .all(|element| matches!(element, Element::Wrap { .. }))
+    {
         if let Some(segs) = materialize_taut_wrap_cycle(face, resolve) {
             return Some(segs);
         }
@@ -473,7 +561,13 @@ fn materialize_taut_wrap_cycle(
         .elements
         .iter()
         .filter_map(|element| match *element {
-            Element::Wrap { peg, s, turns, sweep_hint, .. } => Some((peg, s, turns, sweep_hint)),
+            Element::Wrap {
+                peg,
+                s,
+                turns,
+                sweep_hint,
+                ..
+            } => Some((peg, s, turns, sweep_hint)),
             Element::Pin { .. } => None,
         })
         .collect();
@@ -507,9 +601,7 @@ fn materialize_taut_wrap_cycle(
                 let (exit, _) = circle_circle_tangent(&start, s, &next, next_s)?;
                 Some((s, ((exit - entry) * s).rem_euclid(TAU)))
             })
-            .min_by(|(_, a), (_, b)| {
-                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-            })?
+            .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))?
             .0;
         wraps.push((face.start.peg, start_s, 0, PI));
     }
@@ -527,18 +619,9 @@ fn materialize_taut_wrap_cycle(
     for i in 0..count {
         let previous = (i + count - 1) % count;
         let next = (i + 1) % count;
-        let (_, entry) = circle_circle_tangent(
-            &pegs[previous],
-            wraps[previous].1,
-            &pegs[i],
-            wraps[i].1,
-        )?;
-        let (exit, _) = circle_circle_tangent(
-            &pegs[i],
-            wraps[i].1,
-            &pegs[next],
-            wraps[next].1,
-        )?;
+        let (_, entry) =
+            circle_circle_tangent(&pegs[previous], wraps[previous].1, &pegs[i], wraps[i].1)?;
+        let (exit, _) = circle_circle_tangent(&pegs[i], wraps[i].1, &pegs[next], wraps[next].1)?;
         entries.push(entry);
         exits.push(exit);
     }
@@ -575,21 +658,37 @@ pub fn materialize_face_with_obstacles(
     resolve: &impl Fn(&PegRef) -> Option<Peg>,
     obstacles: &[(PegRef, Peg)],
 ) -> Option<Vec<Seg>> {
-    if !face.elements.iter().all(|element| matches!(element, Element::Wrap { .. })) {
+    if !face
+        .elements
+        .iter()
+        .all(|element| matches!(element, Element::Wrap { .. }))
+    {
         return materialize_face(face, resolve);
     }
-    if face.elements.iter().filter(|element| matches!(element, Element::Wrap { .. })).count() < 2 {
+    if face
+        .elements
+        .iter()
+        .filter(|element| matches!(element, Element::Wrap { .. }))
+        .count()
+        < 2
+    {
         return materialize_face(face, resolve);
     }
 
     let mut elements = face.elements.clone();
-    if !elements.iter().any(|element| matches!(element, Element::Wrap { peg, .. } if *peg == face.start.peg)) {
+    if !elements
+        .iter()
+        .any(|element| matches!(element, Element::Wrap { peg, .. } if *peg == face.start.peg))
+    {
         let base = materialize_taut_wrap_cycle(face, resolve)?;
         let start = resolve(&face.start.peg)?;
         let start_arc = base.iter().find_map(|segment| match *segment {
-            Seg::Arc { center, start: entry, end, .. } if center.distance(start.center) < 1e-8 => {
-                Some((entry, end))
-            }
+            Seg::Arc {
+                center,
+                start: entry,
+                end,
+                ..
+            } if center.distance(start.center) < 1e-8 => Some((entry, end)),
             _ => None,
         });
         let s = start_arc.map_or(1.0, |(entry, end)| if end >= entry { 1.0 } else { -1.0 });
@@ -617,11 +716,15 @@ pub fn materialize_face_with_obstacles(
         let mut line_index = 0usize;
         let mut insertion: Option<(usize, PegRef, f64)> = None;
         for segment in &segs {
-            let Seg::Line { from, to } = *segment else { continue };
+            let Seg::Line { from, to } = *segment else {
+                continue;
+            };
             let d = to - from;
             let mut best: Option<(f64, PegRef, f64)> = None;
             for (peg_ref, peg) in obstacles {
-                let Some(t) = segment_first_entry(from, to, peg) else { continue };
+                let Some(t) = segment_first_entry(from, to, peg) else {
+                    continue;
+                };
                 if !(1e-9..1.0 - 1e-9).contains(&t) {
                     continue;
                 }
@@ -676,13 +779,20 @@ pub fn materialize_chain(
                 }
                 cur = pos;
             }
-            Element::Wrap { peg: ref peg_ref, s, turns, exit_offset, sweep_hint } => {
+            Element::Wrap {
+                peg: ref peg_ref,
+                s,
+                turns,
+                exit_offset,
+                sweep_hint,
+            } => {
                 let peg = resolve(peg_ref)?;
 
                 // 進入は常に「直前の点」（アンカー / Pin / 前の巻きの把持点）からの
                 // 接線。ソルバーの摩擦モデルと同じ構成
                 let entry = point_tangent_entry(cur, &peg, s);
-                let nat_exit = natural_exit_angle(&peg, s, entry, elements.get(i + 1), resolve, end)?;
+                let nat_exit =
+                    natural_exit_angle(&peg, s, entry, elements.get(i + 1), resolve, end)?;
                 // 掃引の枝選択: 円の再配置で自然掃引が 0/2π を跨いだとき、
                 // 確定時の掃引量（sweep_hint）に最も近い枝を採用する
                 let mut sweep = (nat_exit - entry) * s;
@@ -695,9 +805,17 @@ pub fn materialize_chain(
 
                 let from = on_peg(&peg, entry);
                 if cur.distance(from) > 1e-9 {
-                    segs.push(Seg::Line { from: cur, to: from });
+                    segs.push(Seg::Line {
+                        from: cur,
+                        to: from,
+                    });
                 }
-                segs.push(Seg::Arc { center: peg.center, radius: peg.radius, start: entry, end: exit });
+                segs.push(Seg::Arc {
+                    center: peg.center,
+                    radius: peg.radius,
+                    start: entry,
+                    end: exit,
+                });
                 cur = on_peg(&peg, exit);
             }
         }
@@ -722,7 +840,11 @@ fn natural_exit_angle(
 ) -> Option<f64> {
     let raw = match next {
         Some(Element::Pin { pos }) => point_tangent_exit(*pos, peg, s),
-        Some(Element::Wrap { peg: next_ref, s: next_s, .. }) => {
+        Some(Element::Wrap {
+            peg: next_ref,
+            s: next_s,
+            ..
+        }) => {
             let next_peg = resolve(next_ref)?;
             let (exit, _) = circle_circle_tangent(peg, s, &next_peg, *next_s)?;
             exit
@@ -754,9 +876,8 @@ pub fn thread_to_wrap_elements(
 ) -> Option<Vec<Element>> {
     let mut out = Vec::with_capacity(th.wraps.len());
     let mut cur = th.anchor;
-    let resolve_local = |r: &PegRef| -> Option<Peg> {
-        refs.iter().position(|pr| pr == r).map(|idx| pegs[idx])
-    };
+    let resolve_local =
+        |r: &PegRef| -> Option<Peg> { refs.iter().position(|pr| pr == r).map(|idx| pegs[idx]) };
     for (i, w) in th.wraps.iter().enumerate() {
         let peg = pegs[w.peg];
         let peg_ref = *refs.get(w.peg)?;
@@ -782,24 +903,16 @@ pub fn thread_to_wrap_elements(
         let turns = (extra_sweep / TAU).round() as u32;
         let exit_offset = w.exit - (nat_exit + turns as f64 * TAU * w.s);
         let sweep_hint = (nat_exit - entry) * w.s;
-        out.push(Element::Wrap { peg: peg_ref, s: w.s, turns, exit_offset, sweep_hint });
+        out.push(Element::Wrap {
+            peg: peg_ref,
+            s: w.s,
+            turns,
+            exit_offset,
+            sweep_hint,
+        });
         cur = on_peg(&peg, w.exit);
     }
     Some(out)
-}
-
-/// 実体化済みの区間列を逆向きに辿る列にする（同一曲線・逆順）。
-/// 向きの正規化は保存データではなく出力時にこれで行う
-pub fn reverse_segs(segs: &[Seg]) -> Vec<Seg> {
-    segs.iter()
-        .rev()
-        .map(|seg| match *seg {
-            Seg::Line { from, to } => Seg::Line { from: to, to: from },
-            Seg::Arc { center, radius, start, end } => {
-                Seg::Arc { center, radius, start: end, end: start }
-            }
-        })
-        .collect()
 }
 
 /// 区間列を折れ線に展開。弧の分割幅を弦誤差 tol（ワールド単位）から決める。
@@ -815,7 +928,12 @@ pub fn flatten_segs_tol(segs: &[Seg], out: &mut Vec<Point>, tol: f64) {
                 }
                 out.push(to);
             }
-            Seg::Arc { center, radius, start, end } => {
+            Seg::Arc {
+                center,
+                radius,
+                start,
+                end,
+            } => {
                 let step = if radius > 1e-6 {
                     (8.0 * tol / radius).sqrt().clamp(0.02, 0.5)
                 } else {
@@ -846,7 +964,12 @@ pub fn flatten_segs(segs: &[Seg], out: &mut Vec<Point>) {
                 }
                 out.push(to);
             }
-            Seg::Arc { center, radius, start, end } => {
+            Seg::Arc {
+                center,
+                radius,
+                start,
+                end,
+            } => {
                 let sweep = end - start;
                 let steps = ((sweep.abs() / 0.06).ceil() as usize).max(2);
                 if out.is_empty() {
@@ -966,6 +1089,242 @@ pub fn union_polygon_ring_sets(ring_sets: &[Vec<Vec<Point>>]) -> Vec<Vec<Point>>
     rings
 }
 
+/// 画面に見えている塗りをそのまま論理和へ変換する。
+/// 各シェイプを画面と同じ NonZero で三角形分割して自己交差を解消してから、
+/// 全三角形を加算的に union するため、重なりが逆向き輪郭で抜け落ちない。
+pub fn union_visible_ring_sets(ring_sets: &[Vec<Vec<Point>>]) -> Vec<Vec<Point>> {
+    use lyon::math::point as lpoint;
+    use lyon::path::Path;
+    use lyon::tessellation::{
+        BuffersBuilder, FillOptions, FillRule, FillTessellator, FillVertex, VertexBuffers,
+    };
+
+    let mut triangle_shapes: Vec<Vec<Vec<Point>>> = Vec::new();
+    let mut tessellate = |rings: &[Vec<Point>]| {
+        let mut builder = Path::builder();
+        let mut has_path = false;
+        for ring in rings.iter().filter(|ring| ring.len() >= 3) {
+            builder.begin(lpoint(ring[0].x as f32, ring[0].y as f32));
+            for point in &ring[1..] {
+                builder.line_to(lpoint(point.x as f32, point.y as f32));
+            }
+            builder.close();
+            has_path = true;
+        }
+        if !has_path {
+            return;
+        }
+        let path = builder.build();
+        let mut buffers: VertexBuffers<Point, u32> = VertexBuffers::new();
+        let mut tessellator = FillTessellator::new();
+        let options = FillOptions::default()
+            .with_fill_rule(FillRule::NonZero)
+            .with_tolerance(0.05);
+        if tessellator
+            .tessellate_path(
+                &path,
+                &options,
+                &mut BuffersBuilder::new(&mut buffers, |vertex: FillVertex| {
+                    Point::new(vertex.position().x as f64, vertex.position().y as f64)
+                }),
+            )
+            .is_err()
+        {
+            return;
+        }
+        for triangle in buffers.indices.chunks_exact(3) {
+            triangle_shapes.push(vec![vec![
+                buffers.vertices[triangle[0] as usize],
+                buffers.vertices[triangle[1] as usize],
+                buffers.vertices[triangle[2] as usize],
+            ]]);
+        }
+    };
+
+    for rings in ring_sets {
+        let mut ordinary_rings = Vec::new();
+        let mut additive_cycles = Vec::new();
+        for ring in rings.iter().filter(|ring| ring.len() >= 3) {
+            let cycles = split_self_intersecting_ring(ring);
+            if cycles.len() > 1 {
+                additive_cycles.extend(cycles);
+            } else {
+                ordinary_rings.push(ring.clone());
+            }
+        }
+
+        // A normal multi-ring shape is kept together so its inner rings remain holes.
+        // A self-overlapping contour is split into visible lobes and each lobe is added;
+        // opposite winding must not erase an overlap in the authored thread.
+        tessellate(&ordinary_rings);
+        for cycle in additive_cycles {
+            tessellate(&[cycle]);
+        }
+    }
+    union_polygon_ring_sets(&triangle_shapes)
+}
+
+fn split_self_intersecting_ring(ring: &[Point]) -> Vec<Vec<Point>> {
+    const EPS: f64 = 1e-7;
+    if ring.len() < 3 {
+        return Vec::new();
+    }
+
+    let mut points = ring.to_vec();
+    if points.len() > 1 && points[0].distance(*points.last().unwrap()) <= EPS {
+        points.pop();
+    }
+    let segment_count = points.len();
+    if segment_count < 3 {
+        return Vec::new();
+    }
+
+    let mut splits: Vec<Vec<(f64, Point)>> = (0..segment_count)
+        .map(|index| {
+            vec![
+                (0.0, points[index]),
+                (1.0, points[(index + 1) % segment_count]),
+            ]
+        })
+        .collect();
+
+    for first in 0..segment_count {
+        for second in (first + 1)..segment_count {
+            if second == first + 1 || (first == 0 && second + 1 == segment_count) {
+                continue;
+            }
+            let a = points[first];
+            let b = points[(first + 1) % segment_count];
+            let c = points[second];
+            let d = points[(second + 1) % segment_count];
+            let rx = b.x - a.x;
+            let ry = b.y - a.y;
+            let sx = d.x - c.x;
+            let sy = d.y - c.y;
+            let denominator = rx * sy - ry * sx;
+            if denominator.abs() <= EPS {
+                continue;
+            }
+            let qx = c.x - a.x;
+            let qy = c.y - a.y;
+            let t = (qx * sy - qy * sx) / denominator;
+            let u = (qx * ry - qy * rx) / denominator;
+            if t > EPS && t < 1.0 - EPS && u > EPS && u < 1.0 - EPS {
+                let intersection = Point::new(a.x + rx * t, a.y + ry * t);
+                splits[first].push((t, intersection));
+                splits[second].push((u, intersection));
+            }
+        }
+    }
+
+    let mut expanded = Vec::new();
+    for segment in &mut splits {
+        segment.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        segment.dedup_by(|a, b| a.1.distance(b.1) <= EPS);
+        for (_, point) in segment.iter().take(segment.len().saturating_sub(1)) {
+            if expanded
+                .last()
+                .is_none_or(|last: &Point| last.distance(*point) > EPS)
+            {
+                expanded.push(*point);
+            }
+        }
+    }
+    expanded.push(expanded[0]);
+
+    fn point_key(point: Point) -> (i64, i64) {
+        const SCALE: f64 = 1_000_000.0;
+        (
+            (point.x * SCALE).round() as i64,
+            (point.y * SCALE).round() as i64,
+        )
+    }
+
+    let mut cycles = Vec::new();
+    let mut current = Vec::new();
+    let mut positions = std::collections::HashMap::new();
+    for point in expanded {
+        let key = point_key(point);
+        if let Some(&start) = positions.get(&key) {
+            if current.len().saturating_sub(start) >= 3 {
+                let cycle = current[start..].to_vec();
+                if signed_area(&cycle).abs() > EPS {
+                    cycles.push(cycle);
+                }
+            }
+            current.truncate(start + 1);
+            positions.clear();
+            for (index, retained) in current.iter().enumerate() {
+                positions.insert(point_key(*retained), index);
+            }
+        } else {
+            positions.insert(key, current.len());
+            current.push(point);
+        }
+    }
+
+    if cycles.is_empty() {
+        vec![points]
+    } else {
+        cycles
+    }
+}
+
+/// 作図輪郭を一定幅の「糸」に展開し、交差箇所を加算合成した実輪郭へ変換する。
+/// SVGのstroke属性ではなく閉じたポリゴンを返すため、TTFにもそのまま渡せる。
+pub fn stroke_visible_ring_sets(ring_sets: &[Vec<Vec<Point>>], width: f64) -> Vec<Vec<Point>> {
+    use lyon::math::point as lpoint;
+    use lyon::path::{LineCap, LineJoin, Path};
+    use lyon::tessellation::{
+        BuffersBuilder, StrokeOptions, StrokeTessellator, StrokeVertex, VertexBuffers,
+    };
+
+    let mut triangle_shapes: Vec<Vec<Vec<Point>>> = Vec::new();
+    for rings in ring_sets {
+        let mut builder = Path::builder();
+        let mut has_path = false;
+        for ring in rings.iter().filter(|ring| ring.len() >= 2) {
+            builder.begin(lpoint(ring[0].x as f32, ring[0].y as f32));
+            for point in &ring[1..] {
+                builder.line_to(lpoint(point.x as f32, point.y as f32));
+            }
+            builder.close();
+            has_path = true;
+        }
+        if !has_path {
+            continue;
+        }
+        let path = builder.build();
+        let mut buffers: VertexBuffers<Point, u32> = VertexBuffers::new();
+        let mut tessellator = StrokeTessellator::new();
+        let options = StrokeOptions::default()
+            .with_line_width(width.max(0.1) as f32)
+            .with_line_join(LineJoin::Round)
+            .with_line_cap(LineCap::Round)
+            .with_tolerance(0.05);
+        if tessellator
+            .tessellate_path(
+                &path,
+                &options,
+                &mut BuffersBuilder::new(&mut buffers, |vertex: StrokeVertex| {
+                    Point::new(vertex.position().x as f64, vertex.position().y as f64)
+                }),
+            )
+            .is_err()
+        {
+            continue;
+        }
+        for triangle in buffers.indices.chunks_exact(3) {
+            triangle_shapes.push(vec![vec![
+                buffers.vertices[triangle[0] as usize],
+                buffers.vertices[triangle[1] as usize],
+                buffers.vertices[triangle[2] as usize],
+            ]]);
+        }
+    }
+    union_polygon_ring_sets(&triangle_shapes)
+}
+
 /// 閉リングの末尾が先頭と重複していれば落とす
 fn dedup_closed(mut ring: Vec<Point>) -> Vec<Point> {
     if ring.len() >= 2 && ring.first().unwrap().distance(*ring.last().unwrap()) < 1e-6 {
@@ -974,15 +1333,17 @@ fn dedup_closed(mut ring: Vec<Point>) -> Vec<Point> {
     ring
 }
 
-/// リングの各頂点を面取り（チャンファ）してベベルをかける。
-/// dist は各辺方向へ後退させる距離。鋭角ほど大きく削れるのを防ぐため、
-/// 隣接辺長の 40% でクランプする。
+/// リングの各頂点へ丸いベベルをかける。
+/// dist は各辺方向へ後退させる距離。隣り合う丸みが辺上で交差しないよう、
+/// 隣接辺長の 49% でクランプし、後退点同士を元頂点を制御点とする
+/// 二次ベジェで結ぶ。外周・穴の向きに依存せず同じ丸みになる。
 pub fn bevel_ring(ring: &[Point], dist: f64) -> Vec<Point> {
     let n = ring.len();
     if n < 3 || dist <= 1e-6 {
         return ring.to_vec();
     }
-    let mut out = Vec::with_capacity(n * 2);
+    const ROUND_STEPS: usize = 6;
+    let mut out = Vec::with_capacity(n * (ROUND_STEPS + 1));
     for i in 0..n {
         let prev = ring[(i + n - 1) % n];
         let cur = ring[i];
@@ -995,10 +1356,19 @@ pub fn bevel_ring(ring: &[Point], dist: f64) -> Vec<Point> {
             out.push(cur);
             continue;
         }
-        let dp = dist.min(lp * 0.4);
-        let dn = dist.min(ln * 0.4);
-        out.push(cur + to_prev * (dp / lp));
-        out.push(cur + to_next * (dn / ln));
+        let dp = dist.min(lp * 0.49);
+        let dn = dist.min(ln * 0.49);
+        let start = cur + to_prev * (dp / lp);
+        let end = cur + to_next * (dn / ln);
+        out.push(start);
+        for step in 1..=ROUND_STEPS {
+            let t = step as f64 / ROUND_STEPS as f64;
+            let mt = 1.0 - t;
+            out.push(Point::new(
+                mt * mt * start.x + 2.0 * mt * t * cur.x + t * t * end.x,
+                mt * mt * start.y + 2.0 * mt * t * cur.y + t * t * end.y,
+            ));
+        }
     }
     out
 }
@@ -1009,11 +1379,21 @@ mod tests {
     use crate::model::{Element, Face, PegRef, Port, StartAnchor};
 
     fn peg(x: f64, y: f64, r: f64) -> Peg {
-        Peg { center: Point::new(x, y), radius: r, shape: PegShape::Circle, rounding: 0.0 }
+        Peg {
+            center: Point::new(x, y),
+            radius: r,
+            shape: PegShape::Circle,
+            rounding: 0.0,
+        }
     }
 
     fn square_peg(x: f64, y: f64, r: f64, rounding: f64) -> Peg {
-        Peg { center: Point::new(x, y), radius: r, shape: PegShape::RoundedSquare, rounding }
+        Peg {
+            center: Point::new(x, y),
+            radius: r,
+            shape: PegShape::RoundedSquare,
+            rounding,
+        }
     }
 
     fn wrap_amount(w: &Wrap) -> f64 {
@@ -1132,7 +1512,10 @@ mod tests {
         assert_eq!(th.wraps.len(), 2, "wraps: {:?}", th.wraps);
         assert_eq!(th.wraps[0].peg, 0);
         assert_eq!(th.wraps[1].peg, 1);
-        assert!(th.wraps[0].s * th.wraps[1].s < 0.0, "windings should be opposite");
+        assert!(
+            th.wraps[0].s * th.wraps[1].s < 0.0,
+            "windings should be opposite"
+        );
         assert!(wrap_amount(&th.wraps[0]) > 0.0);
         assert!(wrap_amount(&th.wraps[1]) > 0.0);
     }
@@ -1186,28 +1569,43 @@ mod tests {
         assert!(signed_area(&pts).abs() > 100.0);
     }
 
-    fn make_peg_resolver(pegs: &[Peg]) -> impl Fn(&PegRef) -> Option<Peg> + use< '_ > {
+    fn make_peg_resolver(pegs: &[Peg]) -> impl Fn(&PegRef) -> Option<Peg> + use<'_> {
         move |r: &PegRef| match *r {
             PegRef::Custom { id } => pegs.get(id as usize).copied(),
             _ => None,
         }
     }
 
-fn thread_to_face(th: &Thread) -> Face {
-    let start = StartAnchor { peg: PegRef::Custom { id: 0 }, port: Port::Top };
-    let mut elements = Vec::new();
-    for w in &th.wraps {
-        let amount = (w.exit - w.entry) * w.s;
-        let turns = if amount <= 0.0 { 0 } else { (amount / (2.0 * PI)).floor() as u32 };
-        elements.push(Element::Wrap { peg: PegRef::Custom { id: w.peg as u64 }, s: w.s, turns, exit_offset: 0.0, sweep_hint: std::f64::consts::PI });
+    fn thread_to_face(th: &Thread) -> Face {
+        let start = StartAnchor {
+            peg: PegRef::Custom { id: 0 },
+            port: Port::Top,
+        };
+        let mut elements = Vec::new();
+        for w in &th.wraps {
+            let amount = (w.exit - w.entry) * w.s;
+            let turns = if amount <= 0.0 {
+                0
+            } else {
+                (amount / (2.0 * PI)).floor() as u32
+            };
+            elements.push(Element::Wrap {
+                peg: PegRef::Custom { id: w.peg as u64 },
+                s: w.s,
+                turns,
+                exit_offset: 0.0,
+                sweep_hint: std::f64::consts::PI,
+            });
+        }
+        Face {
+            start,
+            elements,
+            visible: true,
+            name: String::new(),
+            baked: None,
+            ignored_pegs: Vec::new(),
+        }
     }
-    Face {
-        start,
-        elements,
-        visible: true,
-    name: String::new(), baked: None, ignored_pegs: Vec::new(),
-    }
-}
 
     fn sample_path(segs: &[Seg], samples: usize) -> Vec<Point> {
         if segs.is_empty() || samples == 0 {
@@ -1218,18 +1616,32 @@ fn thread_to_face(th: &Thread) -> Face {
         for seg in segs {
             let len = match *seg {
                 Seg::Line { from, to } => from.distance(to),
-                Seg::Arc { radius, start, end, .. } => (end - start).abs() * radius,
+                Seg::Arc {
+                    radius, start, end, ..
+                } => (end - start).abs() * radius,
             };
             let next = total + len;
             parts.push((total, next, *seg));
             total = next;
         }
         if total == 0.0 {
-            return vec![match segs[0] { Seg::Line { from, .. } => from, Seg::Arc { center, radius, start, .. } => on_circle(center, radius, start) }];
+            return vec![match segs[0] {
+                Seg::Line { from, .. } => from,
+                Seg::Arc {
+                    center,
+                    radius,
+                    start,
+                    ..
+                } => on_circle(center, radius, start),
+            }];
         }
         let mut out = Vec::with_capacity(samples);
         for i in 0..samples {
-            let t = if samples == 1 { 0.0 } else { (i as f64) / ((samples - 1) as f64) };
+            let t = if samples == 1 {
+                0.0
+            } else {
+                (i as f64) / ((samples - 1) as f64)
+            };
             let mut target = t * total;
             if i == samples - 1 {
                 target = total;
@@ -1245,7 +1657,13 @@ fn thread_to_face(th: &Thread) -> Face {
                         Seg::Line { from, to } => {
                             out.push(from + (to - from) * seg_t);
                         }
-                        Seg::Arc { center, radius, start, end, .. } => {
+                        Seg::Arc {
+                            center,
+                            radius,
+                            start,
+                            end,
+                            ..
+                        } => {
                             out.push(on_circle(center, radius, start + (end - start) * seg_t));
                         }
                     }
@@ -1261,12 +1679,22 @@ fn thread_to_face(th: &Thread) -> Face {
         for seg in segs {
             let (from, to) = match *seg {
                 Seg::Line { from, to } => (from, to),
-                Seg::Arc { center, radius, start, end } => {
-                    (on_circle(center, radius, start), on_circle(center, radius, end))
-                }
+                Seg::Arc {
+                    center,
+                    radius,
+                    start,
+                    end,
+                } => (
+                    on_circle(center, radius, start),
+                    on_circle(center, radius, end),
+                ),
             };
             if let Some(p) = prev {
-                assert!((p.distance(from)).abs() < 1e-8, "segment gap = {}", p.distance(from));
+                assert!(
+                    (p.distance(from)).abs() < 1e-8,
+                    "segment gap = {}",
+                    p.distance(from)
+                );
             }
             prev = Some(to);
         }
@@ -1274,9 +1702,7 @@ fn thread_to_face(th: &Thread) -> Face {
 
     #[test]
     fn materialize_face_roundtrip_from_solver() {
-        let pegs = [
-            peg(200.0, 100.0, 30.0),
-        ];
+        let pegs = [peg(200.0, 100.0, 30.0)];
         let anchor = resolve_anchor(&pegs[0], Port::Top);
         let mut th = Thread::new(anchor);
         update_thread(&mut th, Point::new(360.0, 100.0), &pegs);
@@ -1295,25 +1721,42 @@ fn thread_to_face(th: &Thread) -> Face {
 
     #[test]
     fn materialize_face_is_continuous_after_radius_change() {
-    let face = Face {
-        start: StartAnchor { peg: PegRef::Grid { row: 0, col: 0 }, port: Port::Right },
-        elements: vec![Element::Wrap { peg: PegRef::Grid { row: 0, col: 1 }, s: 1.0, turns: 0, exit_offset: 0.0, sweep_hint: std::f64::consts::PI }],
-        visible: true,
-    name: String::new(), baked: None, ignored_pegs: Vec::new(),
-    };
+        let face = Face {
+            start: StartAnchor {
+                peg: PegRef::Grid { row: 0, col: 0 },
+                port: Port::Right,
+            },
+            elements: vec![Element::Wrap {
+                peg: PegRef::Grid { row: 0, col: 1 },
+                s: 1.0,
+                turns: 0,
+                exit_offset: 0.0,
+                sweep_hint: std::f64::consts::PI,
+            }],
+            visible: true,
+            name: String::new(),
+            baked: None,
+            ignored_pegs: Vec::new(),
+        };
         let small_r = 44.0;
         let large_r = 72.0;
 
         let small_resolve = |rref: &PegRef| match *rref {
-            PegRef::Grid { row, col } if row == 0 => {
-                Some(Peg { center: Point::new(col as f64 * 200.0 + 100.0, 100.0), radius: small_r, shape: PegShape::Circle, rounding: 0.0 })
-            }
+            PegRef::Grid { row, col } if row == 0 => Some(Peg {
+                center: Point::new(col as f64 * 200.0 + 100.0, 100.0),
+                radius: small_r,
+                shape: PegShape::Circle,
+                rounding: 0.0,
+            }),
             _ => None,
         };
         let large_resolve = |rref: &PegRef| match *rref {
-            PegRef::Grid { row, col } if row == 0 => {
-                Some(Peg { center: Point::new(col as f64 * 200.0 + 100.0, 100.0), radius: large_r, shape: PegShape::Circle, rounding: 0.0 })
-            }
+            PegRef::Grid { row, col } if row == 0 => Some(Peg {
+                center: Point::new(col as f64 * 200.0 + 100.0, 100.0),
+                radius: large_r,
+                shape: PegShape::Circle,
+                rounding: 0.0,
+            }),
             _ => None,
         };
 
@@ -1326,12 +1769,33 @@ fn thread_to_face(th: &Thread) -> Face {
     #[test]
     fn completed_wrap_cycle_does_not_snap_to_construction_port() {
         let elements = vec![
-            Element::Wrap { peg: PegRef::Grid { row: 0, col: 1 }, s: 1.0, turns: 0, exit_offset: 0.0, sweep_hint: PI },
-            Element::Wrap { peg: PegRef::Grid { row: 1, col: 1 }, s: 1.0, turns: 0, exit_offset: 0.0, sweep_hint: PI },
-            Element::Wrap { peg: PegRef::Grid { row: 1, col: 0 }, s: 1.0, turns: 0, exit_offset: 0.0, sweep_hint: PI },
+            Element::Wrap {
+                peg: PegRef::Grid { row: 0, col: 1 },
+                s: 1.0,
+                turns: 0,
+                exit_offset: 0.0,
+                sweep_hint: PI,
+            },
+            Element::Wrap {
+                peg: PegRef::Grid { row: 1, col: 1 },
+                s: 1.0,
+                turns: 0,
+                exit_offset: 0.0,
+                sweep_hint: PI,
+            },
+            Element::Wrap {
+                peg: PegRef::Grid { row: 1, col: 0 },
+                s: 1.0,
+                turns: 0,
+                exit_offset: 0.0,
+                sweep_hint: PI,
+            },
         ];
         let make_face = |port| Face {
-            start: StartAnchor { peg: PegRef::Grid { row: 0, col: 0 }, port },
+            start: StartAnchor {
+                peg: PegRef::Grid { row: 0, col: 0 },
+                port,
+            },
             elements: elements.clone(),
             visible: true,
             name: String::new(),
@@ -1358,8 +1822,18 @@ fn thread_to_face(th: &Thread) -> Face {
                     assert!(at.distance(bt) < 1e-8);
                 }
                 (
-                    Seg::Arc { center: ac, radius: ar, start: as_, end: ae },
-                    Seg::Arc { center: bc, radius: br, start: bs, end: be },
+                    Seg::Arc {
+                        center: ac,
+                        radius: ar,
+                        start: as_,
+                        end: ae,
+                    },
+                    Seg::Arc {
+                        center: bc,
+                        radius: br,
+                        start: bs,
+                        end: be,
+                    },
                 ) => {
                     assert!(ac.distance(bc) < 1e-8);
                     assert!((ar - br).abs() < 1e-8);
@@ -1389,7 +1863,10 @@ fn thread_to_face(th: &Thread) -> Face {
             sweep_hint: PI,
         };
         let face = Face {
-            start: StartAnchor { peg: a, port: Port::Top },
+            start: StartAnchor {
+                peg: a,
+                port: Port::Top,
+            },
             elements: vec![wrap(a), wrap(b), wrap(c)],
             visible: true,
             name: String::new(),
@@ -1397,10 +1874,30 @@ fn thread_to_face(th: &Thread) -> Face {
             ignored_pegs: Vec::new(),
         };
         let peg_for = |peg_ref: &PegRef| match *peg_ref {
-            x if x == a => Some(Peg { center: Point::new(-100.0, 0.0), radius: 20.0, shape: PegShape::Circle, rounding: 0.0 }),
-            x if x == b => Some(Peg { center: Point::new(100.0, 0.0), radius: 20.0, shape: PegShape::Circle, rounding: 0.0 }),
-            x if x == c => Some(Peg { center: Point::new(0.0, 150.0), radius: 20.0, shape: PegShape::Circle, rounding: 0.0 }),
-            x if x == sub => Some(Peg { center: Point::new(0.0, -20.0), radius: 18.0, shape: PegShape::Circle, rounding: 0.0 }),
+            x if x == a => Some(Peg {
+                center: Point::new(-100.0, 0.0),
+                radius: 20.0,
+                shape: PegShape::Circle,
+                rounding: 0.0,
+            }),
+            x if x == b => Some(Peg {
+                center: Point::new(100.0, 0.0),
+                radius: 20.0,
+                shape: PegShape::Circle,
+                rounding: 0.0,
+            }),
+            x if x == c => Some(Peg {
+                center: Point::new(0.0, 150.0),
+                radius: 20.0,
+                shape: PegShape::Circle,
+                rounding: 0.0,
+            }),
+            x if x == sub => Some(Peg {
+                center: Point::new(0.0, -20.0),
+                radius: 18.0,
+                shape: PegShape::Circle,
+                rounding: 0.0,
+            }),
             _ => None,
         };
         let obstacles = [a, b, c, sub]
@@ -1423,7 +1920,8 @@ fn thread_to_face(th: &Thread) -> Face {
                     assert!(tangent.dot(line) > 0.0);
                 }
                 (Seg::Line { from, to }, Seg::Arc { start, end, .. }) => {
-                    let tangent = kurbo::Vec2::new(-start.sin(), start.cos()) * (end - start).signum();
+                    let tangent =
+                        kurbo::Vec2::new(-start.sin(), start.cos()) * (end - start).signum();
                     let line = to - from;
                     assert!(line.cross(tangent).abs() / line.hypot().max(1e-9) < 1e-7);
                     assert!(line.dot(tangent) > 0.0);
@@ -1449,7 +1947,10 @@ fn thread_to_face(th: &Thread) -> Face {
         ];
         let signs = [-1.0, 1.0, -1.0, -1.0];
         let face = Face {
-            start: StartAnchor { peg: refs[0], port: Port::Left },
+            start: StartAnchor {
+                peg: refs[0],
+                port: Port::Left,
+            },
             elements: refs
                 .iter()
                 .zip(signs)
@@ -1467,12 +1968,14 @@ fn thread_to_face(th: &Thread) -> Face {
             baked: None,
         };
         let resolver = |peg_ref: &PegRef| {
-            refs.iter().position(|candidate| candidate == peg_ref).map(|index| Peg {
-                center: centers[index],
-                radius: 20.0,
-                shape: PegShape::Circle,
-                rounding: 0.0,
-            })
+            refs.iter()
+                .position(|candidate| candidate == peg_ref)
+                .map(|index| Peg {
+                    center: centers[index],
+                    radius: 20.0,
+                    shape: PegShape::Circle,
+                    rounding: 0.0,
+                })
         };
         let obstacles: Vec<(PegRef, Peg)> = refs
             .iter()
@@ -1488,31 +1991,66 @@ fn thread_to_face(th: &Thread) -> Face {
     #[test]
     fn reverse_face_keeps_curve_flips_area_sign() {
         let face = Face {
-            start: StartAnchor { peg: PegRef::Grid { row: 0, col: 0 }, port: Port::Right },
+            start: StartAnchor {
+                peg: PegRef::Grid { row: 0, col: 0 },
+                port: Port::Right,
+            },
             elements: vec![
-                Element::Wrap { peg: PegRef::Grid { row: 0, col: 1 }, s: 1.0, turns: 0, exit_offset: 0.0, sweep_hint: std::f64::consts::PI },
-                Element::Pin { pos: Point::new(260.0, 220.0) },
-                Element::Wrap { peg: PegRef::Grid { row: 0, col: 0 }, s: -1.0, turns: 0, exit_offset: 0.0, sweep_hint: std::f64::consts::PI },
+                Element::Wrap {
+                    peg: PegRef::Grid { row: 0, col: 1 },
+                    s: 1.0,
+                    turns: 0,
+                    exit_offset: 0.0,
+                    sweep_hint: std::f64::consts::PI,
+                },
+                Element::Pin {
+                    pos: Point::new(260.0, 220.0),
+                },
+                Element::Wrap {
+                    peg: PegRef::Grid { row: 0, col: 0 },
+                    s: -1.0,
+                    turns: 0,
+                    exit_offset: 0.0,
+                    sweep_hint: std::f64::consts::PI,
+                },
             ],
             visible: true,
-        name: String::new(), baked: None, ignored_pegs: Vec::new(),
+            name: String::new(),
+            baked: None,
+            ignored_pegs: Vec::new(),
         };
         let resolver = |r: &PegRef| -> Option<Peg> {
             match *r {
-                PegRef::Grid { row: 0, col: 0 } => Some(Peg { center: Point::new(100.0, 100.0), radius: 30.0, shape: PegShape::Circle, rounding: 0.0 }),
-                PegRef::Grid { row: 0, col: 1 } => Some(Peg { center: Point::new(280.0, 100.0), radius: 30.0, shape: PegShape::Circle, rounding: 0.0 }),
+                PegRef::Grid { row: 0, col: 0 } => Some(Peg {
+                    center: Point::new(100.0, 100.0),
+                    radius: 30.0,
+                    shape: PegShape::Circle,
+                    rounding: 0.0,
+                }),
+                PegRef::Grid { row: 0, col: 1 } => Some(Peg {
+                    center: Point::new(280.0, 100.0),
+                    radius: 30.0,
+                    shape: PegShape::Circle,
+                    rounding: 0.0,
+                }),
                 _ => None,
             }
         };
         let segs = materialize_face(&face, &resolver).unwrap();
-    let rev = Face {
-        start: face.start,
-        elements: face
-            .elements
+        let rev = Face {
+            start: face.start,
+            elements: face
+                .elements
                 .iter()
                 .rev()
                 .map(|e| match *e {
-                    Element::Wrap { peg, s, turns, exit_offset, sweep_hint } => Element::Wrap {
+                    Element::Wrap {
+                        peg,
+                        s,
+                        turns,
+                        exit_offset,
+                        sweep_hint,
+                    } => Element::Wrap {
                         peg,
                         s: -s,
                         turns,
@@ -1523,8 +2061,10 @@ fn thread_to_face(th: &Thread) -> Face {
                 })
                 .collect(),
             visible: true,
-    name: String::new(), baked: None, ignored_pegs: Vec::new(),
-    };
+            name: String::new(),
+            baked: None,
+            ignored_pegs: Vec::new(),
+        };
         let rev_segs = materialize_face(&rev, &resolver).unwrap();
         let a = {
             let mut pts = Vec::new();
@@ -1548,14 +2088,28 @@ fn thread_to_face(th: &Thread) -> Face {
         let resolver = make_peg_resolver(&pegs);
         let start = resolve_anchor(&pegs[0], Port::Top);
         let tip = Point::new(400.0, 260.0);
-        let elements = vec![Element::Wrap { peg: PegRef::Custom { id: 1 }, s: 1.0, turns: 0, exit_offset: 0.0, sweep_hint: std::f64::consts::PI }];
+        let elements = vec![Element::Wrap {
+            peg: PegRef::Custom { id: 1 },
+            s: 1.0,
+            turns: 0,
+            exit_offset: 0.0,
+            sweep_hint: std::f64::consts::PI,
+        }];
         let segs = materialize_chain(start, &elements, &resolver, tip).unwrap();
         let last_end = match *segs.last().unwrap() {
             Seg::Line { to, .. } => to,
-            Seg::Arc { center, radius, end, .. } => on_circle(center, radius, end),
+            Seg::Arc {
+                center,
+                radius,
+                end,
+                ..
+            } => on_circle(center, radius, end),
         };
         assert!(last_end.distance(tip) < 1e-9, "path must end at tip");
-        assert!(last_end.distance(start) > 100.0, "path must not close back to start");
+        assert!(
+            last_end.distance(start) > 100.0,
+            "path must not close back to start"
+        );
         assert_seg_chain_connected(&segs);
     }
 
@@ -1581,12 +2135,20 @@ fn thread_to_face(th: &Thread) -> Face {
         let pegs = [peg(110.0, 110.0, 66.0), peg(310.0, 110.0, 66.0)];
         let anchor = Point::new(110.0, 44.0); // A の上の十字点
         let mut th = Thread::new(anchor);
-        drag(&mut th, &pegs, &[
-            Point::new(250.0, 120.0),
-            Point::new(420.0, 60.0),
-            Point::new(480.0, 200.0),
-        ]);
-        assert!(th.wraps.len() >= 2, "expected >=2 wraps, got {:?}", th.wraps);
+        drag(
+            &mut th,
+            &pegs,
+            &[
+                Point::new(250.0, 120.0),
+                Point::new(420.0, 60.0),
+                Point::new(480.0, 200.0),
+            ],
+        );
+        assert!(
+            th.wraps.len() >= 2,
+            "expected >=2 wraps, got {:?}",
+            th.wraps
+        );
         assert_eq!(th.wraps[0].peg, 0);
         assert!((th.wraps[0].exit - th.wraps[0].entry) * th.wraps[0].s > 0.0);
     }
@@ -1596,14 +2158,18 @@ fn thread_to_face(th: &Thread) -> Face {
         // A→B と巻いた後、A の上をまた通ると A に再度引っかかる
         let pegs = [peg(110.0, 110.0, 66.0), peg(310.0, 110.0, 66.0)];
         let mut th = Thread::new(Point::new(110.0, 44.0));
-        drag(&mut th, &pegs, &[
-            Point::new(180.0, 250.0),
-            Point::new(310.0, 250.0),
-            Point::new(420.0, 100.0),
-            Point::new(310.0, 20.0),
-            Point::new(110.0, 20.0),
-            Point::new(40.0, 200.0),
-        ]);
+        drag(
+            &mut th,
+            &pegs,
+            &[
+                Point::new(180.0, 250.0),
+                Point::new(310.0, 250.0),
+                Point::new(420.0, 100.0),
+                Point::new(310.0, 20.0),
+                Point::new(110.0, 20.0),
+                Point::new(40.0, 200.0),
+            ],
+        );
         let peg0_wraps = th.wraps.iter().filter(|w| w.peg == 0).count();
         assert!(
             th.wraps.len() >= 3 && peg0_wraps >= 2,
@@ -1618,15 +2184,22 @@ fn thread_to_face(th: &Thread) -> Face {
         let pegs = [peg(110.0, 110.0, 66.0), peg(310.0, 110.0, 66.0)];
         let anchor = Point::new(110.0, 44.0);
         let mut th = Thread::new(anchor);
-        drag(&mut th, &pegs, &[
-            Point::new(250.0, 120.0),
-            Point::new(420.0, 60.0),
-            Point::new(480.0, 200.0),
-        ]);
+        drag(
+            &mut th,
+            &pegs,
+            &[
+                Point::new(250.0, 120.0),
+                Point::new(420.0, 60.0),
+                Point::new(480.0, 200.0),
+            ],
+        );
         assert!(th.wraps.len() >= 2);
-        let refs: Vec<PegRef> = (0..pegs.len() as u64).map(|id| PegRef::Custom { id }).collect();
+        let refs: Vec<PegRef> = (0..pegs.len() as u64)
+            .map(|id| PegRef::Custom { id })
+            .collect();
         let elements = thread_to_wrap_elements(&th, &pegs, &refs, th.tip).unwrap();
-        let chain = materialize_chain(anchor, &elements, &make_peg_resolver(&pegs), th.tip).unwrap();
+        let chain =
+            materialize_chain(anchor, &elements, &make_peg_resolver(&pegs), th.tip).unwrap();
         let live = materialize(&th, &pegs, th.tip);
         let live_pts = sample_path(&live, 300);
         let chain_pts = sample_path(&chain, 300);
@@ -1691,7 +2264,12 @@ mod closing_repro {
     use crate::model::Port;
 
     fn peg(x: f64, y: f64, r: f64) -> Peg {
-        Peg { center: Point::new(x, y), radius: r, shape: PegShape::Circle, rounding: 0.0 }
+        Peg {
+            center: Point::new(x, y),
+            radius: r,
+            shape: PegShape::Circle,
+            rounding: 0.0,
+        }
     }
 
     fn drag(th: &mut Thread, pegs: &[Peg], waypoints: &[Point]) {
@@ -1717,22 +2295,36 @@ mod closing_repro {
         let pegs = [peg(110.0, 110.0, 66.0), peg(310.0, 310.0, 66.0)];
         let anchor = resolve_anchor(&pegs[0], Port::TopRight);
         let mut th = Thread::new(anchor);
-        th.wraps.push(Wrap { peg: 1, s: 1.0, entry: -2.656, exit: -2.356 });
+        th.wraps.push(Wrap {
+            peg: 1,
+            s: 1.0,
+            entry: -2.656,
+            exit: -2.356,
+        });
         th.tip = anchor;
         append_closing_hug(&mut th, &pegs, 0, anchor);
         let last = th.wraps.last().expect("hug wrap expected");
         assert_eq!(last.peg, 0, "wraps = {:?}", th.wraps);
         // 弧の終端がアンカー角に一致し、掃引は半周以内
         let anchor_angle = angle_from(pegs[0].center, anchor);
-        let end_diff = (last.exit - anchor_angle).rem_euclid(TAU).min(
-            (anchor_angle - last.exit).rem_euclid(TAU),
+        let end_diff = (last.exit - anchor_angle)
+            .rem_euclid(TAU)
+            .min((anchor_angle - last.exit).rem_euclid(TAU));
+        assert!(
+            end_diff < 1e-9,
+            "exit {} vs anchor angle {}",
+            last.exit,
+            anchor_angle
         );
-        assert!(end_diff < 1e-9, "exit {} vs anchor angle {}", last.exit, anchor_angle);
         let sweep = (last.exit - last.entry) * last.s;
         assert!(sweep > 0.0 && sweep <= PI + 0.2, "sweep = {sweep}");
         // 実体化するとアンカーへの直線ではなく弧で終わる
         let segs = materialize(&th, &pegs, anchor);
-        assert!(matches!(segs.last(), Some(Seg::Arc { .. })), "segs = {:?}", segs.last());
+        assert!(
+            matches!(segs.last(), Some(Seg::Arc { .. })),
+            "segs = {:?}",
+            segs.last()
+        );
     }
 
     #[test]
@@ -1741,14 +2333,18 @@ mod closing_repro {
         let pegs = [peg(110.0, 110.0, 66.0), peg(310.0, 110.0, 66.0)];
         let anchor = resolve_anchor(&pegs[0], Port::TopRight);
         let mut th = Thread::new(anchor);
-        drag(&mut th, &pegs, &[
-            Point::new(250.0, 40.0),
-            Point::new(400.0, 110.0),   // Bの右へ
-            Point::new(310.0, 260.0),   // Bの下
-            Point::new(110.0, 260.0),   // Aの下
-            Point::new(20.0, 110.0),    // Aの左
-            anchor,                     // 始点へ戻る
-        ]);
+        drag(
+            &mut th,
+            &pegs,
+            &[
+                Point::new(250.0, 40.0),
+                Point::new(400.0, 110.0), // Bの右へ
+                Point::new(310.0, 260.0), // Bの下
+                Point::new(110.0, 260.0), // Aの下
+                Point::new(20.0, 110.0),  // Aの左
+                anchor,                   // 始点へ戻る
+            ],
+        );
         eprintln!("wraps = {:?}", th.wraps);
         let segs = materialize(&th, &pegs, anchor);
         // 閉じ線が始点ペグを貫通していないこと
@@ -1756,7 +2352,10 @@ mod closing_repro {
             if let Seg::Line { from, to } = seg {
                 let mid = Point::new((from.x + to.x) / 2.0, (from.y + to.y) / 2.0);
                 let d = mid.distance(pegs[0].center);
-                eprintln!("line ({:.1},{:.1})->({:.1},{:.1}) middist={:.2}", from.x, from.y, to.x, to.y, d);
+                eprintln!(
+                    "line ({:.1},{:.1})->({:.1},{:.1}) middist={:.2}",
+                    from.x, from.y, to.x, to.y, d
+                );
                 assert!(
                     d > pegs[0].radius - 1.0,
                     "closing line cuts through start peg: mid dist = {d}"
@@ -1793,6 +2392,61 @@ mod stress {
     }
 
     #[test]
+    fn union_resolves_self_crossing_bow_tie_into_visible_regions() {
+        let bow_tie = vec![
+            Point::new(0.0, 0.0),
+            Point::new(100.0, 100.0),
+            Point::new(0.0, 100.0),
+            Point::new(100.0, 0.0),
+        ];
+        let rings = union_visible_ring_sets(&[vec![bow_tie]]);
+        assert!(!rings.is_empty());
+        assert!(
+            rings
+                .iter()
+                .map(|ring| signed_area(ring).abs())
+                .sum::<f64>()
+                > 4_000.0
+        );
+    }
+
+    #[test]
+    fn union_keeps_a_contour_retraced_in_the_opposite_direction_filled() {
+        let retraced_square = vec![
+            Point::new(0.0, 0.0),
+            Point::new(100.0, 0.0),
+            Point::new(100.0, 100.0),
+            Point::new(0.0, 100.0),
+            Point::new(0.0, 0.0),
+            Point::new(0.0, 100.0),
+            Point::new(100.0, 100.0),
+            Point::new(100.0, 0.0),
+        ];
+        let rings = union_visible_ring_sets(&[vec![retraced_square]]);
+        let area: f64 = rings.iter().map(|ring| signed_area(ring).abs()).sum();
+        assert!(area > 9_000.0, "opposite retrace was knocked out: {area}");
+    }
+
+    #[test]
+    fn stroked_self_crossing_keeps_both_crossing_branches() {
+        let bow_tie = vec![
+            Point::new(0.0, 0.0),
+            Point::new(100.0, 100.0),
+            Point::new(0.0, 100.0),
+            Point::new(100.0, 0.0),
+        ];
+        let rings = stroke_visible_ring_sets(&[vec![bow_tie]], 6.0);
+        assert!(!rings.is_empty());
+        assert!(
+            rings
+                .iter()
+                .map(|ring| signed_area(ring).abs())
+                .sum::<f64>()
+                > 1_500.0
+        );
+    }
+
+    #[test]
     fn union_of_ring_around_hole_keeps_interior() {
         // 大きい四角から内側をまたぐ形 → 穴が残るケースの最小確認: 大四角 + 中四角は
         // 単純に大きい方に含まれるので1リング。ここでは分離した2つ→2リング
@@ -1813,7 +2467,7 @@ mod stress {
     }
 
     #[test]
-    fn bevel_replaces_corners_with_two_points() {
+    fn bevel_rounds_each_corner_with_a_curve() {
         let sq = vec![
             Point::new(0.0, 0.0),
             Point::new(10.0, 0.0),
@@ -1821,7 +2475,11 @@ mod stress {
             Point::new(0.0, 10.0),
         ];
         let beveled = bevel_ring(&sq, 2.0);
-        assert_eq!(beveled.len(), 8, "each of 4 corners → 2 points");
+        assert_eq!(beveled.len(), 28, "each corner gets a sampled round arc");
+        assert!(
+            beveled[3].x + beveled[3].y < 1.8,
+            "round bevel bows toward the original corner instead of using a straight chamfer"
+        );
         // ベベル後も内側に収まり面積は元より小さい
         assert!(signed_area(&beveled).abs() < signed_area(&sq).abs());
         assert!(signed_area(&beveled).abs() > 90.0);
@@ -1841,15 +2499,39 @@ mod stress {
     fn grid_scrub_stress_does_not_panic() {
         // グリッド設定を激しく変えながら全面を実体化してもパニックしないこと
         let face = Face {
-            start: StartAnchor { peg: PegRef::Grid { row: 0, col: 0 }, port: Port::TopRight },
+            start: StartAnchor {
+                peg: PegRef::Grid { row: 0, col: 0 },
+                port: Port::TopRight,
+            },
             elements: vec![
-                Element::Wrap { peg: PegRef::Grid { row: 0, col: 1 }, s: 1.0, turns: 0, exit_offset: 0.3, sweep_hint: 1.2 },
-                Element::Wrap { peg: PegRef::Sub { row: 0, col: 0 }, s: -1.0, turns: 1, exit_offset: -0.2, sweep_hint: 4.0 },
-                Element::Pin { pos: Point::new(500.0, 400.0) },
-                Element::Wrap { peg: PegRef::Grid { row: 1, col: 1 }, s: 1.0, turns: 0, exit_offset: 0.0, sweep_hint: 0.05 },
+                Element::Wrap {
+                    peg: PegRef::Grid { row: 0, col: 1 },
+                    s: 1.0,
+                    turns: 0,
+                    exit_offset: 0.3,
+                    sweep_hint: 1.2,
+                },
+                Element::Wrap {
+                    peg: PegRef::Sub { row: 0, col: 0 },
+                    s: -1.0,
+                    turns: 1,
+                    exit_offset: -0.2,
+                    sweep_hint: 4.0,
+                },
+                Element::Pin {
+                    pos: Point::new(500.0, 400.0),
+                },
+                Element::Wrap {
+                    peg: PegRef::Grid { row: 1, col: 1 },
+                    s: 1.0,
+                    turns: 0,
+                    exit_offset: 0.0,
+                    sweep_hint: 0.05,
+                },
             ],
             visible: true,
-            name: String::new(), baked: None,
+            name: String::new(),
+            baked: None,
             ignored_pegs: Vec::new(),
         };
         let center = Point::new(640.0, 400.0);
@@ -1860,10 +2542,23 @@ mod stress {
             let sub = (i as f64 * 2.3) % 60.0;
             for anchor in [ScaleAnchor::TopLeft, ScaleAnchor::Center] {
                 let grid = GridSettings {
-                    spacing, radius, catch, sub_radius: sub,
-                    subs_enabled: true, scale_link: false, scale_anchor: anchor,
+                    spacing,
+                    radius,
+                    catch,
+                    sub_radius: sub,
+                    subs_enabled: true,
+                    scale_link: false,
+                    scale_anchor: anchor,
                 };
-                let resolver = |r: &PegRef| resolve_peg(&grid, &[], center, crate::model::PegAppearance::default(), r);
+                let resolver = |r: &PegRef| {
+                    resolve_peg(
+                        &grid,
+                        &[],
+                        center,
+                        crate::model::PegAppearance::default(),
+                        r,
+                    )
+                };
                 if let Some(segs) = materialize_face(&face, &resolver) {
                     let mut pts = Vec::new();
                     flatten_segs_tol(&segs, &mut pts, 0.3);
@@ -1875,7 +2570,12 @@ mod stress {
 
     #[test]
     fn penetration_detects_line_that_starts_inside_peg() {
-        let obstacle = Peg { center: Point::new(0.0, 0.0), radius: 10.0, shape: PegShape::Circle, rounding: 0.0 };
+        let obstacle = Peg {
+            center: Point::new(0.0, 0.0),
+            radius: 10.0,
+            shape: PegShape::Circle,
+            rounding: 0.0,
+        };
         let segs = [Seg::Line {
             from: Point::new(-1.0, 0.0),
             to: Point::new(20.0, 0.0),
@@ -1885,7 +2585,12 @@ mod stress {
 
     #[test]
     fn penetration_detects_arc_through_another_peg() {
-        let obstacle = Peg { center: Point::new(0.0, 10.0), radius: 3.0, shape: PegShape::Circle, rounding: 0.0 };
+        let obstacle = Peg {
+            center: Point::new(0.0, 10.0),
+            radius: 3.0,
+            shape: PegShape::Circle,
+            rounding: 0.0,
+        };
         let segs = [Seg::Arc {
             center: Point::new(0.0, 0.0),
             radius: 10.0,
@@ -1897,20 +2602,48 @@ mod stress {
 
     #[test]
     fn impossible_circle_tangent_is_rejected() {
-        let a = Peg { center: Point::new(0.0, 0.0), radius: 60.0, shape: PegShape::Circle, rounding: 0.0 };
-        let b = Peg { center: Point::new(100.0, 0.0), radius: 60.0, shape: PegShape::Circle, rounding: 0.0 };
+        let a = Peg {
+            center: Point::new(0.0, 0.0),
+            radius: 60.0,
+            shape: PegShape::Circle,
+            rounding: 0.0,
+        };
+        let b = Peg {
+            center: Point::new(100.0, 0.0),
+            radius: 60.0,
+            shape: PegShape::Circle,
+            rounding: 0.0,
+        };
         assert!(circle_circle_tangent(&a, 1.0, &b, -1.0).is_none());
     }
 
     #[test]
     fn cycle_arc_direction_matches_outgoing_tangent() {
         let pegs = [
-            Peg { center: Point::new(0.0, 0.0), radius: 10.0, shape: PegShape::Circle, rounding: 0.0 },
-            Peg { center: Point::new(0.0, 100.0), radius: 10.0, shape: PegShape::Circle, rounding: 0.0 },
-            Peg { center: Point::new(100.0, 0.0), radius: 10.0, shape: PegShape::Circle, rounding: 0.0 },
+            Peg {
+                center: Point::new(0.0, 0.0),
+                radius: 10.0,
+                shape: PegShape::Circle,
+                rounding: 0.0,
+            },
+            Peg {
+                center: Point::new(0.0, 100.0),
+                radius: 10.0,
+                shape: PegShape::Circle,
+                rounding: 0.0,
+            },
+            Peg {
+                center: Point::new(100.0, 0.0),
+                radius: 10.0,
+                shape: PegShape::Circle,
+                rounding: 0.0,
+            },
         ];
         let face = Face {
-            start: StartAnchor { peg: PegRef::Custom { id: 0 }, port: Port::Top },
+            start: StartAnchor {
+                peg: PegRef::Custom { id: 0 },
+                port: Port::Top,
+            },
             elements: (0..3)
                 .map(|id| Element::Wrap {
                     peg: PegRef::Custom { id },
@@ -1939,18 +2672,23 @@ mod stress {
             let direction = (end - start).signum();
             let arc_tangent = kurbo::Vec2::new(-end.sin() * direction, end.cos() * direction);
             let line = to - from;
-            assert!(arc_tangent.dot(line) > 0.0, "arc and line must point the same way");
+            assert!(
+                arc_tangent.dot(line) > 0.0,
+                "arc and line must point the same way"
+            );
         }
     }
 
     #[test]
     fn ring_set_union_keeps_hole_and_disconnected_component() {
-        let square = |x0, y0, x1, y1| vec![
-            Point::new(x0, y0),
-            Point::new(x1, y0),
-            Point::new(x1, y1),
-            Point::new(x0, y1),
-        ];
+        let square = |x0, y0, x1, y1| {
+            vec![
+                Point::new(x0, y0),
+                Point::new(x1, y0),
+                Point::new(x1, y1),
+                Point::new(x0, y1),
+            ]
+        };
         let first = vec![square(0.0, 0.0, 10.0, 10.0), square(3.0, 3.0, 7.0, 7.0)];
         let second = vec![square(20.0, 0.0, 24.0, 4.0)];
         let rings = union_polygon_ring_sets(&[first, second]);

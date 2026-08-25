@@ -1,5 +1,5 @@
-use crate::export::document_to_svg;
-use crate::model::FontProject;
+use crate::export::document_to_svg_styled;
+use crate::model::{FontMetricsGuides, FontProject};
 use kurbo::Point;
 use serde::Serialize;
 use std::path::Path;
@@ -10,6 +10,7 @@ struct ExportGlyph {
     character: char,
     name: String,
     advance_width: u16,
+    left_side_bearing: i16,
     svg: String,
 }
 
@@ -17,6 +18,7 @@ struct ExportGlyph {
 struct ExportPayload {
     family_name: String,
     style_name: String,
+    metrics: FontMetricsGuides,
     glyphs: Vec<ExportGlyph>,
 }
 
@@ -28,6 +30,7 @@ pub fn export_ttf(
     let payload = ExportPayload {
         family_name: project.family_name.clone(),
         style_name: project.style_name.clone(),
+        metrics: project.metrics,
         glyphs: project
             .glyphs
             .iter()
@@ -35,7 +38,13 @@ pub fn export_ttf(
                 character: glyph.character,
                 name: glyph.name.clone(),
                 advance_width: glyph.advance_width,
-                svg: document_to_svg(&glyph.document, canvas_center),
+                left_side_bearing: glyph.left_side_bearing,
+                svg: document_to_svg_styled(
+                    &glyph.document,
+                    canvas_center,
+                    project.render_style,
+                    project.thread_width,
+                ),
             })
             .collect(),
     };

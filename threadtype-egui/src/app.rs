@@ -1,23 +1,26 @@
-use crate::export::document_to_svg;
+use crate::export::{document_to_svg, document_to_svg_styled};
 use crate::font_export::export_ttf;
 use crate::geometry::{
-    bevel_ring, clamp_outside_pegs,
-    materialize_chain, materialize_face, materialize_face_with_obstacles,
-    peg_signed_distance, pegs_penetrated_by_line, segments_penetrate_pegs, signed_area,
-    thread_to_wrap_elements, union_polygon_ring_sets, update_thread_ignoring,
-    Peg, Seg, Thread,
+    bevel_ring, clamp_outside_pegs, materialize_chain, materialize_face,
+    materialize_face_with_obstacles, peg_signed_distance, pegs_penetrated_by_line,
+    segments_penetrate_pegs, signed_area, stroke_visible_ring_sets, thread_to_wrap_elements,
+    union_polygon_ring_sets, union_visible_ring_sets, update_thread_ignoring, Peg, Seg, Thread,
 };
 use crate::model::{
-    glyph_name, resolve_peg, CustomPeg, Document, Element, Face, FontProject, GlyphRecord,
-    GridSettings, PegRef, Port, ScaleAnchor, StartAnchor, CURRENT_DOCUMENT_VERSION,
+    glyph_name, resolve_peg, CustomPeg, Document, Element, Face, FontProject, FontRenderStyle,
+    GlyphRecord, GridSettings, PegRef, Port, ScaleAnchor, StartAnchor, CURRENT_DOCUMENT_VERSION,
     CURRENT_FONT_PROJECT_VERSION,
 };
-use egui_dock::{DockArea, DockState, NodeIndex, TabViewer};
 use egui::{
-    FontFamily, FontId, TextStyle,
-    Color32, Id, Key, KeyboardShortcut, Modifiers, Pos2, Rect, Sense, Stroke, Vec2,
+    Color32, FontFamily, FontId, Id, Key, KeyboardShortcut, Modifiers, Pos2, Rect, Sense, Stroke,
+    TextStyle, Vec2,
 };
+use egui_dock::{DockArea, DockState, NodeIndex, TabViewer};
 use kurbo::Point;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{mpsc, Arc};
+use std::time::{Duration, Instant};
 
 const CLOSE_RADIUS: f64 = 16.0;
 const START_SNAP: f64 = 12.0;
@@ -37,7 +40,11 @@ fn winding_variants(seed: &[Element]) -> Vec<Vec<Element>> {
     for element in seed.iter().cloned() {
         let duplicate = match (normalized.last_mut(), &element) {
             (
-                Some(Element::Wrap { peg: previous_peg, turns: previous_turns, .. }),
+                Some(Element::Wrap {
+                    peg: previous_peg,
+                    turns: previous_turns,
+                    ..
+                }),
                 Element::Wrap { peg, turns, .. },
             ) if previous_peg == peg => {
                 *previous_turns = previous_turns.saturating_add(*turns);
@@ -62,8 +69,12 @@ fn winding_variants(seed: &[Element]) -> Vec<Vec<Element>> {
         if same_cyclic_peg {
             let last = normalized.pop().unwrap();
             if let (
-                Some(Element::Wrap { turns: first_turns, .. }),
-                Element::Wrap { turns: last_turns, .. },
+                Some(Element::Wrap {
+                    turns: first_turns, ..
+                }),
+                Element::Wrap {
+                    turns: last_turns, ..
+                },
             ) = (normalized.first_mut(), last)
             {
                 *first_turns = first_turns.saturating_add(last_turns);
@@ -113,10 +124,16 @@ fn winding_change_count(preferred: &[Element], candidate: &[Element]) -> usize {
     for (a, b) in preferred.iter().zip(candidate) {
         changes += match (a, b) {
             (
-                Element::Wrap { peg: a_peg, s: a_s, .. },
-                Element::Wrap { peg: b_peg, s: b_s, .. },
+                Element::Wrap {
+                    peg: a_peg, s: a_s, ..
+                },
+                Element::Wrap {
+                    peg: b_peg, s: b_s, ..
+                },
             ) => usize::from(a_peg != b_peg || a_s.signum() != b_s.signum()),
-            (Element::Pin { pos: a }, Element::Pin { pos: b }) => usize::from(a.distance(*b) > 1e-9),
+            (Element::Pin { pos: a }, Element::Pin { pos: b }) => {
+                usize::from(a.distance(*b) > 1e-9)
+            }
             _ => 1,
         };
     }
@@ -129,9 +146,25 @@ fn closure_score_is_better(
     best: Option<(usize, f64)>,
 ) -> bool {
     best.is_none_or(|(best_changes, best_arc)| {
-        winding_changes < best_changes
-            || (winding_changes == best_changes && total_arc < best_arc)
+        winding_changes < best_changes || (winding_changes == best_changes && total_arc < best_arc)
     })
+}
+
+/// 符号付き面積が相殺される自己交差閉路でも、縦横に実体があれば形として扱う。
+/// 一直線を往復するだけの退化経路は、どちらかの広がりがないため除外できる。
+fn path_has_two_dimensional_extent(points: &[Point]) -> bool {
+    let Some(first) = points.first() else {
+        return false;
+    };
+    let (mut min_x, mut max_x) = (first.x, first.x);
+    let (mut min_y, mut max_y) = (first.y, first.y);
+    for point in &points[1..] {
+        min_x = min_x.min(point.x);
+        max_x = max_x.max(point.x);
+        min_y = min_y.min(point.y);
+        max_y = max_y.max(point.y);
+    }
+    max_x - min_x > 1e-6 && max_y - min_y > 1e-6
 }
 
 fn should_release_undo_guard(
@@ -145,7 +178,11 @@ fn should_release_undo_guard(
 }
 
 fn face_has_minimum_constraints(face: &Face) -> bool {
-    if face.elements.iter().all(|element| matches!(element, Element::Wrap { .. })) {
+    if face
+        .elements
+        .iter()
+        .all(|element| matches!(element, Element::Wrap { .. }))
+    {
         let mut unique = Vec::new();
         for element in &face.elements {
             if let Element::Wrap { peg, .. } = element {
@@ -204,10 +241,8 @@ fn intentional_single_circle_wrap(
 fn safe_grid_radius_limits(grid: &GridSettings) -> (f64, f64) {
     let main_max = (grid.spacing * 0.5 - grid.catch - PEG_CLEARANCE).clamp(0.0, 100.0);
     let sub_to_sub = grid.spacing * 0.5 - grid.catch - PEG_CLEARANCE;
-    let main_to_sub = grid.spacing / std::f64::consts::SQRT_2
-        - grid.radius
-        - grid.catch * 2.0
-        - PEG_CLEARANCE;
+    let main_to_sub =
+        grid.spacing / std::f64::consts::SQRT_2 - grid.radius - grid.catch * 2.0 - PEG_CLEARANCE;
     let sub_max = sub_to_sub.min(main_to_sub).clamp(0.0, 60.0);
     (main_max, sub_max)
 }
@@ -320,63 +355,86 @@ impl Theme {
 
 impl Theme {
     fn apply_to_context(&self, ctx: &egui::Context, dark: bool) {
+        let palette = if dark {
+            egui_shadcn::ColorPalette::shadcn_dark(egui_shadcn::ShadcnBaseColor::Zinc)
+        } else {
+            egui_shadcn::ColorPalette::shadcn_light(egui_shadcn::ShadcnBaseColor::Zinc)
+        };
         let mut visuals = if dark {
             egui::Visuals::dark()
         } else {
             egui::Visuals::light()
         };
-        visuals.widgets.inactive.bg_fill = self.bg1;
-        visuals.widgets.active.bg_fill = self.accent_bg;
-        visuals.widgets.hovered.bg_fill = self.bg2;
-        visuals.widgets.noninteractive.bg_fill = self.bg2;
-        visuals.widgets.inactive.fg_stroke.color = self.text1;
-        visuals.widgets.active.fg_stroke.color = self.text1;
-        visuals.widgets.hovered.fg_stroke.color = self.text1;
-        visuals.widgets.noninteractive.fg_stroke.color = self.text2;
-        visuals.selection.bg_fill = self.accent_bg;
-        visuals.selection.stroke.color = self.select;
-        visuals.widgets.inactive.rounding = 2.0.into();
-        visuals.widgets.active.rounding = 2.0.into();
-        visuals.widgets.hovered.rounding = 2.0.into();
-        visuals.widgets.noninteractive.rounding = 2.0.into();
-        visuals.window_rounding = 4.0.into();
-        visuals.menu_rounding = 3.0.into();
-        visuals.window_fill = self.panel;
-        visuals.panel_fill = self.panel;
-        visuals.extreme_bg_color = self.bg1;
-        visuals.faint_bg_color = self.bg2;
-        visuals.window_stroke = Stroke::new(1.0, self.border);
+        visuals.widgets.inactive.bg_fill = palette.secondary;
+        visuals.widgets.active.bg_fill = palette.accent;
+        visuals.widgets.hovered.bg_fill = palette.accent;
+        visuals.widgets.noninteractive.bg_fill = palette.muted;
+        visuals.widgets.inactive.fg_stroke.color = palette.foreground;
+        visuals.widgets.active.fg_stroke.color = palette.accent_foreground;
+        visuals.widgets.hovered.fg_stroke.color = palette.accent_foreground;
+        visuals.widgets.noninteractive.fg_stroke.color = palette.muted_foreground;
+        visuals.selection.bg_fill = palette.primary;
+        visuals.selection.stroke.color = palette.primary_foreground;
+        visuals.widgets.inactive.corner_radius = 6.into();
+        visuals.widgets.active.corner_radius = 6.into();
+        visuals.widgets.hovered.corner_radius = 6.into();
+        visuals.widgets.noninteractive.corner_radius = 6.into();
+        visuals.window_corner_radius = 8.into();
+        visuals.menu_corner_radius = 8.into();
+        visuals.window_fill = palette.popover;
+        visuals.panel_fill = palette.background;
+        visuals.extreme_bg_color = palette.input;
+        visuals.faint_bg_color = palette.muted;
+        visuals.window_stroke = Stroke::new(1.0, palette.border);
         visuals.window_shadow = egui::epaint::Shadow {
-            offset: Vec2::new(0.0, 3.0),
-            blur: 14.0,
-            spread: 0.0,
+            offset: [0, 3],
+            blur: 14,
+            spread: 0,
             color: Color32::from_black_alpha(if dark { 90 } else { 36 }),
         };
         visuals.popup_shadow = egui::epaint::Shadow {
-            offset: Vec2::new(0.0, 2.0),
-            blur: 8.0,
-            spread: 0.0,
+            offset: [0, 2],
+            blur: 8,
+            spread: 0,
             color: Color32::from_black_alpha(if dark { 80 } else { 28 }),
         };
-        visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, self.border);
-        visuals.widgets.active.bg_stroke = Stroke::new(1.0, self.border);
-        visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, self.border);
-        visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, self.border);
+        visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, palette.border);
+        visuals.widgets.active.bg_stroke = Stroke::new(1.0, palette.ring);
+        visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, palette.ring);
+        visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, palette.border);
+        // After Effects風: トラックは細い一本線、操作点は小さな丸。
+        // 値まで塗りつぶさず、位置そのものをノブで読む編集UIにする。
+        visuals.slider_trailing_fill = false;
+        visuals.handle_shape = egui::style::HandleShape::Circle;
         ctx.set_visuals(visuals);
 
         let mut style = (*ctx.style()).clone();
         style.text_styles = [
             (TextStyle::Body, FontId::new(12.0, FontFamily::Proportional)),
-            (TextStyle::Button, FontId::new(12.0, FontFamily::Proportional)),
-            (TextStyle::Small, FontId::new(11.0, FontFamily::Proportional)),
-            (TextStyle::Heading, FontId::new(13.0, FontFamily::Proportional)),
-            (TextStyle::Monospace, FontId::new(12.0, FontFamily::Monospace)),
+            (
+                TextStyle::Button,
+                FontId::new(12.0, FontFamily::Proportional),
+            ),
+            (
+                TextStyle::Small,
+                FontId::new(11.0, FontFamily::Proportional),
+            ),
+            (
+                TextStyle::Heading,
+                FontId::new(13.0, FontFamily::Proportional),
+            ),
+            (
+                TextStyle::Monospace,
+                FontId::new(12.0, FontFamily::Monospace),
+            ),
         ]
         .into_iter()
         .collect();
         style.spacing.item_spacing = Vec2::new(8.0, 6.0);
         style.spacing.button_padding = Vec2::new(10.0, 2.0);
         style.spacing.interact_size.y = 22.0;
+        style.spacing.slider_width = 144.0;
+        style.spacing.slider_rail_height = 1.5;
         ctx.set_style(style);
     }
 }
@@ -385,6 +443,7 @@ const SC_UNDO: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key:
 const SC_REDO: KeyboardShortcut =
     KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Z);
 const SC_REDO2: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::Y);
+const SC_SAVE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::S);
 
 #[derive(PartialEq, Clone, Copy)]
 enum Tool {
@@ -392,6 +451,34 @@ enum Tool {
     Select,
     DirectSelect,
     CustomPeg,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum WorkspaceMode {
+    Shape,
+    Font,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct WorkspaceFile {
+    version: u32,
+    shape: Document,
+    font: FontProject,
+    mode: WorkspaceMode,
+    dark_theme: bool,
+    show_circles: bool,
+}
+
+const CURRENT_WORKSPACE_VERSION: u32 = 1;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum FontMetricGuide {
+    Origin,
+    Right,
+    Ascender,
+    XHeight,
+    Baseline,
+    Descender,
 }
 
 #[derive(Clone, Copy)]
@@ -407,6 +494,7 @@ enum AlignAxis {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum DockTab {
     Canvas,
+    Proof,
     Glyphs,
     Layers,
     Circles,
@@ -474,6 +562,103 @@ struct FaceRender {
     wrap_accents: Vec<WrapAccent>,
 }
 
+struct ProofCacheEntry {
+    document: Document,
+    canvas_size: Vec2,
+    canvas_center: Point,
+    render_style: FontRenderStyle,
+    thread_width: f64,
+    rings: Arc<Vec<Vec<Point>>>,
+}
+
+#[derive(Clone)]
+struct ReferenceFont {
+    name: String,
+    data: Vec<u8>,
+    face_index: u32,
+}
+
+#[derive(Default)]
+struct ReferenceOutlineBuilder {
+    contours: Vec<Vec<Point>>,
+    current: Vec<Point>,
+    cursor: Point,
+}
+
+impl ReferenceOutlineBuilder {
+    fn finish_contour(&mut self) {
+        if self.current.len() >= 2 {
+            self.contours.push(std::mem::take(&mut self.current));
+        } else {
+            self.current.clear();
+        }
+    }
+
+    fn sample_quad(&mut self, control: Point, end: Point) {
+        let start = self.cursor;
+        for step in 1..=12 {
+            let t = step as f64 / 12.0;
+            let mt = 1.0 - t;
+            self.current.push(Point::new(
+                mt * mt * start.x + 2.0 * mt * t * control.x + t * t * end.x,
+                mt * mt * start.y + 2.0 * mt * t * control.y + t * t * end.y,
+            ));
+        }
+        self.cursor = end;
+    }
+
+    fn sample_cubic(&mut self, first: Point, second: Point, end: Point) {
+        let start = self.cursor;
+        for step in 1..=16 {
+            let t = step as f64 / 16.0;
+            let mt = 1.0 - t;
+            self.current.push(Point::new(
+                mt.powi(3) * start.x
+                    + 3.0 * mt * mt * t * first.x
+                    + 3.0 * mt * t * t * second.x
+                    + t.powi(3) * end.x,
+                mt.powi(3) * start.y
+                    + 3.0 * mt * mt * t * first.y
+                    + 3.0 * mt * t * t * second.y
+                    + t.powi(3) * end.y,
+            ));
+        }
+        self.cursor = end;
+    }
+}
+
+impl ttf_parser::OutlineBuilder for ReferenceOutlineBuilder {
+    fn move_to(&mut self, x: f32, y: f32) {
+        self.finish_contour();
+        self.cursor = Point::new(f64::from(x), f64::from(y));
+        self.current.push(self.cursor);
+    }
+
+    fn line_to(&mut self, x: f32, y: f32) {
+        self.cursor = Point::new(f64::from(x), f64::from(y));
+        self.current.push(self.cursor);
+    }
+
+    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+        self.sample_quad(
+            Point::new(f64::from(x1), f64::from(y1)),
+            Point::new(f64::from(x), f64::from(y)),
+        );
+    }
+
+    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+        self.sample_cubic(
+            Point::new(f64::from(x1), f64::from(y1)),
+            Point::new(f64::from(x2), f64::from(y2)),
+            Point::new(f64::from(x), f64::from(y)),
+        );
+    }
+
+    fn close(&mut self) {
+        self.finish_contour();
+    }
+}
+
 #[derive(Clone, Copy)]
 struct WrapAccent {
     center: Point,
@@ -483,9 +668,33 @@ struct WrapAccent {
     turns: u32,
 }
 
+enum SavePayload {
+    Shape(Document),
+    Font(FontProject),
+    Workspace(WorkspaceFile),
+}
+
+enum SaveEvent {
+    Progress(f32),
+    Finished(Result<(), String>),
+}
+
+struct SaveOperation {
+    label: String,
+    progress: f32,
+    receiver: mpsc::Receiver<SaveEvent>,
+    finished_at: Option<Instant>,
+}
+
 pub struct App {
     doc: Document,
+    workspace_mode: WorkspaceMode,
+    shape_document: Document,
+    shape_undo: Vec<Document>,
+    shape_redo: Vec<Document>,
     font_project: FontProject,
+    glyph_undo: Vec<Vec<Document>>,
+    glyph_redo: Vec<Vec<Document>>,
     new_glyph_text: String,
     undo: Vec<Document>,
     redo: Vec<Document>,
@@ -514,14 +723,40 @@ pub struct App {
     face_editor: Option<usize>,
     tool: Tool,
     status: String,
+    shape_save_path: Option<PathBuf>,
+    font_save_path: Option<PathBuf>,
+    workspace_save_path: Option<PathBuf>,
+    save_operation: Option<SaveOperation>,
+    /// 前のグリフのオニオンスキン。
+    onion_skin: bool,
+    onion_next: bool,
+    onion_opacity: f32,
+    onion_previous_color: Color32,
+    onion_next_color: Color32,
+    proof_text: String,
+    proof_size: f32,
+    proof_tracking: f32,
+    proof_cache: HashMap<usize, ProofCacheEntry>,
+    reference_font: Option<ReferenceFont>,
+    reference_font_opacity: f32,
+    reference_font_scale: f32,
+    reference_font_offset: Vec2,
 }
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         install_cjk_fonts(&cc.egui_ctx);
+        let font_project = FontProject::default();
+        let glyph_count = font_project.glyphs.len();
         let mut app = App {
             doc: Document::default(),
-            font_project: FontProject::default(),
+            workspace_mode: WorkspaceMode::Shape,
+            shape_document: Document::default(),
+            shape_undo: Vec::new(),
+            shape_redo: Vec::new(),
+            font_project,
+            glyph_undo: vec![Vec::new(); glyph_count],
+            glyph_redo: vec![Vec::new(); glyph_count],
             new_glyph_text: String::new(),
             undo: Vec::new(),
             redo: Vec::new(),
@@ -552,6 +787,23 @@ impl App {
             face_editor: None,
             tool: Tool::Draw,
             status: "クリックで線を引き始め、始点に戻ってクリックで面を閉じます".to_owned(),
+            shape_save_path: None,
+            font_save_path: None,
+            workspace_save_path: None,
+            save_operation: None,
+            onion_skin: false,
+            onion_next: false,
+            onion_opacity: 0.42,
+            onion_previous_color: Color32::from_rgb(116, 184, 255),
+            onion_next_color: Color32::from_rgb(255, 137, 174),
+            proof_text: String::new(),
+            proof_size: 64.0,
+            proof_tracking: 0.0,
+            proof_cache: HashMap::new(),
+            reference_font: None,
+            reference_font_opacity: 0.28,
+            reference_font_scale: 1.0,
+            reference_font_offset: Vec2::ZERO,
         };
         app.apply_theme(&cc.egui_ctx);
         app
@@ -578,19 +830,21 @@ impl App {
     }
 
     fn default_dock_layout() -> DockState<DockTab> {
-        let mut dock = DockState::new(vec![DockTab::Canvas]);
-        // 右カラム: グリフ管理を入口にし、同じ領域からグリッドへ切り替えられる。
-        let [_, grid] = dock
-            .main_surface_mut()
-            .split_right(NodeIndex::root(), 0.80, vec![DockTab::Glyphs, DockTab::Grid]);
-        let [_, circles] = dock
-            .main_surface_mut()
-            .split_below(grid, 0.42, vec![DockTab::Circles]);
-        let [_, props] = dock
-            .main_surface_mut()
-            .split_below(circles, 0.5, vec![DockTab::Properties]);
-        dock.main_surface_mut()
-            .split_below(props, 0.5, vec![DockTab::Layers]);
+        // 試打はキャンバスと同じ中央領域を使う兄弟タブ。
+        let mut dock = DockState::new(vec![DockTab::Canvas, DockTab::Proof]);
+        // 右側の情報は縦に細切れにせず、一つのインスペクター領域へ集約する。
+        // 必要な情報だけをタブで切り替え、キャンバス面積と視線の流れを安定させる。
+        dock.main_surface_mut().split_right(
+            NodeIndex::root(),
+            0.76,
+            vec![
+                DockTab::Grid,
+                DockTab::Properties,
+                DockTab::Layers,
+                DockTab::Glyphs,
+                DockTab::Circles,
+            ],
+        );
         dock
     }
 
@@ -611,7 +865,6 @@ impl App {
         }
     }
 
-
     /// 面をグリッドセル単位で平行移動する。Grid/Sub 参照は (row,col) を
     /// ずらし、Pin と参照先の任意円は同じ距離だけ移動する（スナップ移動）
     fn apply_face_translation(&mut self, base: &Document, indices: &[usize], drow: i32, dcol: i32) {
@@ -624,7 +877,9 @@ impl App {
         let dy = drow as f64 * spacing;
         let mut moved_customs: Vec<u64> = Vec::new();
         for &i in indices {
-            let Some(face) = self.doc.faces.get_mut(i) else { continue };
+            let Some(face) = self.doc.faces.get_mut(i) else {
+                continue;
+            };
             let shift_ref = |peg: &mut PegRef, moved: &mut Vec<u64>| match peg {
                 PegRef::Grid { row, col } | PegRef::Sub { row, col } => {
                     *row += drow;
@@ -667,9 +922,18 @@ impl App {
     fn face_preview_widget(&mut self, ui: &mut egui::Ui, face_idx: usize, size: f32) {
         let (resp, painter) = ui.allocate_painter(Vec2::splat(size), Sense::click());
         let rect = resp.rect;
-        let Some(face) = self.doc.faces.get(face_idx) else { return };
-        let resolver =
-            |r: &PegRef| resolve_peg(&self.doc.grid, &self.doc.custom_pegs, self.canvas_center, self.doc.peg_appearance, r);
+        let Some(face) = self.doc.faces.get(face_idx) else {
+            return;
+        };
+        let resolver = |r: &PegRef| {
+            resolve_peg(
+                &self.doc.grid,
+                &self.doc.custom_pegs,
+                self.canvas_center,
+                self.doc.peg_appearance,
+                r,
+            )
+        };
         if let Some(segs) = materialize_face(face, &resolver) {
             let mut pts = Vec::new();
             self.flatten_segments_for_appearance(&segs, &mut pts, 0.4);
@@ -888,7 +1152,9 @@ impl App {
                     let used_as_start = self.doc.faces.iter().any(|face| face.start.peg == peg_ref);
                     if used_as_start {
                         skip_count += 1;
-                    } else if !self.doc.disabled_pegs.contains(&peg_ref) && !peg_refs.contains(&peg_ref) {
+                    } else if !self.doc.disabled_pegs.contains(&peg_ref)
+                        && !peg_refs.contains(&peg_ref)
+                    {
                         peg_refs.push(peg_ref);
                     }
                 }
@@ -917,7 +1183,9 @@ impl App {
         for peg_ref in &peg_refs {
             self.doc.disabled_pegs.push(*peg_ref);
             for face in &mut self.doc.faces {
-                face.elements.retain(|element| !matches!(element, Element::Wrap { peg, .. } if peg == peg_ref));
+                face.elements.retain(
+                    |element| !matches!(element, Element::Wrap { peg, .. } if peg == peg_ref),
+                );
             }
         }
 
@@ -936,7 +1204,11 @@ impl App {
         } else if peg_ids.is_empty() && face_indices.is_empty() && peg_refs.is_empty() {
             "削除対象がありません".to_owned()
         } else {
-            if peg_refs.is_empty() { "選択項目を削除しました".to_owned() } else { "選択したグリッド円を無効化し、糸を張り直しました".to_owned() }
+            if peg_refs.is_empty() {
+                "選択項目を削除しました".to_owned()
+            } else {
+                "選択したグリッド円を無効化し、糸を張り直しました".to_owned()
+            }
         };
         if !peg_refs.is_empty() {
             self.rebuild_pegs(self.canvas_size);
@@ -1010,7 +1282,10 @@ impl App {
                 return true;
             }
             face.elements.iter().any(|el| match *el {
-                Element::Wrap { peg: PegRef::Custom { id: used }, .. } if used == id => true,
+                Element::Wrap {
+                    peg: PegRef::Custom { id: used },
+                    ..
+                } if used == id => true,
                 _ => false,
             })
         })
@@ -1080,7 +1355,8 @@ impl App {
         thread_to_wrap_elements(th, &self.pegs, &self.peg_refs, end)
     }
 
-    fn has_penetration_on_lines(&self, segs: &[Seg]) -> bool {
+    #[cfg(test)]
+    fn segments_self_intersect(&self, segs: &[Seg]) -> bool {
         let mut points = Vec::new();
         if segs.is_empty() {
             return false;
@@ -1093,7 +1369,10 @@ impl App {
         if points.len() < 4 {
             return false;
         }
-        let repeated_end = points.first().zip(points.last()).is_some_and(|(a, b)| a.distance(*b) < 1e-8);
+        let repeated_end = points
+            .first()
+            .zip(points.last())
+            .is_some_and(|(a, b)| a.distance(*b) < 1e-8);
         let vertex_count = points.len() - usize::from(repeated_end);
         if vertex_count < 3 {
             return false;
@@ -1155,28 +1434,34 @@ impl App {
             for col in min_col..=max_col {
                 let grid_ref = PegRef::Grid { row, col };
                 if !disabled.contains(&grid_ref) {
-                if let Some(peg) = resolve_peg(grid, customs, canvas_center, appearance, &grid_ref) {
-                    pegs.push(peg);
-                    refs.push(grid_ref);
-                }
+                    if let Some(peg) =
+                        resolve_peg(grid, customs, canvas_center, appearance, &grid_ref)
+                    {
+                        pegs.push(peg);
+                        refs.push(grid_ref);
+                    }
                 }
                 if grid.subs_enabled {
                     let sub_ref = PegRef::Sub { row, col };
                     if !disabled.contains(&sub_ref) {
-                    if let Some(peg) =
-                        resolve_peg(grid, customs, canvas_center, appearance, &sub_ref)
-                    {
-                        pegs.push(peg);
-                        refs.push(sub_ref);
-                    }
+                        if let Some(peg) =
+                            resolve_peg(grid, customs, canvas_center, appearance, &sub_ref)
+                        {
+                            pegs.push(peg);
+                            refs.push(sub_ref);
+                        }
                     }
                 }
             }
         }
         for custom in customs {
-            if let Some(peg) =
-                resolve_peg(grid, customs, canvas_center, appearance, &PegRef::Custom { id: custom.id })
-            {
+            if let Some(peg) = resolve_peg(
+                grid,
+                customs,
+                canvas_center,
+                appearance,
+                &PegRef::Custom { id: custom.id },
+            ) {
                 pegs.push(peg);
                 refs.push(PegRef::Custom { id: custom.id });
             }
@@ -1208,8 +1493,12 @@ impl App {
         };
         for peg_ref in disabled {
             custom_hash ^= match *peg_ref {
-                PegRef::Grid { row, col } => (row as u64).wrapping_mul(31) ^ (col as u64).wrapping_mul(131),
-                PegRef::Sub { row, col } => 0x51b5 ^ (row as u64).wrapping_mul(37) ^ (col as u64).wrapping_mul(137),
+                PegRef::Grid { row, col } => {
+                    (row as u64).wrapping_mul(31) ^ (col as u64).wrapping_mul(131)
+                }
+                PegRef::Sub { row, col } => {
+                    0x51b5 ^ (row as u64).wrapping_mul(37) ^ (col as u64).wrapping_mul(137)
+                }
                 PegRef::Custom { id } => 0xa11c ^ id.wrapping_mul(149),
             };
         }
@@ -1228,12 +1517,24 @@ impl App {
     }
 
     fn rebuild_pegs(&mut self, size: Vec2) {
-        let key = Self::peg_ref_key(&self.doc.grid, size, &self.doc.custom_pegs, self.doc.peg_appearance, &self.doc.disabled_pegs);
+        let key = Self::peg_ref_key(
+            &self.doc.grid,
+            size,
+            &self.doc.custom_pegs,
+            self.doc.peg_appearance,
+            &self.doc.disabled_pegs,
+        );
         if key == self.pegs_key {
             return;
         }
-        let (pegs, refs) =
-            Self::engine_pegs(&self.doc.grid, size, self.canvas_center, &self.doc.custom_pegs, self.doc.peg_appearance, &self.doc.disabled_pegs);
+        let (pegs, refs) = Self::engine_pegs(
+            &self.doc.grid,
+            size,
+            self.canvas_center,
+            &self.doc.custom_pegs,
+            self.doc.peg_appearance,
+            &self.doc.disabled_pegs,
+        );
         self.pegs = pegs;
         self.peg_refs = refs;
         self.pegs_key = key;
@@ -1243,10 +1544,7 @@ impl App {
         }
     }
 
-    fn nearest_grid_peg_for_start(
-        &self,
-        pos: Point,
-    ) -> Option<(Peg, PegRef)> {
+    fn nearest_grid_peg_for_start(&self, pos: Point) -> Option<(Peg, PegRef)> {
         let mut best: Option<(f64, Peg, PegRef)> = None;
         let prox = self.world_unit(START_PROX);
         for (peg, peg_ref) in self.pegs.iter().zip(self.peg_refs.iter()) {
@@ -1277,10 +1575,7 @@ impl App {
         Some(out)
     }
 
-    fn pick_start_anchor(
-        &self,
-        cursor: Point,
-    ) -> Option<(Point, StartAnchor)> {
+    fn pick_start_anchor(&self, cursor: Point) -> Option<(Point, StartAnchor)> {
         let candidates = self.start_anchor_candidates(cursor)?;
         let snap = self.world_unit(START_SNAP);
         candidates
@@ -1293,12 +1588,7 @@ impl App {
             })
     }
 
-    fn draw_start_markers(
-        &self,
-        ui_pos: Option<Point>,
-        painter: &egui::Painter,
-        origin: Pos2,
-    ) {
+    fn draw_start_markers(&self, ui_pos: Option<Point>, painter: &egui::Painter, origin: Pos2) {
         let Some(pos) = ui_pos else {
             return;
         };
@@ -1369,7 +1659,13 @@ impl App {
 
     fn materialized_faces(&self) -> Vec<(usize, FaceRender)> {
         let resolver = |r: &PegRef| {
-            resolve_peg(&self.doc.grid, &self.doc.custom_pegs, self.canvas_center, self.doc.peg_appearance, r)
+            resolve_peg(
+                &self.doc.grid,
+                &self.doc.custom_pegs,
+                self.canvas_center,
+                self.doc.peg_appearance,
+                r,
+            )
         };
         let mut out = Vec::new();
         for (i, face) in self.doc.faces.iter().enumerate() {
@@ -1398,7 +1694,15 @@ impl App {
                     })
                     .cloned()
                     .unwrap_or_default();
-                out.push((i, FaceRender { points, rings, invalid: false, wrap_accents: Vec::new() }));
+                out.push((
+                    i,
+                    FaceRender {
+                        points,
+                        rings,
+                        invalid: false,
+                        wrap_accents: Vec::new(),
+                    },
+                ));
                 continue;
             }
             let obstacles: Vec<(PegRef, Peg)> = self
@@ -1417,31 +1721,43 @@ impl App {
                 if signed_area(&points) < 0.0 {
                     points.reverse();
                 }
-                let invalid = self.has_self_intersections(&points)
-                    || self.face_has_overwrapped_peg(face)
+                // 糸同士の交差は意図的な造形として許可する。無効なのは
+                // 円の貫通と、手動巻きの安全上限を超えた場合だけ。
+                let invalid = self.face_has_overwrapped_peg(face)
                     || segments_penetrate_pegs(
                         &segments,
                         &obstacles.iter().map(|(_, peg)| *peg).collect::<Vec<_>>(),
                     );
                 let mut wrap_accents = Vec::new();
                 for element in &face.elements {
-                    let Element::Wrap { peg, s, turns, .. } = *element else { continue };
+                    let Element::Wrap { peg, s, turns, .. } = *element else {
+                        continue;
+                    };
                     if turns == 0 {
                         continue;
                     }
-                    let Some(resolved) = resolver(&peg) else { continue };
-                    if let Some((start, direction)) = segments.iter().find_map(|segment| match *segment {
-                        Seg::Arc { center, start, end, .. }
-                            if center.distance(resolved.center) < 1e-8 => {
+                    let Some(resolved) = resolver(&peg) else {
+                        continue;
+                    };
+                    if let Some((start, direction)) =
+                        segments.iter().find_map(|segment| match *segment {
+                            Seg::Arc {
+                                center, start, end, ..
+                            } if center.distance(resolved.center) < 1e-8 => {
                                 Some((start, (end - start).signum()))
                             }
-                        _ => None,
-                    }) {
+                            _ => None,
+                        })
+                    {
                         wrap_accents.push(WrapAccent {
                             center: resolved.center,
                             radius: resolved.radius,
                             start,
-                            direction: if direction == 0.0 { s.signum() } else { direction },
+                            direction: if direction == 0.0 {
+                                s.signum()
+                            } else {
+                                direction
+                            },
                             turns,
                         });
                     }
@@ -1481,11 +1797,24 @@ impl App {
         for seg in segs {
             match *seg {
                 Seg::Line { from, to } => {
-                    if out.is_empty() { out.push(from); }
+                    if out.is_empty() {
+                        out.push(from);
+                    }
                     out.push(to);
                 }
-                Seg::Arc { center, radius, start, end } => {
-                    let peg = self.pegs.iter().find(|peg| peg.center.distance(center) < 0.01 && (peg.radius - radius).abs() < 0.01).copied();
+                Seg::Arc {
+                    center,
+                    radius,
+                    start,
+                    end,
+                } => {
+                    let peg = self
+                        .pegs
+                        .iter()
+                        .find(|peg| {
+                            peg.center.distance(center) < 0.01 && (peg.radius - radius).abs() < 0.01
+                        })
+                        .copied();
                     // tol は弧上の点間距離ではなく、円弧と弦の最大誤差として扱う。
                     // 極端な短線分の連続はアンチエイリアスで円弧だけ薄く見えるため、
                     // サジッタから必要角度を逆算して直線部と濃度を揃える。
@@ -1499,7 +1828,12 @@ impl App {
                             || crate::geometry::on_circle(center, radius, angle),
                             |peg| crate::geometry::on_peg(peg, angle),
                         );
-                        if out.last().is_none_or(|last| last.distance(point) > tol * 0.25) { out.push(point); }
+                        if out
+                            .last()
+                            .is_none_or(|last| last.distance(point) > tol * 0.25)
+                        {
+                            out.push(point);
+                        }
                     }
                 }
             }
@@ -1522,7 +1856,11 @@ impl App {
             return;
         }
         let rendered = self.materialized_faces();
-        let Some(reference) = rendered.iter().find(|(index, _)| *index == indices[0]).and_then(|(_, render)| Self::face_bounds(render)) else {
+        let Some(reference) = rendered
+            .iter()
+            .find(|(index, _)| *index == indices[0])
+            .and_then(|(_, render)| Self::face_bounds(render))
+        else {
             return;
         };
         let target = match axis {
@@ -1555,8 +1893,12 @@ impl App {
             };
             let delta = target - current_value;
             let (drow, dcol) = match axis {
-                AlignAxis::Left | AlignAxis::CenterX | AlignAxis::Right => (0, (delta / spacing).round() as i32),
-                AlignAxis::Top | AlignAxis::CenterY | AlignAxis::Bottom => ((delta / spacing).round() as i32, 0),
+                AlignAxis::Left | AlignAxis::CenterX | AlignAxis::Right => {
+                    (0, (delta / spacing).round() as i32)
+                }
+                AlignAxis::Top | AlignAxis::CenterY | AlignAxis::Bottom => {
+                    ((delta / spacing).round() as i32, 0)
+                }
             };
             if drow != 0 || dcol != 0 {
                 let base = self.doc.clone();
@@ -1587,8 +1929,15 @@ impl App {
             self.status = "マージするレイヤーを2つ以上選んでください".to_owned();
             return;
         }
-        let resolver =
-            |r: &PegRef| resolve_peg(&self.doc.grid, &self.doc.custom_pegs, self.canvas_center, self.doc.peg_appearance, r);
+        let resolver = |r: &PegRef| {
+            resolve_peg(
+                &self.doc.grid,
+                &self.doc.custom_pegs,
+                self.canvas_center,
+                self.doc.peg_appearance,
+                r,
+            )
+        };
         let obstacles: Vec<(PegRef, Peg)> = self
             .peg_refs
             .iter()
@@ -1605,7 +1954,9 @@ impl App {
                         .map(|ring| bevel_ring(ring, baked.bevel))
                         .filter(|ring| ring.len() >= 3)
                         .collect()
-                } else if let Some(segs) = materialize_face_with_obstacles(face, &resolver, &obstacles) {
+                } else if let Some(segs) =
+                    materialize_face_with_obstacles(face, &resolver, &obstacles)
+                {
                     let mut pts = Vec::new();
                     self.flatten_segments_for_appearance(&segs, &mut pts, 0.2);
                     vec![pts]
@@ -1633,7 +1984,10 @@ impl App {
         }
         let n = self.doc.faces.len() + 1;
         self.doc.faces.push(Face {
-            start: StartAnchor { peg: PegRef::Grid { row: 0, col: 0 }, port: Port::Top },
+            start: StartAnchor {
+                peg: PegRef::Grid { row: 0, col: 0 },
+                port: Port::Top,
+            },
             elements: Vec::new(),
             name: format!("マージ {n}"),
             visible: true,
@@ -1672,21 +2026,112 @@ impl App {
         }
     }
 
-    fn save_json(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("JSON", &["json"])
-            .set_file_name("glyph.json")
-            .save_file()
-        {
-            let json = serde_json::to_string_pretty(&self.doc).unwrap_or_default();
-            match std::fs::write(&path, json) {
-                Ok(()) => self.status = format!("JSONを保存しました: {}", path.display()),
-                Err(e) => self.status = format!("保存に失敗しました: {e}"),
+    fn start_background_save(&mut self, path: PathBuf, payload: SavePayload, label: &str) {
+        if self.save_operation.is_some() {
+            self.status = "保存処理が進行中です".to_owned();
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        let label_owned = label.to_owned();
+        std::thread::spawn(move || {
+            let _ = sender.send(SaveEvent::Progress(0.08));
+            let serialized = match payload {
+                SavePayload::Shape(document) => serde_json::to_vec_pretty(&document),
+                SavePayload::Font(project) => serde_json::to_vec_pretty(&project),
+                SavePayload::Workspace(workspace) => serde_json::to_vec_pretty(&workspace),
             }
+            .map_err(|error| error.to_string());
+            let result = serialized.and_then(|json| {
+                let _ = sender.send(SaveEvent::Progress(0.55));
+                let extension = path
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("json");
+                let temporary = path.with_extension(format!("{extension}.saving"));
+                std::fs::write(&temporary, json).map_err(|error| error.to_string())?;
+                let _ = sender.send(SaveEvent::Progress(0.86));
+                if let Err(error) = std::fs::rename(&temporary, &path) {
+                    let _ = std::fs::remove_file(&temporary);
+                    return Err(error.to_string());
+                }
+                Ok(())
+            });
+            let _ = sender.send(SaveEvent::Finished(result));
+        });
+        self.save_operation = Some(SaveOperation {
+            label: label_owned.clone(),
+            progress: 0.02,
+            receiver,
+            finished_at: None,
+        });
+        self.status = format!("{label_owned}を保存しています…");
+    }
+
+    fn poll_save_operation(&mut self, ctx: &egui::Context) {
+        let mut finished_result = None;
+        let mut should_clear = false;
+        if let Some(operation) = &mut self.save_operation {
+            loop {
+                match operation.receiver.try_recv() {
+                    Ok(SaveEvent::Progress(progress)) => operation.progress = progress,
+                    Ok(SaveEvent::Finished(result)) => {
+                        operation.progress = 1.0;
+                        operation.finished_at = Some(Instant::now());
+                        finished_result = Some((operation.label.clone(), result));
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        if operation.finished_at.is_none() {
+                            operation.finished_at = Some(Instant::now());
+                            finished_result = Some((
+                                operation.label.clone(),
+                                Err("保存スレッドが予期せず終了しました".to_owned()),
+                            ));
+                        }
+                        break;
+                    }
+                }
+            }
+            if let Some(finished_at) = operation.finished_at {
+                should_clear = finished_at.elapsed() >= Duration::from_millis(900);
+            }
+            ctx.request_repaint_after(Duration::from_millis(30));
+        }
+        if let Some((label, result)) = finished_result {
+            self.status = match result {
+                Ok(()) => format!("{label}を保存しました"),
+                Err(error) => format!("{label}の保存に失敗しました: {error}"),
+            };
+        }
+        if should_clear {
+            self.save_operation = None;
+        }
+    }
+
+    fn save_current_workspace(&mut self) {
+        match self.workspace_mode {
+            WorkspaceMode::Shape => self.save_json(),
+            WorkspaceMode::Font => self.save_font_project(),
+        }
+    }
+
+    fn save_json(&mut self) {
+        let path = self.shape_save_path.clone().or_else(|| {
+            rfd::FileDialog::new()
+                .add_filter("JSON", &["json"])
+                .set_file_name("glyph.json")
+                .save_file()
+        });
+        if let Some(path) = path {
+            self.shape_save_path = Some(path.clone());
+            self.start_background_save(path, SavePayload::Shape(self.doc.clone()), "シェイプ");
         }
     }
 
     fn sync_active_glyph(&mut self) {
+        if self.workspace_mode != WorkspaceMode::Font {
+            return;
+        }
         if let Some(glyph) = self
             .font_project
             .glyphs
@@ -1696,9 +2141,7 @@ impl App {
         }
     }
 
-    fn reset_editor_for_glyph(&mut self) {
-        self.undo.clear();
-        self.redo.clear();
+    fn reset_transient_editor(&mut self) {
         self.draw = None;
         self.active_custom_drag = None;
         self.face_drag = None;
@@ -1714,16 +2157,82 @@ impl App {
         self.rebuild_pegs(self.canvas_size);
     }
 
-    fn switch_glyph(&mut self, index: usize) {
-        if index >= self.font_project.glyphs.len()
-            || index == self.font_project.active_glyph
-        {
+    fn ensure_glyph_history_slots(&mut self) {
+        let count = self.font_project.glyphs.len();
+        self.glyph_undo.resize_with(count, Vec::new);
+        self.glyph_redo.resize_with(count, Vec::new);
+    }
+
+    fn store_active_glyph_session(&mut self) {
+        if self.workspace_mode != WorkspaceMode::Font {
             return;
         }
         self.sync_active_glyph();
-        self.font_project.active_glyph = index;
+        self.ensure_glyph_history_slots();
+        let index = self.font_project.active_glyph;
+        self.glyph_undo[index] = std::mem::take(&mut self.undo);
+        self.glyph_redo[index] = std::mem::take(&mut self.redo);
+    }
+
+    fn load_active_glyph_session(&mut self) {
+        self.ensure_glyph_history_slots();
+        let index = self.font_project.active_glyph;
         self.doc = self.font_project.glyphs[index].document.clone();
-        self.reset_editor_for_glyph();
+        self.undo = std::mem::take(&mut self.glyph_undo[index]);
+        self.redo = std::mem::take(&mut self.glyph_redo[index]);
+        self.reset_transient_editor();
+    }
+
+    fn switch_workspace_mode(&mut self, mode: WorkspaceMode) {
+        if mode == self.workspace_mode {
+            return;
+        }
+        self.cancel_active_manipulation();
+        match self.workspace_mode {
+            WorkspaceMode::Shape => {
+                self.shape_document = self.doc.clone();
+                self.shape_undo = std::mem::take(&mut self.undo);
+                self.shape_redo = std::mem::take(&mut self.redo);
+            }
+            WorkspaceMode::Font => self.store_active_glyph_session(),
+        }
+
+        self.workspace_mode = mode;
+        match mode {
+            WorkspaceMode::Shape => {
+                self.doc = self.shape_document.clone();
+                self.undo = std::mem::take(&mut self.shape_undo);
+                self.redo = std::mem::take(&mut self.shape_redo);
+                self.reset_transient_editor();
+                if let Some(location) = self.dock.find_tab(&DockTab::Grid) {
+                    self.dock.set_active_tab(location);
+                }
+                self.status = "シェイプモードに切り替えました".to_owned();
+            }
+            WorkspaceMode::Font => {
+                self.load_active_glyph_session();
+                if let Some(location) = self.dock.find_tab(&DockTab::Glyphs) {
+                    self.dock.set_active_tab(location);
+                }
+                let glyph = &self.font_project.glyphs[self.font_project.active_glyph];
+                self.status = format!("フォントモード: {} ({})", glyph.character, glyph.name);
+            }
+        }
+    }
+
+    fn switch_glyph(&mut self, index: usize) {
+        if index >= self.font_project.glyphs.len() {
+            return;
+        }
+        if self.workspace_mode != WorkspaceMode::Font {
+            self.switch_workspace_mode(WorkspaceMode::Font);
+        }
+        if index == self.font_project.active_glyph {
+            return;
+        }
+        self.store_active_glyph_session();
+        self.font_project.active_glyph = index;
+        self.load_active_glyph_session();
         let glyph = &self.font_project.glyphs[index];
         self.status = format!("グリフ {} ({}) を編集中", glyph.character, glyph.name);
     }
@@ -1739,9 +2248,14 @@ impl App {
             self.status = format!("既存のグリフ {character} に切り替えました");
             return;
         }
-        self.sync_active_glyph();
+        if self.workspace_mode != WorkspaceMode::Font {
+            self.switch_workspace_mode(WorkspaceMode::Font);
+        }
+        self.store_active_glyph_session();
         let document = if duplicate_current {
-            self.doc.clone()
+            self.font_project.glyphs[self.font_project.active_glyph]
+                .document
+                .clone()
         } else {
             Document::default()
         };
@@ -1749,29 +2263,129 @@ impl App {
             character,
             name: glyph_name(character),
             advance_width: if character == ' ' { 300 } else { 600 },
+            left_side_bearing: 0,
             document: document.clone(),
         });
+        self.glyph_undo.push(Vec::new());
+        self.glyph_redo.push(Vec::new());
         self.font_project.active_glyph = self.font_project.glyphs.len() - 1;
-        self.doc = document;
-        self.reset_editor_for_glyph();
+        self.load_active_glyph_session();
         self.new_glyph_text.clear();
         self.status = format!("グリフ {character} を追加しました");
     }
 
     fn save_font_project(&mut self) {
         self.sync_active_glyph();
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("ThreadType project", &["json"])
-            .set_file_name("ThreadType.font.json")
-            .save_file()
-        {
-            match serde_json::to_string_pretty(&self.font_project)
-                .map_err(|error| error.to_string())
-                .and_then(|json| std::fs::write(&path, json).map_err(|error| error.to_string()))
-            {
-                Ok(()) => self.status = format!("フォントプロジェクトを保存しました: {}", path.display()),
-                Err(error) => self.status = format!("プロジェクト保存に失敗しました: {error}"),
+        let path = self.font_save_path.clone().or_else(|| {
+            rfd::FileDialog::new()
+                .add_filter("ThreadType project", &["json"])
+                .set_file_name("ThreadType.font.json")
+                .save_file()
+        });
+        if let Some(path) = path {
+            self.font_save_path = Some(path.clone());
+            self.start_background_save(
+                path,
+                SavePayload::Font(self.font_project.clone()),
+                "フォントプロジェクト",
+            );
+        }
+    }
+
+    fn workspace_snapshot(&self) -> WorkspaceFile {
+        let shape = if self.workspace_mode == WorkspaceMode::Shape {
+            self.doc.clone()
+        } else {
+            self.shape_document.clone()
+        };
+        let mut font = self.font_project.clone();
+        if self.workspace_mode == WorkspaceMode::Font {
+            if let Some(glyph) = font.glyphs.get_mut(font.active_glyph) {
+                glyph.document = self.doc.clone();
             }
+        }
+        WorkspaceFile {
+            version: CURRENT_WORKSPACE_VERSION,
+            shape,
+            font,
+            mode: self.workspace_mode,
+            dark_theme: self.dark_theme,
+            show_circles: self.show_circles,
+        }
+    }
+
+    fn save_workspace(&mut self) {
+        let path = self.workspace_save_path.clone().or_else(|| {
+            rfd::FileDialog::new()
+                .add_filter("ThreadShape workspace", &["json"])
+                .set_file_name("ThreadShape.workspace.json")
+                .save_file()
+        });
+        if let Some(path) = path {
+            self.workspace_save_path = Some(path.clone());
+            self.start_background_save(
+                path,
+                SavePayload::Workspace(self.workspace_snapshot()),
+                "ワークスペース",
+            );
+        }
+    }
+
+    fn load_workspace(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("ThreadShape workspace", &["json"])
+            .pick_file()
+        else {
+            return;
+        };
+        let loaded = std::fs::read_to_string(&path)
+            .map_err(|error| error.to_string())
+            .and_then(|json| {
+                serde_json::from_str::<WorkspaceFile>(&json).map_err(|error| error.to_string())
+            });
+        match loaded {
+            Ok(mut workspace)
+                if workspace.version <= CURRENT_WORKSPACE_VERSION
+                    && workspace.shape.version <= CURRENT_DOCUMENT_VERSION
+                    && !workspace.font.glyphs.is_empty()
+                    && workspace.font.version <= CURRENT_FONT_PROJECT_VERSION
+                    && workspace
+                        .font
+                        .glyphs
+                        .iter()
+                        .all(|glyph| glyph.document.version <= CURRENT_DOCUMENT_VERSION) =>
+            {
+                workspace.font.version = CURRENT_FONT_PROJECT_VERSION;
+                workspace.font.ensure_default_glyphs();
+                workspace.font.active_glyph = workspace
+                    .font
+                    .active_glyph
+                    .min(workspace.font.glyphs.len() - 1);
+                self.shape_document = workspace.shape;
+                self.font_project = workspace.font;
+                self.workspace_mode = workspace.mode;
+                self.dark_theme = workspace.dark_theme;
+                self.show_circles = workspace.show_circles;
+                self.shape_undo.clear();
+                self.shape_redo.clear();
+                self.glyph_undo = vec![Vec::new(); self.font_project.glyphs.len()];
+                self.glyph_redo = vec![Vec::new(); self.font_project.glyphs.len()];
+                self.undo.clear();
+                self.redo.clear();
+                self.doc = match self.workspace_mode {
+                    WorkspaceMode::Shape => self.shape_document.clone(),
+                    WorkspaceMode::Font => self.font_project.glyphs[self.font_project.active_glyph]
+                        .document
+                        .clone(),
+                };
+                self.workspace_save_path = Some(path);
+                self.reset_transient_editor();
+                self.rebuild_pegs(self.canvas_size);
+                self.proof_cache.clear();
+                self.status = "ワークスペースを読み込みました".to_owned();
+            }
+            Ok(_) => self.status = "未対応バージョンのワークスペースです".to_owned(),
+            Err(error) => self.status = format!("ワークスペースを読めません: {error}"),
         }
     }
 
@@ -1799,10 +2413,18 @@ impl App {
                         glyph.document.version = CURRENT_DOCUMENT_VERSION;
                     }
                     project.active_glyph = project.active_glyph.min(project.glyphs.len() - 1);
-                    self.doc = project.glyphs[project.active_glyph].document.clone();
+                    project.ensure_default_glyphs();
                     self.font_project = project;
-                    self.reset_editor_for_glyph();
-                    self.status = format!("フォントプロジェクトを読み込みました: {}", path.display());
+                    self.glyph_undo = vec![Vec::new(); self.font_project.glyphs.len()];
+                    self.glyph_redo = vec![Vec::new(); self.font_project.glyphs.len()];
+                    if self.workspace_mode == WorkspaceMode::Font {
+                        self.undo.clear();
+                        self.redo.clear();
+                        self.load_active_glyph_session();
+                    }
+                    self.font_save_path = Some(path.clone());
+                    self.status =
+                        format!("フォントプロジェクトを読み込みました: {}", path.display());
                 }
                 Ok(project) if project.version > CURRENT_FONT_PROJECT_VERSION => {
                     self.status = format!(
@@ -1828,7 +2450,10 @@ impl App {
         self.sync_active_glyph();
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("TrueType font", &["ttf"])
-            .set_file_name(format!("{}.ttf", self.font_project.family_name.replace(' ', "-")))
+            .set_file_name(format!(
+                "{}.ttf",
+                self.font_project.family_name.replace(' ', "-")
+            ))
             .save_file()
         {
             match export_ttf(&self.font_project, self.canvas_center, &path) {
@@ -1839,7 +2464,10 @@ impl App {
     }
 
     fn load_json(&mut self) {
-        if let Some(path) = rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file() {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("JSON", &["json"])
+            .pick_file()
+        {
             match std::fs::read_to_string(&path)
                 .map_err(|e| e.to_string())
                 .and_then(|s| serde_json::from_str::<Document>(&s).map_err(|e| e.to_string()))
@@ -1851,6 +2479,7 @@ impl App {
                     self.doc.next_peg_id = self.next_peg_id();
                     self.draw = None;
                     self.clear_selection();
+                    self.shape_save_path = Some(path.clone());
                     self.status = format!("JSONを読み込みました: {}", path.display());
                 }
                 Ok(doc) => {
@@ -1874,7 +2503,16 @@ impl App {
             .set_file_name("glyph.svg")
             .save_file()
         {
-            match std::fs::write(&path, document_to_svg(&self.doc, self.canvas_center)) {
+            let svg = match self.workspace_mode {
+                WorkspaceMode::Shape => document_to_svg(&self.doc, self.canvas_center),
+                WorkspaceMode::Font => document_to_svg_styled(
+                    &self.doc,
+                    self.canvas_center,
+                    self.font_project.render_style,
+                    self.font_project.thread_width,
+                ),
+            };
+            match std::fs::write(&path, svg) {
                 Ok(()) => self.status = format!("SVGを書き出しました: {}", path.display()),
                 Err(e) => self.status = format!("書き出しに失敗しました: {e}"),
             }
@@ -1882,39 +2520,41 @@ impl App {
     }
 
     fn hit_test_face(&self, point: Point, rendered: &[(usize, FaceRender)]) -> Option<Selection> {
-        if let Some(custom) = self
-            .doc
-            .custom_pegs
-            .iter()
-            .rev()
-            .find(|custom| custom.visible && resolve_peg(&self.doc.grid, &self.doc.custom_pegs, self.canvas_center, self.doc.peg_appearance, &PegRef::Custom { id: custom.id }).is_some_and(|peg| peg_signed_distance(&peg, point) <= self.doc.grid.catch))
-        {
+        if let Some(custom) = self.doc.custom_pegs.iter().rev().find(|custom| {
+            custom.visible
+                && resolve_peg(
+                    &self.doc.grid,
+                    &self.doc.custom_pegs,
+                    self.canvas_center,
+                    self.doc.peg_appearance,
+                    &PegRef::Custom { id: custom.id },
+                )
+                .is_some_and(|peg| peg_signed_distance(&peg, point) <= self.doc.grid.catch)
+        }) {
             return Some(Selection::Peg(custom.id));
         }
-        rendered
-            .iter()
-            .rev()
-            .find_map(|(i, render)| {
-                // 全リングをeven-oddで判定する。これにより独立した小さい成分も
-                // 選択でき、穴の内部は面として誤選択しない。
-                if render
-                    .rings
-                    .iter()
-                    .filter(|ring| point_in_polygon(point, ring))
-                    .count()
-                    % 2
-                    == 1
-                {
-                    Some(Selection::Face(*i))
-                } else {
-                    None
-                }
-            })
+        rendered.iter().rev().find_map(|(i, render)| {
+            // 全リングをeven-oddで判定する。これにより独立した小さい成分も
+            // 選択でき、穴の内部は面として誤選択しない。
+            if render
+                .rings
+                .iter()
+                .filter(|ring| point_in_polygon(point, ring))
+                .count()
+                % 2
+                == 1
+            {
+                Some(Selection::Face(*i))
+            } else {
+                None
+            }
+        })
     }
 
     fn render_tab_content(&mut self, ui: &mut egui::Ui, tab: DockTab) {
         match tab {
             DockTab::Canvas => self.canvas(ui),
+            DockTab::Proof => self.render_proof_tab(ui),
             DockTab::Glyphs => self.render_glyphs_tab(ui),
             DockTab::Layers => self.render_layers_tab(ui),
             DockTab::Circles => self.render_circles_tab(ui),
@@ -1925,10 +2565,31 @@ impl App {
 
     fn render_glyphs_tab(&mut self, ui: &mut egui::Ui) {
         let colors = self.theme_colors();
+        if self.workspace_mode == WorkspaceMode::Shape {
+            ui.label(egui::RichText::new("フォント制作").size(18.0).strong());
+            ui.add_space(6.0);
+            ui.label("現在は単体シェイプを整形するモードです。フォントモードでは、シェイプとは独立した a–z・約物のグリフセットを編集できます。");
+            ui.add_space(10.0);
+            if ui.button("フォントモードへ").clicked() {
+                self.switch_workspace_mode(WorkspaceMode::Font);
+            }
+            return;
+        }
         ui.label(egui::RichText::new("フォント").strong());
-        ui.add(egui::TextEdit::singleline(&mut self.font_project.family_name).hint_text("ファミリー名"));
-        ui.add(egui::TextEdit::singleline(&mut self.font_project.style_name).hint_text("スタイル名"));
+        ui.add(
+            egui::TextEdit::singleline(&mut self.font_project.family_name)
+                .hint_text("ファミリー名"),
+        );
+        ui.add(
+            egui::TextEdit::singleline(&mut self.font_project.style_name).hint_text("スタイル名"),
+        );
         ui.add_space(8.0);
+
+        let parameter_speed = if ui.input(|input| input.modifiers.shift) {
+            8.0
+        } else {
+            0.5
+        };
 
         if let Some(glyph) = self
             .font_project
@@ -1936,47 +2597,227 @@ impl App {
             .get_mut(self.font_project.active_glyph)
         {
             ui.horizontal(|ui| {
-                let character = if glyph.character == ' ' { "␠".to_owned() } else { glyph.character.to_string() };
+                let character = if glyph.character == ' ' {
+                    "␠".to_owned()
+                } else {
+                    glyph.character.to_string()
+                };
                 ui.label(egui::RichText::new(character).size(26.0).strong());
                 ui.vertical(|ui| {
                     ui.label(&glyph.name);
-                    ui.add(egui::Slider::new(&mut glyph.advance_width, 100..=1200).text("送り幅"));
+                    let mut advance = f64::from(glyph.advance_width);
+                    if scrub_value(ui, "送り幅", &mut advance, parameter_speed, 100.0..=1200.0)
+                        .on_hover_text("ドラッグで微調整 / Shift+ドラッグで高速")
+                        .changed()
+                    {
+                        glyph.advance_width = advance.round() as u16;
+                    }
+                    let design_width = if glyph.character == ' ' { 0.0 } else { 600.0 };
+                    let mut left = f64::from(glyph.left_side_bearing);
+                    let mut right = f64::from(glyph.advance_width) - left - design_width;
+                    let left_changed =
+                        scrub_value(ui, "左余白", &mut left, parameter_speed, -300.0..=600.0)
+                            .on_hover_text("グリフを右へ送る余白 / Shift+ドラッグで高速")
+                            .changed();
+                    let right_changed =
+                        scrub_value(ui, "右余白", &mut right, parameter_speed, -300.0..=600.0)
+                            .on_hover_text("次の文字までの右余白 / Shift+ドラッグで高速")
+                            .changed();
+                    if left_changed || right_changed {
+                        glyph.left_side_bearing = left.round() as i16;
+                        glyph.advance_width =
+                            (design_width + left + right).round().clamp(100.0, 1800.0) as u16;
+                    }
                 });
             });
         }
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut self.onion_skin, "前");
+            ui.color_edit_button_srgba(&mut self.onion_previous_color);
+            ui.checkbox(&mut self.onion_next, "次");
+            ui.color_edit_button_srgba(&mut self.onion_next_color);
+        });
+        ui.add(
+            egui::Slider::new(&mut self.onion_opacity, 0.05..=1.0)
+                .text("オニオン透明度")
+                .fixed_decimals(2),
+        );
+
+        ui.add_space(6.0);
+        ui.separator();
+        ui.label(egui::RichText::new("下書きフォント").strong());
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Macのフォントを選択…").clicked() {
+                self.choose_reference_font();
+            }
+            if let Some(font) = &self.reference_font {
+                ui.label(egui::RichText::new(&font.name).small().color(colors.text2));
+                if ui.button("解除").clicked() {
+                    self.reference_font = None;
+                    self.status = "下書きフォントを解除しました".to_owned();
+                }
+            }
+        });
+        if self.reference_font.is_some() {
+            ui.add(
+                egui::Slider::new(&mut self.reference_font_opacity, 0.03..=0.8)
+                    .text("下書き濃度")
+                    .fixed_decimals(2),
+            );
+            ui.add(
+                egui::Slider::new(&mut self.reference_font_scale, 0.25..=2.0)
+                    .text("下書きサイズ")
+                    .custom_formatter(|value, _| format!("{:.0}%", value * 100.0)),
+            );
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::DragValue::new(&mut self.reference_font_offset.x)
+                        .speed(0.5)
+                        .prefix("X "),
+                );
+                ui.add(
+                    egui::DragValue::new(&mut self.reference_font_offset.y)
+                        .speed(0.5)
+                        .prefix("Y "),
+                );
+                if ui.button("位置をリセット").clicked() {
+                    self.reference_font_offset = Vec2::ZERO;
+                }
+            });
+        }
+
+        ui.add_space(6.0);
+        ui.separator();
+        ui.label(egui::RichText::new("メトリクス箱").strong());
+        let metrics = &mut self.font_project.metrics;
+        let mut metrics_changed = false;
+        metrics_changed |= scrub_value(
+            ui,
+            "左端",
+            &mut metrics.origin_x,
+            parameter_speed,
+            -400.0..=1600.0,
+        )
+        .on_hover_text("ドラッグで微調整 / Shift+ドラッグで高速")
+        .changed();
+        metrics_changed |= scrub_value(
+            ui,
+            "右端",
+            &mut metrics.right_x,
+            parameter_speed,
+            -400.0..=2000.0,
+        )
+        .on_hover_text("フォント全体で共有 / ドラッグで微調整 / Shiftで高速")
+        .changed();
+        metrics_changed |= scrub_value(
+            ui,
+            "アセンダー",
+            &mut metrics.ascender_y,
+            parameter_speed,
+            -400.0..=1600.0,
+        )
+        .on_hover_text("ドラッグで微調整 / Shift+ドラッグで高速")
+        .changed();
+        metrics_changed |= scrub_value(
+            ui,
+            "x-height",
+            &mut metrics.x_height_y,
+            parameter_speed,
+            -400.0..=1600.0,
+        )
+        .on_hover_text("ドラッグで微調整 / Shift+ドラッグで高速")
+        .changed();
+        metrics_changed |= scrub_value(
+            ui,
+            "ベースライン",
+            &mut metrics.baseline_y,
+            parameter_speed,
+            -400.0..=1600.0,
+        )
+        .on_hover_text("ドラッグで微調整 / Shift+ドラッグで高速")
+        .changed();
+        metrics_changed |= scrub_value(
+            ui,
+            "ディセンダー",
+            &mut metrics.descender_y,
+            parameter_speed,
+            -400.0..=1600.0,
+        )
+        .on_hover_text("ドラッグで微調整 / Shift+ドラッグで高速")
+        .changed();
+        if metrics_changed {
+            metrics.origin_x = metrics.origin_x.min(metrics.right_x - 40.0);
+            metrics.right_x = metrics.right_x.max(metrics.origin_x + 40.0);
+            let mut guides = [
+                metrics.ascender_y,
+                metrics.x_height_y,
+                metrics.baseline_y,
+                metrics.descender_y,
+            ];
+            for index in 1..guides.len() {
+                guides[index] = guides[index].max(guides[index - 1] + 20.0);
+            }
+            metrics.ascender_y = guides[0];
+            metrics.x_height_y = guides[1];
+            metrics.baseline_y = guides[2];
+            metrics.descender_y = guides[3];
+            self.status = "フォントメトリクスを変更しました".to_owned();
+        }
+        let metrics = self.font_project.metrics;
+        ui.label(
+            egui::RichText::new(format!(
+                "asc {} / x {} / desc {} units / 横倍率 {:.2}",
+                metrics.ascender_units(),
+                metrics.x_height_units(),
+                metrics.descender_units(),
+                metrics.horizontal_scale()
+            ))
+            .small()
+            .color(colors.text2),
+        );
 
         ui.separator();
         ui.label(egui::RichText::new("グリフ").strong());
         let mut switch_target = None;
-        egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                for (index, glyph) in self.font_project.glyphs.iter().enumerate() {
-                    let character = if glyph.character == ' ' {
-                        "␠".to_owned()
-                    } else {
-                        glyph.character.to_string()
-                    };
-                    let is_empty = if index == self.font_project.active_glyph {
-                        self.doc.faces.is_empty()
-                    } else {
-                        glyph.document.faces.is_empty()
-                    };
-                    let label = if is_empty {
-                        character
-                    } else {
-                        format!("{character} •")
-                    };
-                    let selected = index == self.font_project.active_glyph;
-                    if ui
-                        .add_sized([42.0, 28.0], egui::SelectableLabel::new(selected, label))
-                        .on_hover_text(format!("{} / {}", glyph.name, if is_empty { "未作成" } else { "作成済み" }))
-                        .clicked()
-                    {
-                        switch_target = Some(index);
+        egui::ScrollArea::vertical()
+            .max_height(300.0)
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    for (index, glyph) in self.font_project.glyphs.iter().enumerate() {
+                        let character = if glyph.character == ' ' {
+                            "␠".to_owned()
+                        } else {
+                            glyph.character.to_string()
+                        };
+                        let is_empty = if index == self.font_project.active_glyph {
+                            self.doc.faces.is_empty()
+                        } else {
+                            glyph.document.faces.is_empty()
+                        };
+                        let label = if is_empty {
+                            character
+                        } else {
+                            format!("{character} •")
+                        };
+                        let selected = index == self.font_project.active_glyph;
+                        if ui
+                            .add_sized([42.0, 28.0], egui::Button::selectable(selected, label))
+                            .on_hover_text(format!(
+                                "{} / {}",
+                                glyph.name,
+                                if is_empty {
+                                    "未作成"
+                                } else {
+                                    "作成済み"
+                                }
+                            ))
+                            .clicked()
+                        {
+                            switch_target = Some(index);
+                        }
                     }
-                }
+                });
             });
-        });
         if let Some(index) = switch_target {
             self.switch_glyph(index);
         }
@@ -1991,10 +2832,16 @@ impl App {
         });
         let new_character = self.new_glyph_text.chars().next();
         ui.horizontal(|ui| {
-            if ui.add_enabled(new_character.is_some(), egui::Button::new("空で追加")).clicked() {
+            if ui
+                .add_enabled(new_character.is_some(), egui::Button::new("空で追加"))
+                .clicked()
+            {
                 self.add_or_switch_glyph(new_character.unwrap(), false);
             }
-            if ui.add_enabled(new_character.is_some(), egui::Button::new("現在を複製")).clicked() {
+            if ui
+                .add_enabled(new_character.is_some(), egui::Button::new("現在を複製"))
+                .clicked()
+            {
                 self.add_or_switch_glyph(new_character.unwrap(), true);
             }
         });
@@ -2021,8 +2868,207 @@ impl App {
         );
     }
 
+    fn render_proof_tab(&mut self, ui: &mut egui::Ui) {
+        let colors = self.theme_colors();
+        if self.workspace_mode != WorkspaceMode::Font {
+            ui.centered_and_justified(|ui| {
+                ui.vertical_centered(|ui| {
+                    ui.label(egui::RichText::new("試打はフォントモードで使えます").strong());
+                    if ui.button("フォントモードへ").clicked() {
+                        self.switch_workspace_mode(WorkspaceMode::Font);
+                    }
+                });
+            });
+            return;
+        }
+        ui.label(egui::RichText::new("試打").size(16.0).strong());
+        ui.horizontal(|ui| {
+            let (swatch_rect, _) = ui.allocate_exact_size(Vec2::new(46.0, 38.0), Sense::hover());
+            let fill_on = matches!(
+                self.font_project.render_style,
+                FontRenderStyle::Fill | FontRenderStyle::FillAndThread
+            );
+            let thread_on = matches!(
+                self.font_project.render_style,
+                FontRenderStyle::Thread | FontRenderStyle::FillAndThread
+            );
+            let back =
+                Rect::from_min_size(swatch_rect.min + Vec2::new(14.0, 2.0), Vec2::splat(22.0));
+            let front =
+                Rect::from_min_size(swatch_rect.min + Vec2::new(4.0, 12.0), Vec2::splat(22.0));
+            ui.painter()
+                .rect_filled(back, 1.0, if fill_on { colors.thread } else { colors.bg });
+            ui.painter().rect_stroke(
+                back,
+                1.0,
+                Stroke::new(1.0, colors.text2),
+                egui::StrokeKind::Inside,
+            );
+            ui.painter().rect_filled(front, 1.0, colors.bg);
+            ui.painter().rect_stroke(
+                front,
+                1.0,
+                Stroke::new(if thread_on { 3.0 } else { 1.0 }, colors.thread),
+                egui::StrokeKind::Inside,
+            );
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.selectable_value(
+                        &mut self.font_project.render_style,
+                        FontRenderStyle::Fill,
+                        "塗り",
+                    );
+                    ui.selectable_value(
+                        &mut self.font_project.render_style,
+                        FontRenderStyle::Thread,
+                        "線",
+                    );
+                    ui.selectable_value(
+                        &mut self.font_project.render_style,
+                        FontRenderStyle::FillAndThread,
+                        "塗り＋線",
+                    );
+                });
+                if thread_on {
+                    ui.add(
+                        egui::Slider::new(&mut self.font_project.thread_width, 0.5..=24.0)
+                            .text("線幅")
+                            .fixed_decimals(1),
+                    );
+                }
+            });
+        });
+        ui.add(
+            egui::TextEdit::multiline(&mut self.proof_text)
+                .desired_rows(2)
+                .hint_text("ここに試したい文字を入力"),
+        );
+        ui.horizontal_wrapped(|ui| {
+            ui.add(
+                egui::Slider::new(&mut self.proof_size, 20.0..=500.0)
+                    .text("サイズ")
+                    .fixed_decimals(0),
+            );
+            ui.add(
+                egui::Slider::new(&mut self.proof_tracking, -40.0..=120.0)
+                    .text("字間")
+                    .fixed_decimals(0),
+            );
+        });
+
+        let text = self.proof_text.clone();
+        let size = self.proof_size;
+        let tracking = self.proof_tracking;
+        let unit_scale = size / 1000.0;
+        let line_height = size * 1.35;
+        let line_count = text.lines().count().max(1) as f32;
+        let mut widest = 0.0_f32;
+        for line in text.split('\n') {
+            let width = line.chars().fold(0.0, |sum, character| {
+                let advance = self
+                    .font_project
+                    .glyphs
+                    .iter()
+                    .find(|glyph| glyph.character == character)
+                    .map_or(600.0, |glyph| f32::from(glyph.advance_width));
+                sum + advance * unit_scale + tracking
+            });
+            widest = widest.max(width);
+        }
+        let desired_width = widest.max(ui.available_width() - 8.0) + 24.0;
+        let preview_height = ui.available_height().max(180.0);
+        let desired_height = (line_count * line_height + 28.0).max(preview_height);
+        egui::ScrollArea::both()
+            .id_salt("font-proof-scroll")
+            .auto_shrink([false, false])
+            .max_height(preview_height)
+            .show(ui, |ui| {
+                let (rect, _) = ui
+                    .allocate_exact_size(Vec2::new(desired_width, desired_height), Sense::hover());
+                ui.painter().rect_filled(rect, 2.0, colors.bg);
+                let metrics = self.font_project.metrics;
+                let mut pen_x = rect.left() + 12.0;
+                let mut baseline = rect.top() + size + 10.0;
+                let mut frame_rings: HashMap<usize, Arc<Vec<Vec<Point>>>> = HashMap::new();
+                for character in text.chars() {
+                    if character == '\n' {
+                        pen_x = rect.left() + 12.0;
+                        baseline += line_height;
+                        continue;
+                    }
+                    let glyph_index = self
+                        .font_project
+                        .glyphs
+                        .iter()
+                        .position(|glyph| glyph.character == character);
+                    let (advance, left_bearing, rings) = if let Some(index) = glyph_index {
+                        let glyph = &self.font_project.glyphs[index];
+                        let advance = f32::from(glyph.advance_width);
+                        let left_bearing = f32::from(glyph.left_side_bearing);
+                        let rings = if let Some(rings) = frame_rings.get(&index) {
+                            Arc::clone(rings)
+                        } else {
+                            let rings = self
+                                .proof_glyph_rings(index)
+                                .map(|(_, rings)| rings)
+                                .unwrap_or_default();
+                            frame_rings.insert(index, Arc::clone(&rings));
+                            rings
+                        };
+                        (advance, left_bearing, rings)
+                    } else {
+                        (600.0_f32, 0.0_f32, Arc::new(Vec::new()))
+                    };
+                    if rings.is_empty() && character != ' ' {
+                        let box_width = size * 0.55;
+                        let box_rect = Rect::from_min_size(
+                            Pos2::new(pen_x + left_bearing * unit_scale, baseline - size * 0.8),
+                            Vec2::new(box_width, size * 0.8),
+                        );
+                        ui.painter().rect_stroke(
+                            box_rect,
+                            0.0,
+                            Stroke::new(1.0, colors.text2),
+                            egui::StrokeKind::Inside,
+                        );
+                    } else if !rings.is_empty() {
+                        let mapped: Vec<Vec<Point>> = rings
+                            .iter()
+                            .map(|ring| {
+                                ring.iter()
+                                    .map(|point| {
+                                        // 縦横に同じ倍率を使い、作図時の比率を保つ。
+                                        let x_units =
+                                            ((point.x - metrics.origin_x) * metrics.scale()) as f32
+                                                + left_bearing;
+                                        let y_units = ((metrics.baseline_y - point.y)
+                                            * metrics.scale())
+                                            as f32;
+                                        Point::new(
+                                            f64::from(pen_x + x_units * unit_scale),
+                                            f64::from(baseline - y_units * unit_scale),
+                                        )
+                                    })
+                                    .collect()
+                            })
+                            .collect();
+                        if let Some(mesh) = build_faces_mesh(&mapped, Pos2::ZERO, colors.thread) {
+                            ui.painter().add(mesh);
+                        }
+                    }
+                    pen_x += advance * unit_scale + tracking;
+                }
+            });
+        ui.label(
+            egui::RichText::new("未作成・未登録の文字は □。左右余白と送り幅は上で調整できます。")
+                .small()
+                .color(colors.text2),
+        );
+    }
+
     /// フローティングのツールパレット。上端の掴みバーをドラッグで自由に移動でき、
     /// egui_dock のタブ幅制約を受けずに細いまま保てる（Illustrator のツールバー相当）
+    #[allow(dead_code)]
     fn tool_palette(&mut self, ctx: &egui::Context) {
         let colors = self.theme_colors();
         egui::Area::new(egui::Id::new("tool-palette"))
@@ -2030,17 +3076,17 @@ impl App {
             .default_pos(Pos2::new(52.0, 44.0))
             .constrain(true)
             .show(ctx, |ui| {
-                egui::Frame::none()
+                egui::Frame::new()
                     .fill(colors.panel)
                     .stroke(Stroke::new(1.0, colors.border))
-                    .rounding(4.0)
+                    .corner_radius(8)
                     .shadow(egui::epaint::Shadow {
-                        offset: Vec2::new(0.0, 2.0),
-                        blur: 10.0,
-                        spread: 0.0,
+                        offset: [0, 2],
+                        blur: 10,
+                        spread: 0,
                         color: Color32::from_black_alpha(if self.dark_theme { 90 } else { 30 }),
                     })
-                    .inner_margin(egui::Margin::symmetric(4.0, 4.0))
+                    .inner_margin(egui::Margin::symmetric(4, 4))
                     .show(ui, |ui| {
                         ui.set_width(30.0);
                         ui.vertical_centered(|ui| {
@@ -2059,12 +3105,25 @@ impl App {
                             }
                             ui.add_space(2.0);
                             for (tool, tooltip) in [
-                                (Tool::Select, "選択 (V)\nレイヤー・任意円をクリックで選択、ドラッグで移動"),
-                                (Tool::DirectSelect, "ダイレクト選択 (A)\n構成する円を個別に選択・移動"),
-                                (Tool::Draw, "描画 (P)\n十字点から線を引き、円に引っ掛けて始点で閉じる"),
-                                (Tool::CustomPeg, "任意円 (C)\nクリックで円を配置（緑=配置可 / 赤=不可）"),
+                                (
+                                    Tool::Select,
+                                    "選択 (V)\nレイヤー・任意円をクリックで選択、ドラッグで移動",
+                                ),
+                                (
+                                    Tool::DirectSelect,
+                                    "ダイレクト選択 (A)\n構成する円を個別に選択・移動",
+                                ),
+                                (
+                                    Tool::Draw,
+                                    "描画 (P)\n十字点から線を引き、円に引っ掛けて始点で閉じる",
+                                ),
+                                (
+                                    Tool::CustomPeg,
+                                    "任意円 (C)\nクリックで円を配置（緑=配置可 / 赤=不可）",
+                                ),
                             ] {
-                                if tool_icon_button(ui, self.tool == tool, tool, tooltip).clicked() {
+                                if tool_icon_button(ui, self.tool == tool, tool, tooltip).clicked()
+                                {
                                     self.tool = tool;
                                 }
                                 ui.add_space(2.0);
@@ -2074,8 +3133,111 @@ impl App {
             });
     }
 
+    fn left_tool_sidebar(&mut self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new("TOOLS").size(9.0).weak().strong());
+            ui.add_space(8.0);
+            for (tool, tooltip) in [
+                (Tool::Select, "選択 (V)\nレイヤー・任意円を選択して移動"),
+                (
+                    Tool::DirectSelect,
+                    "ダイレクト選択 (A)\n構成する円を個別に編集",
+                ),
+                (Tool::Draw, "描画 (P)\n円へ糸を掛けてシェイプを作成"),
+                (Tool::CustomPeg, "任意円 (C)\nキャンバスへ円を追加"),
+            ] {
+                if tool_icon_button(ui, self.tool == tool, tool, tooltip).clicked() {
+                    self.tool = tool;
+                }
+                ui.add_space(5.0);
+            }
+
+            let selected_faces = self
+                .selection
+                .iter()
+                .filter(|selection| matches!(selection, Selection::Face(_)))
+                .count();
+            if self.tool == Tool::Select && selected_faces >= 2 {
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("ALIGN").size(9.0).weak().strong());
+                ui.add_space(5.0);
+                let mut clicked = None;
+                egui::Grid::new("fixed-alignment-grid")
+                    .num_columns(2)
+                    .spacing(Vec2::new(3.0, 3.0))
+                    .show(ui, |ui| {
+                        for (index, (axis, tip)) in [
+                            (AlignAxis::Left, "左揃え"),
+                            (AlignAxis::CenterX, "左右中央揃え"),
+                            (AlignAxis::Right, "右揃え"),
+                            (AlignAxis::Top, "上揃え"),
+                            (AlignAxis::CenterY, "上下中央揃え"),
+                            (AlignAxis::Bottom, "下揃え"),
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        {
+                            if align_icon_button(ui, axis, tip).clicked() {
+                                clicked = Some(axis);
+                            }
+                            if index % 2 == 1 {
+                                ui.end_row();
+                            }
+                        }
+                    });
+                if let Some(axis) = clicked {
+                    self.align_selected_faces(axis);
+                }
+            }
+        });
+    }
+
     fn toolbar(&mut self, ui: &mut egui::Ui) {
+        let shadcn = egui_shadcn::Theme::new(if self.dark_theme {
+            egui_shadcn::ColorPalette::shadcn_dark(egui_shadcn::ShadcnBaseColor::Zinc)
+        } else {
+            egui_shadcn::ColorPalette::shadcn_light(egui_shadcn::ShadcnBaseColor::Zinc)
+        });
         ui.horizontal_centered(|ui| {
+            let shape_selected = self.workspace_mode == WorkspaceMode::Shape;
+            if egui_shadcn::button(
+                ui,
+                &shadcn,
+                "シェイプ",
+                if shape_selected {
+                    egui_shadcn::ControlVariant::Primary
+                } else {
+                    egui_shadcn::ControlVariant::Ghost
+                },
+                egui_shadcn::ControlSize::Sm,
+                true,
+            )
+            .on_hover_text("単体のパス／シェイプを制作する独立ワークスペース")
+            .clicked()
+            {
+                self.switch_workspace_mode(WorkspaceMode::Shape);
+            }
+            if egui_shadcn::button(
+                ui,
+                &shadcn,
+                "フォント",
+                if !shape_selected {
+                    egui_shadcn::ControlVariant::Primary
+                } else {
+                    egui_shadcn::ControlVariant::Ghost
+                },
+                egui_shadcn::ControlSize::Sm,
+                true,
+            )
+            .on_hover_text("A–Z・a–z・0–9・約物を制作し、フォントとして保存する")
+            .clicked()
+            {
+                self.switch_workspace_mode(WorkspaceMode::Font);
+            }
+            ui.separator();
             // ツールは左のドッキング可能な「ツール」パネルへ。元に戻す/やり直すは
             // Cmd+Z / Cmd+Shift+Z に集約したのでバーからは省く
             let sel_faces = self
@@ -2083,10 +3245,16 @@ impl App {
                 .iter()
                 .filter(|s| matches!(s, Selection::Face(_)))
                 .count();
-            if ui
-                .add_enabled(sel_faces >= 2, egui::Button::new("マージ"))
-                .on_hover_text("選択した2つ以上のレイヤーをパス結合する")
-                .clicked()
+            if egui_shadcn::button(
+                ui,
+                &shadcn,
+                "マージ",
+                egui_shadcn::ControlVariant::Secondary,
+                egui_shadcn::ControlSize::Sm,
+                sel_faces >= 2,
+            )
+            .on_hover_text("選択した2つ以上のレイヤーをパス結合する")
+            .clicked()
             {
                 self.merge_selected();
             }
@@ -2094,20 +3262,117 @@ impl App {
                 ui.separator();
                 ui.add_sized(
                     [190.0, 22.0],
-                    egui::Slider::new(&mut self.custom_radius, 4.0..=120.0)
-                        .text("新規円 半径"),
+                    egui::Slider::new(&mut self.custom_radius, 4.0..=120.0).text("新規円 半径"),
                 );
             }
             ui.separator();
-            if ui.button("SVG書き出し").clicked() {
-                self.export_svg();
+            match self.workspace_mode {
+                WorkspaceMode::Shape => {
+                    if egui_shadcn::button(
+                        ui,
+                        &shadcn,
+                        "SVG書き出し",
+                        egui_shadcn::ControlVariant::Outline,
+                        egui_shadcn::ControlSize::Sm,
+                        true,
+                    )
+                    .clicked()
+                    {
+                        self.export_svg();
+                    }
+                    if egui_shadcn::button(
+                        ui,
+                        &shadcn,
+                        "保存",
+                        egui_shadcn::ControlVariant::Primary,
+                        egui_shadcn::ControlSize::Sm,
+                        true,
+                    )
+                    .clicked()
+                    {
+                        self.save_json();
+                    }
+                    if egui_shadcn::button(
+                        ui,
+                        &shadcn,
+                        "開く",
+                        egui_shadcn::ControlVariant::Ghost,
+                        egui_shadcn::ControlSize::Sm,
+                        true,
+                    )
+                    .clicked()
+                    {
+                        self.load_json();
+                    }
+                }
+                WorkspaceMode::Font => {
+                    if egui_shadcn::button(
+                        ui,
+                        &shadcn,
+                        "現在をSVG",
+                        egui_shadcn::ControlVariant::Outline,
+                        egui_shadcn::ControlSize::Sm,
+                        true,
+                    )
+                    .clicked()
+                    {
+                        self.export_svg();
+                    }
+                    if egui_shadcn::button(
+                        ui,
+                        &shadcn,
+                        "保存",
+                        egui_shadcn::ControlVariant::Primary,
+                        egui_shadcn::ControlSize::Sm,
+                        true,
+                    )
+                    .clicked()
+                    {
+                        self.save_font_project();
+                    }
+                    if egui_shadcn::button(
+                        ui,
+                        &shadcn,
+                        "開く",
+                        egui_shadcn::ControlVariant::Ghost,
+                        egui_shadcn::ControlSize::Sm,
+                        true,
+                    )
+                    .clicked()
+                    {
+                        self.load_font_project();
+                    }
+                    if egui_shadcn::button(
+                        ui,
+                        &shadcn,
+                        "TTF書き出し",
+                        egui_shadcn::ControlVariant::Secondary,
+                        egui_shadcn::ControlSize::Sm,
+                        true,
+                    )
+                    .clicked()
+                    {
+                        self.export_font_ttf();
+                    }
+                }
             }
-            if ui.button("保存").clicked() {
-                self.save_json();
-            }
-            if ui.button("読み込み").clicked() {
-                self.load_json();
-            }
+            ui.separator();
+            ui.menu_button("ワークスペース", |ui| {
+                if ui.button("すべて保存…").clicked() {
+                    self.save_workspace();
+                    ui.close();
+                }
+                if ui.button("すべて読み込み…").clicked() {
+                    self.load_workspace();
+                    ui.close();
+                }
+                ui.separator();
+                ui.label(
+                    egui::RichText::new("シェイプと全グリフを1ファイルに保存")
+                        .small()
+                        .weak(),
+                );
+            });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.menu_button("パネル", |ui| {
                     for (tab, label) in [
@@ -2120,8 +3385,13 @@ impl App {
                         let open = self.dock.find_tab(&tab).is_some();
                         if ui.add_enabled(!open, egui::Button::new(label)).clicked() {
                             self.dock.add_window(vec![tab]);
-                            ui.close_menu();
+                            ui.close();
                         }
+                    }
+                    ui.separator();
+                    if ui.button("標準レイアウトに戻す").clicked() {
+                        self.dock = Self::default_dock_layout();
+                        ui.close();
                     }
                 });
                 if theme_icon_button(ui, self.dark_theme).clicked() {
@@ -2132,14 +3402,30 @@ impl App {
                 {
                     self.show_circles = !self.show_circles;
                 }
+                if let Some(operation) = &self.save_operation {
+                    ui.add_sized(
+                        [150.0, 18.0],
+                        egui::ProgressBar::new(operation.progress).text(format!(
+                            "{} {:>3}%",
+                            operation.label,
+                            (operation.progress * 100.0).round() as u32
+                        )),
+                    );
+                }
             });
         });
     }
 
     /// 選択ツール時だけ表示する、Illustrator風のフローティング整列パレット。
+    #[allow(dead_code)]
     fn alignment_palette(&mut self, ctx: &egui::Context) {
         if self.tool != Tool::Select
-            || self.selection.iter().filter(|s| matches!(s, Selection::Face(_))).count() < 2
+            || self
+                .selection
+                .iter()
+                .filter(|s| matches!(s, Selection::Face(_)))
+                .count()
+                < 2
         {
             return;
         }
@@ -2150,11 +3436,11 @@ impl App {
             .constrain(true)
             .show(ctx, |ui| {
                 let colors = self.theme_colors();
-                egui::Frame::none()
+                egui::Frame::new()
                     .fill(colors.panel)
                     .stroke(Stroke::new(1.0, colors.border))
-                    .rounding(4.0)
-                    .inner_margin(egui::Margin::symmetric(5.0, 5.0))
+                    .corner_radius(8)
+                    .inner_margin(egui::Margin::symmetric(5, 5))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             for (axis, tip) in [
@@ -2210,116 +3496,124 @@ impl App {
         let mut remove_face: Option<usize> = None;
 
         ui.add_space(8.0);
-        egui::ScrollArea::vertical().id_salt("layer-list").show(ui, |ui| {
-            for i in (0..self.doc.faces.len()).rev() {
-                let name = if self.doc.faces[i].name.is_empty() {
-                    format!("レイヤー {}", i + 1)
-                } else {
-                    self.doc.faces[i].name.clone()
-                };
-                let selected = self.is_selected(Selection::Face(i));
-                let editing = self.face_editor == Some(i);
-                row_frame(ui, selected, |ui| {
-                    let visible = self.doc.faces[i].visible;
-                    if eye_button(ui, visible).clicked() {
-                        let snapshot = self.doc.clone();
-                        self.doc.faces[i].visible = !visible;
-                        self.push_history_snapshot(snapshot);
-                    }
-                    self.face_preview_widget(ui, i, 20.0);
-                    // × を右端に固定し、名前は残り幅いっぱいに広げる
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if delete_button(ui).clicked() {
-                            remove_face = Some(i);
+        egui::ScrollArea::vertical()
+            .id_salt("layer-list")
+            .show(ui, |ui| {
+                for i in (0..self.doc.faces.len()).rev() {
+                    let name = if self.doc.faces[i].name.is_empty() {
+                        format!("レイヤー {}", i + 1)
+                    } else {
+                        self.doc.faces[i].name.clone()
+                    };
+                    let selected = self.is_selected(Selection::Face(i));
+                    let editing = self.face_editor == Some(i);
+                    row_frame(ui, selected, |ui| {
+                        let visible = self.doc.faces[i].visible;
+                        if eye_button(ui, visible).clicked() {
+                            let snapshot = self.doc.clone();
+                            self.doc.faces[i].visible = !visible;
+                            self.push_history_snapshot(snapshot);
                         }
-                        let w = ui.available_width();
-                        if editing {
-                            let resp = ui.add_sized(
-                                [w, 22.0],
-                                egui::TextEdit::singleline(&mut self.doc.faces[i].name),
-                            );
-                            if resp.lost_focus() {
-                                self.commit_face_name_edit();
+                        self.face_preview_widget(ui, i, 20.0);
+                        // × を右端に固定し、名前は残り幅いっぱいに広げる
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if delete_button(ui).clicked() {
+                                remove_face = Some(i);
                             }
-                            resp.request_focus();
-                        } else {
-                            // 選択ハイライトは行フレームが全幅で描くので、ここは
-                            // 背景なしのクリック可能ラベルにする（二重の枠を避ける）
-                            let txt = if selected {
-                                egui::RichText::new(name).color(ui.visuals().strong_text_color())
+                            let w = ui.available_width();
+                            if editing {
+                                let resp = ui.add_sized(
+                                    [w, 22.0],
+                                    egui::TextEdit::singleline(&mut self.doc.faces[i].name),
+                                );
+                                if resp.lost_focus() {
+                                    self.commit_face_name_edit();
+                                }
+                                resp.request_focus();
                             } else {
-                                egui::RichText::new(name)
-                            };
-                            let resp = ui.add_sized(
-                                [w, 22.0],
-                                egui::Label::new(txt).sense(Sense::click()).selectable(false),
-                            );
-                            if resp.clicked() {
-                                if shift {
-                                    self.toggle_selection(Selection::Face(i));
+                                // 選択ハイライトは行フレームが全幅で描くので、ここは
+                                // 背景なしのクリック可能ラベルにする（二重の枠を避ける）
+                                let txt = if selected {
+                                    egui::RichText::new(name)
+                                        .color(ui.visuals().strong_text_color())
                                 } else {
-                                    self.set_single_selection(Some(Selection::Face(i)));
+                                    egui::RichText::new(name)
+                                };
+                                let resp = ui.add_sized(
+                                    [w, 22.0],
+                                    egui::Label::new(txt)
+                                        .sense(Sense::click())
+                                        .selectable(false),
+                                );
+                                if resp.clicked() {
+                                    if shift {
+                                        self.toggle_selection(Selection::Face(i));
+                                    } else {
+                                        self.set_single_selection(Some(Selection::Face(i)));
+                                    }
+                                }
+                                if resp.double_clicked() {
+                                    self.begin_face_edit(i);
                                 }
                             }
-                            if resp.double_clicked() {
-                                self.begin_face_edit(i);
-                            }
-                        }
+                        });
                     });
-                });
-            }
-        });
+                }
+            });
         if let Some(i) = remove_face {
             self.set_single_selection(Some(Selection::Face(i)));
             self.delete_selected();
         }
-
     }
 
     fn render_circles_tab(&mut self, ui: &mut egui::Ui) {
         let shift = ui.input(|i| i.modifiers.shift);
         ui.add_space(2.0);
         let mut remove_custom: Option<usize> = None;
-        egui::ScrollArea::vertical().id_salt("custom-list").show(ui, |ui| {
-            for i in 0..self.doc.custom_pegs.len() {
-                let id = self.doc.custom_pegs[i].id;
-                let visible = self.doc.custom_pegs[i].visible;
-                let selected = self.is_selected(Selection::Peg(id));
-                let used = self.custom_peg_in_use(id);
-                row_frame(ui, selected, |ui| {
-                    if eye_button(ui, visible).clicked() {
-                        let snapshot = self.doc.clone();
-                        self.doc.custom_pegs[i].visible = !visible;
-                        self.push_history_snapshot(snapshot);
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if used {
-                            delete_button(ui).on_hover_text("この円は面に使われています");
-                        } else if delete_button(ui).clicked() {
-                            remove_custom = Some(i);
+        egui::ScrollArea::vertical()
+            .id_salt("custom-list")
+            .show(ui, |ui| {
+                for i in 0..self.doc.custom_pegs.len() {
+                    let id = self.doc.custom_pegs[i].id;
+                    let visible = self.doc.custom_pegs[i].visible;
+                    let selected = self.is_selected(Selection::Peg(id));
+                    let used = self.custom_peg_in_use(id);
+                    row_frame(ui, selected, |ui| {
+                        if eye_button(ui, visible).clicked() {
+                            let snapshot = self.doc.clone();
+                            self.doc.custom_pegs[i].visible = !visible;
+                            self.push_history_snapshot(snapshot);
                         }
-                        let w = ui.available_width();
-                        let txt = if selected {
-                            egui::RichText::new(format!("円 #{id}"))
-                                .color(ui.visuals().strong_text_color())
-                        } else {
-                            egui::RichText::new(format!("円 #{id}"))
-                        };
-                        let resp = ui.add_sized(
-                            [w, 22.0],
-                            egui::Label::new(txt).sense(Sense::click()).selectable(false),
-                        );
-                        if resp.clicked() {
-                            if shift {
-                                self.toggle_selection(Selection::Peg(id));
-                            } else {
-                                self.set_single_selection(Some(Selection::Peg(id)));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if used {
+                                delete_button(ui).on_hover_text("この円は面に使われています");
+                            } else if delete_button(ui).clicked() {
+                                remove_custom = Some(i);
                             }
-                        }
+                            let w = ui.available_width();
+                            let txt = if selected {
+                                egui::RichText::new(format!("円 #{id}"))
+                                    .color(ui.visuals().strong_text_color())
+                            } else {
+                                egui::RichText::new(format!("円 #{id}"))
+                            };
+                            let resp = ui.add_sized(
+                                [w, 22.0],
+                                egui::Label::new(txt)
+                                    .sense(Sense::click())
+                                    .selectable(false),
+                            );
+                            if resp.clicked() {
+                                if shift {
+                                    self.toggle_selection(Selection::Peg(id));
+                                } else {
+                                    self.set_single_selection(Some(Selection::Peg(id)));
+                                }
+                            }
+                        });
                     });
-                });
-            }
-        });
+                }
+            });
         if let Some(i) = remove_custom {
             if let Some(peg) = self.doc.custom_pegs.get(i) {
                 self.set_single_selection(Some(Selection::Peg(peg.id)));
@@ -2332,12 +3626,24 @@ impl App {
         let face_indices: Vec<_> = self
             .selection
             .iter()
-            .filter_map(|sel| if let Selection::Face(i) = sel { Some(*i) } else { None })
+            .filter_map(|sel| {
+                if let Selection::Face(i) = sel {
+                    Some(*i)
+                } else {
+                    None
+                }
+            })
             .collect();
         let peg_indices: Vec<_> = self
             .selection
             .iter()
-            .filter_map(|sel| if let Selection::Peg(id) = sel { Some(*id) } else { None })
+            .filter_map(|sel| {
+                if let Selection::Peg(id) = sel {
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
             .collect();
 
         ui.add_space(2.0);
@@ -2404,7 +3710,9 @@ impl App {
                             face.visible = true;
                         }
                     }
-                    if changed { self.push_history_snapshot(snapshot); }
+                    if changed {
+                        self.push_history_snapshot(snapshot);
+                    }
                     self.status = "選択中のレイヤーを表示".to_owned();
                 }
                 if ui.button("すべて非表示").clicked() {
@@ -2416,7 +3724,9 @@ impl App {
                             face.visible = false;
                         }
                     }
-                    if changed { self.push_history_snapshot(snapshot); }
+                    if changed {
+                        self.push_history_snapshot(snapshot);
+                    }
                     self.status = "選択中のレイヤーを非表示".to_owned();
                 }
             });
@@ -2449,7 +3759,7 @@ impl App {
                     self.push_history_snapshot(visibility_snapshot);
                 }
             }
-            // マージ済みレイヤーはベベル量を非破壊で調整できる
+            // マージ済みレイヤーは丸ベベル量を非破壊で調整できる
             let is_baked = self
                 .doc
                 .faces
@@ -2459,7 +3769,9 @@ impl App {
             if is_baked {
                 ui.add_space(6.0);
                 let mut bevel = self.doc.faces[face_idx].baked.as_ref().unwrap().bevel;
-                let resp = ui.add(egui::Slider::new(&mut bevel, 0.0..=40.0).text("ベベル"));
+                let resp = ui
+                    .add(egui::Slider::new(&mut bevel, 0.0..=200.0).text("丸ベベル"))
+                    .on_hover_text("最大200。実際の丸みは各辺長の49%まで安全に制限されます");
                 if resp.changed() {
                     if self.bevel_edit_orig.is_none() {
                         self.bevel_edit_orig = Some(self.doc.clone());
@@ -2489,17 +3801,31 @@ impl App {
             if ENABLE_EXPERIMENTAL_SQUARE_PEGS {
                 ui.horizontal(|ui| {
                     ui.label("ピン形状");
-                    ui.radio_value(&mut self.doc.peg_appearance.shape, crate::model::PegShape::Circle, "円");
-                    ui.radio_value(&mut self.doc.peg_appearance.shape, crate::model::PegShape::RoundedSquare, "四角");
+                    ui.radio_value(
+                        &mut self.doc.peg_appearance.shape,
+                        crate::model::PegShape::Circle,
+                        "円",
+                    );
+                    ui.radio_value(
+                        &mut self.doc.peg_appearance.shape,
+                        crate::model::PegShape::RoundedSquare,
+                        "四角",
+                    );
                 });
                 if self.doc.peg_appearance.shape == crate::model::PegShape::RoundedSquare {
-                    ui.add(egui::Slider::new(&mut self.doc.peg_appearance.rounding, 0.0..=100.0).text("角のラウンド"));
+                    ui.add(
+                        egui::Slider::new(&mut self.doc.peg_appearance.rounding, 0.0..=100.0)
+                            .text("角のラウンド"),
+                    );
                 }
             }
             ui.checkbox(&mut self.doc.grid.subs_enabled, "サブ円を使う");
             if !self.doc.disabled_pegs.is_empty() {
                 let count = self.doc.disabled_pegs.len();
-                if ui.button(format!("無効化した円をすべて戻す ({count})")).clicked() {
+                if ui
+                    .button(format!("無効化した円をすべて戻す ({count})"))
+                    .clicked()
+                {
                     self.push_history();
                     self.doc.disabled_pegs.clear();
                     self.rebuild_pegs(self.canvas_size);
@@ -2516,17 +3842,27 @@ impl App {
                         .color(colors.text2),
                 );
             }
-            ui.checkbox(&mut self.doc.grid.scale_link, "間隔に合わせて円の大きさも変える");
+            ui.checkbox(
+                &mut self.doc.grid.scale_link,
+                "間隔に合わせて円の大きさも変える",
+            );
             ui.label("拡縮の基準");
             ui.horizontal(|ui| {
-                ui.radio_value(&mut self.doc.grid.scale_anchor, ScaleAnchor::TopLeft, "左上");
+                ui.radio_value(
+                    &mut self.doc.grid.scale_anchor,
+                    ScaleAnchor::TopLeft,
+                    "左上",
+                );
                 ui.radio_value(&mut self.doc.grid.scale_anchor, ScaleAnchor::Center, "中央");
             });
             if self.doc.grid != before_grid && self.draw.is_some() {
                 self.draw = None;
                 self.status = "グリッド変更のため描画中の線をキャンセルしました".to_owned();
             }
-            if self.doc.grid.scale_link && before_grid.spacing != 0.0 && self.doc.grid.spacing != before_grid.spacing {
+            if self.doc.grid.scale_link
+                && before_grid.spacing != 0.0
+                && self.doc.grid.spacing != before_grid.spacing
+            {
                 let scale = self.doc.grid.spacing / before_grid.spacing;
                 self.doc.grid.radius = (before_grid.radius * scale).clamp(0.0, 100.0);
                 self.doc.grid.sub_radius = (before_grid.sub_radius * scale).clamp(0.0, 60.0);
@@ -2550,6 +3886,499 @@ impl App {
         });
     }
 
+    fn draw_font_metric_guides(&self, painter: &egui::Painter, origin: Pos2) {
+        if self.workspace_mode != WorkspaceMode::Font {
+            return;
+        }
+        let metrics = self.font_project.metrics;
+        let left = metrics.origin_x;
+        let right = metrics.right_x;
+        let colors = self.theme_colors();
+        let box_color = colors.accent.gamma_multiply(0.42);
+        let secondary = colors.text2.gamma_multiply(0.48);
+        let baseline_color = Color32::from_rgb(235, 116, 116).gamma_multiply(0.72);
+        let x1 = self.to_screen(origin, Point::new(left, 0.0)).x;
+        let x2 = self.to_screen(origin, Point::new(right, 0.0)).x;
+        let y_asc = self
+            .to_screen(origin, Point::new(0.0, metrics.ascender_y))
+            .y;
+        let y_x = self
+            .to_screen(origin, Point::new(0.0, metrics.x_height_y))
+            .y;
+        let y_base = self
+            .to_screen(origin, Point::new(0.0, metrics.baseline_y))
+            .y;
+        let y_desc = self
+            .to_screen(origin, Point::new(0.0, metrics.descender_y))
+            .y;
+
+        painter.rect_stroke(
+            Rect::from_min_max(Pos2::new(x1, y_asc), Pos2::new(x2, y_desc)),
+            0.0,
+            Stroke::new(1.0, box_color),
+            egui::StrokeKind::Inside,
+        );
+        painter.add(egui::Shape::dashed_line(
+            &[Pos2::new(x1, y_x), Pos2::new(x2, y_x)],
+            Stroke::new(0.9, secondary),
+            5.0,
+            4.0,
+        ));
+        painter.add(egui::Shape::dashed_line(
+            &[Pos2::new(x1, y_base), Pos2::new(x2, y_base)],
+            Stroke::new(1.15, baseline_color),
+            7.0,
+            4.0,
+        ));
+        for (label, y, color) in [
+            ("ascender", y_asc, box_color),
+            ("x-height", y_x, secondary),
+            ("baseline", y_base, baseline_color),
+            ("descender", y_desc, box_color),
+        ] {
+            let label_rect = Rect::from_min_size(
+                Pos2::new(x1 + 5.0, y - 8.0),
+                Vec2::new(label.len() as f32 * 5.7 + 10.0, 16.0),
+            );
+            painter.rect_filled(label_rect, 3.0, colors.panel);
+            painter.rect_stroke(
+                label_rect,
+                3.0,
+                Stroke::new(0.7, color.gamma_multiply(0.7)),
+                egui::StrokeKind::Inside,
+            );
+            painter.text(
+                label_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                label,
+                FontId::proportional(10.0),
+                color,
+            );
+        }
+    }
+
+    fn choose_reference_font(&mut self) {
+        let mut dialog =
+            rfd::FileDialog::new().add_filter("OpenType font", &["ttf", "otf", "ttc", "otc"]);
+        dialog = dialog.set_directory("/System/Library/Fonts");
+        let Some(path) = dialog.pick_file() else {
+            return;
+        };
+        match std::fs::read(&path) {
+            Ok(data) => {
+                let face_count = ttf_parser::fonts_in_collection(&data).unwrap_or(1);
+                let face_index =
+                    (0..face_count).find(|index| ttf_parser::Face::parse(&data, *index).is_ok());
+                if let Some(face_index) = face_index {
+                    let name = path
+                        .file_name()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or("Font")
+                        .to_owned();
+                    self.reference_font = Some(ReferenceFont {
+                        name: name.clone(),
+                        data,
+                        face_index,
+                    });
+                    self.reference_font_offset = Vec2::ZERO;
+                    self.status = format!("{name} を下書きに設定しました");
+                } else {
+                    self.status = "このフォントの輪郭を読み取れませんでした".to_owned();
+                }
+            }
+            Err(error) => self.status = format!("フォントを開けません: {error}"),
+        }
+    }
+
+    fn draw_reference_font(&self, painter: &egui::Painter, origin: Pos2) {
+        if self.workspace_mode != WorkspaceMode::Font {
+            return;
+        }
+        let Some(reference) = &self.reference_font else {
+            return;
+        };
+        let Some(glyph) = self.font_project.glyphs.get(self.font_project.active_glyph) else {
+            return;
+        };
+        let Ok(face) = ttf_parser::Face::parse(&reference.data, reference.face_index) else {
+            return;
+        };
+        let Some(glyph_id) = face.glyph_index(glyph.character) else {
+            return;
+        };
+        let mut builder = ReferenceOutlineBuilder::default();
+        if face.outline_glyph(glyph_id, &mut builder).is_none() {
+            return;
+        }
+        builder.finish_contour();
+        let metrics = self.font_project.metrics;
+        let em_world = (metrics.descender_y - metrics.ascender_y).max(40.0);
+        let scale =
+            em_world / f64::from(face.units_per_em()) * f64::from(self.reference_font_scale);
+        let color = self
+            .theme_colors()
+            .accent
+            .gamma_multiply(self.reference_font_opacity);
+        for contour in builder.contours {
+            if contour.len() < 2 {
+                continue;
+            }
+            let mut points: Vec<Pos2> = contour
+                .into_iter()
+                .map(|point| {
+                    self.to_screen(
+                        origin,
+                        Point::new(
+                            metrics.origin_x
+                                + point.x * scale
+                                + f64::from(self.reference_font_offset.x),
+                            metrics.baseline_y - point.y * scale
+                                + f64::from(self.reference_font_offset.y),
+                        ),
+                    )
+                })
+                .collect();
+            if points.len() > 2 {
+                points.push(points[0]);
+            }
+            painter.add(egui::Shape::line(points, Stroke::new(1.1, color)));
+        }
+    }
+
+    fn glyph_ring_sets(&self, glyph_index: usize) -> Option<(char, Vec<Vec<Vec<Point>>>)> {
+        if self.workspace_mode != WorkspaceMode::Font {
+            return None;
+        }
+        let glyph = self.font_project.glyphs.get(glyph_index)?;
+        // 編集中グリフは保存スナップショットではなく現在のキャンバスを使い、
+        // 試打とオニオンへ操作結果を即時反映する。
+        let document = if glyph_index == self.font_project.active_glyph {
+            &self.doc
+        } else {
+            &glyph.document
+        };
+        if document.faces.is_empty() {
+            return Some((glyph.character, Vec::new()));
+        }
+        let (pegs, peg_refs) = Self::engine_pegs(
+            &document.grid,
+            self.canvas_size,
+            self.canvas_center,
+            &document.custom_pegs,
+            document.peg_appearance,
+            &document.disabled_pegs,
+        );
+        let resolver = |reference: &PegRef| {
+            resolve_peg(
+                &document.grid,
+                &document.custom_pegs,
+                self.canvas_center,
+                document.peg_appearance,
+                reference,
+            )
+        };
+        let mut ring_sets = Vec::new();
+        for face in document.faces.iter().filter(|face| face.visible) {
+            if let Some(baked) = &face.baked {
+                let rings: Vec<Vec<Point>> = baked
+                    .rings
+                    .iter()
+                    .map(|ring| bevel_ring(ring, baked.bevel))
+                    .filter(|ring| ring.len() >= 3)
+                    .collect();
+                if !rings.is_empty() {
+                    ring_sets.push(rings);
+                }
+                continue;
+            }
+            let obstacles: Vec<(PegRef, Peg)> = peg_refs
+                .iter()
+                .copied()
+                .zip(pegs.iter().copied())
+                .filter(|(peg_ref, _)| !face.ignored_pegs.contains(peg_ref))
+                .collect();
+            let Some(segments) = materialize_face_with_obstacles(face, &resolver, &obstacles)
+            else {
+                continue;
+            };
+            let mut points = Vec::new();
+            // 試打キャッシュがキャンバスのズームに依存しない固定精度。
+            let tolerance: f64 = 0.2;
+            for segment in segments {
+                match segment {
+                    Seg::Line { from, to } => {
+                        if points.is_empty() {
+                            points.push(from);
+                        }
+                        points.push(to);
+                    }
+                    Seg::Arc {
+                        center,
+                        radius,
+                        start,
+                        end,
+                    } => {
+                        let peg = pegs.iter().find(|peg| {
+                            peg.center.distance(center) < 0.01 && (peg.radius - radius).abs() < 0.01
+                        });
+                        let safe_tolerance = tolerance.max(0.01).min(radius.max(0.01));
+                        let step_angle = (2.0 * (1.0 - safe_tolerance / radius.max(0.01)).acos())
+                            .clamp(0.01, std::f64::consts::PI / 2.0);
+                        let steps =
+                            (((end - start).abs() / step_angle).ceil() as usize).clamp(2, 160);
+                        for index in 0..=steps {
+                            let angle = start + (end - start) * (index as f64 / steps as f64);
+                            let point = peg.map_or_else(
+                                || crate::geometry::on_circle(center, radius, angle),
+                                |peg| crate::geometry::on_peg(peg, angle),
+                            );
+                            if points
+                                .last()
+                                .is_none_or(|last: &Point| last.distance(point) > tolerance * 0.25)
+                            {
+                                points.push(point);
+                            }
+                        }
+                    }
+                }
+            }
+            if points.len() >= 3 {
+                ring_sets.push(vec![points]);
+            }
+        }
+        Some((glyph.character, ring_sets))
+    }
+
+    fn glyph_rings(&self, glyph_index: usize) -> Option<(char, Vec<Vec<Point>>)> {
+        let (character, ring_sets) = self.glyph_ring_sets(glyph_index)?;
+        Some((character, ring_sets.into_iter().flatten().collect()))
+    }
+
+    fn proof_glyph_rings(&mut self, glyph_index: usize) -> Option<(char, Arc<Vec<Vec<Point>>>)> {
+        let glyph = self.font_project.glyphs.get(glyph_index)?;
+        let character = glyph.character;
+        let document = if glyph_index == self.font_project.active_glyph {
+            self.doc.clone()
+        } else {
+            glyph.document.clone()
+        };
+        let style = self.font_project.render_style;
+        let width = self.font_project.thread_width;
+        if let Some(cached) = self.proof_cache.get(&glyph_index) {
+            if cached.document == document
+                && cached.canvas_size == self.canvas_size
+                && cached.canvas_center == self.canvas_center
+                && cached.render_style == style
+                && (cached.thread_width - width).abs() < f64::EPSILON
+            {
+                return Some((character, Arc::clone(&cached.rings)));
+            }
+        }
+
+        let (_, source_ring_sets) = self.glyph_ring_sets(glyph_index)?;
+        let rings = match style {
+            FontRenderStyle::Thread => stroke_visible_ring_sets(&source_ring_sets, width),
+            FontRenderStyle::Fill => union_visible_ring_sets(&source_ring_sets),
+            FontRenderStyle::FillAndThread => {
+                let fill = union_visible_ring_sets(&source_ring_sets);
+                let thread = stroke_visible_ring_sets(&source_ring_sets, width);
+                union_polygon_ring_sets(&[fill, thread])
+            }
+        };
+        let rings = Arc::new(rings);
+        self.proof_cache.insert(
+            glyph_index,
+            ProofCacheEntry {
+                document,
+                canvas_size: self.canvas_size,
+                canvas_center: self.canvas_center,
+                render_style: style,
+                thread_width: width,
+                rings: Arc::clone(&rings),
+            },
+        );
+        Some((character, rings))
+    }
+
+    fn draw_onion_skin(&self, painter: &egui::Painter, origin: Pos2) {
+        if self.workspace_mode != WorkspaceMode::Font {
+            return;
+        }
+        let active = self.font_project.active_glyph;
+        let mut layers = Vec::new();
+        if self.onion_skin && active > 0 {
+            layers.push((active - 1, self.onion_previous_color, "前"));
+        }
+        if self.onion_next && active + 1 < self.font_project.glyphs.len() {
+            layers.push((active + 1, self.onion_next_color, "次"));
+        }
+        let alpha = (self.onion_opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+        for (layer_number, (glyph_index, base_color, label)) in layers.into_iter().enumerate() {
+            let Some((character, rings)) = self.glyph_rings(glyph_index) else {
+                continue;
+            };
+            let color = Color32::from_rgba_unmultiplied(
+                base_color.r(),
+                base_color.g(),
+                base_color.b(),
+                alpha,
+            );
+            for ring in rings {
+                let mut line: Vec<Pos2> = ring
+                    .iter()
+                    .map(|point| self.to_screen(origin, *point))
+                    .collect();
+                if line.len() >= 3 {
+                    if line
+                        .first()
+                        .zip(line.last())
+                        .is_some_and(|(a, b)| a.distance(*b) > 0.01)
+                    {
+                        line.push(line[0]);
+                    }
+                    painter.add(egui::Shape::line(line, Stroke::new(1.25, color)));
+                }
+            }
+            let metrics = self.font_project.metrics;
+            let label_position = self
+                .to_screen(origin, Point::new(metrics.right_x, metrics.ascender_y))
+                + Vec2::new(-6.0, 8.0 + layer_number as f32 * 14.0);
+            painter.text(
+                label_position,
+                egui::Align2::RIGHT_TOP,
+                format!("{label}: {character}"),
+                FontId::proportional(10.0),
+                color,
+            );
+        }
+    }
+
+    fn interact_font_metric_guides(&mut self, ui: &mut egui::Ui, origin: Pos2) -> bool {
+        if self.workspace_mode != WorkspaceMode::Font {
+            return false;
+        }
+        let metrics = self.font_project.metrics;
+        let x1 = self.to_screen(origin, Point::new(metrics.origin_x, 0.0)).x;
+        let x2 = self.to_screen(origin, Point::new(metrics.right_x, 0.0)).x;
+        let y_asc = self
+            .to_screen(origin, Point::new(0.0, metrics.ascender_y))
+            .y;
+        let y_x = self
+            .to_screen(origin, Point::new(0.0, metrics.x_height_y))
+            .y;
+        let y_base = self
+            .to_screen(origin, Point::new(0.0, metrics.baseline_y))
+            .y;
+        let y_desc = self
+            .to_screen(origin, Point::new(0.0, metrics.descender_y))
+            .y;
+        let horizontal_min = x1.min(x2) - 6.0;
+        let horizontal_max = x1.max(x2) + 6.0;
+        let vertical_min = y_asc.min(y_desc) - 6.0;
+        let vertical_max = y_asc.max(y_desc) + 6.0;
+        let guides = [
+            (
+                FontMetricGuide::Origin,
+                Rect::from_min_max(
+                    Pos2::new(x1 - 6.0, vertical_min),
+                    Pos2::new(x1 + 6.0, vertical_max),
+                ),
+                egui::CursorIcon::ResizeHorizontal,
+            ),
+            (
+                FontMetricGuide::Right,
+                Rect::from_min_max(
+                    Pos2::new(x2 - 6.0, vertical_min),
+                    Pos2::new(x2 + 6.0, vertical_max),
+                ),
+                egui::CursorIcon::ResizeHorizontal,
+            ),
+            (
+                FontMetricGuide::Ascender,
+                Rect::from_min_max(
+                    Pos2::new(horizontal_min, y_asc - 6.0),
+                    Pos2::new(horizontal_max, y_asc + 6.0),
+                ),
+                egui::CursorIcon::ResizeVertical,
+            ),
+            (
+                FontMetricGuide::XHeight,
+                Rect::from_min_max(
+                    Pos2::new(horizontal_min, y_x - 6.0),
+                    Pos2::new(horizontal_max, y_x + 6.0),
+                ),
+                egui::CursorIcon::ResizeVertical,
+            ),
+            (
+                FontMetricGuide::Baseline,
+                Rect::from_min_max(
+                    Pos2::new(horizontal_min, y_base - 6.0),
+                    Pos2::new(horizontal_max, y_base + 6.0),
+                ),
+                egui::CursorIcon::ResizeVertical,
+            ),
+            (
+                FontMetricGuide::Descender,
+                Rect::from_min_max(
+                    Pos2::new(horizontal_min, y_desc - 6.0),
+                    Pos2::new(horizontal_max, y_desc + 6.0),
+                ),
+                egui::CursorIcon::ResizeVertical,
+            ),
+        ];
+
+        let mut interacting = false;
+        for (guide, hit_rect, cursor) in guides {
+            let response = ui
+                .interact(
+                    hit_rect,
+                    ui.make_persistent_id(("font-metric-guide", guide)),
+                    Sense::drag(),
+                )
+                .on_hover_cursor(cursor);
+            interacting |= response.hovered() || response.dragged();
+            let Some(pointer) = response
+                .interact_pointer_pos()
+                .filter(|_| response.dragged())
+            else {
+                continue;
+            };
+            let world = self.to_world(origin, pointer);
+            match guide {
+                FontMetricGuide::Origin => {
+                    self.font_project.metrics.origin_x =
+                        world.x.min(self.font_project.metrics.right_x - 40.0);
+                }
+                FontMetricGuide::Right => {
+                    self.font_project.metrics.right_x =
+                        world.x.max(self.font_project.metrics.origin_x + 40.0);
+                }
+                FontMetricGuide::Ascender => {
+                    self.font_project.metrics.ascender_y =
+                        world.y.min(self.font_project.metrics.x_height_y - 20.0);
+                }
+                FontMetricGuide::XHeight => {
+                    self.font_project.metrics.x_height_y = world.y.clamp(
+                        self.font_project.metrics.ascender_y + 20.0,
+                        self.font_project.metrics.baseline_y - 20.0,
+                    );
+                }
+                FontMetricGuide::Baseline => {
+                    self.font_project.metrics.baseline_y = world.y.clamp(
+                        self.font_project.metrics.x_height_y + 20.0,
+                        self.font_project.metrics.descender_y - 20.0,
+                    );
+                }
+                FontMetricGuide::Descender => {
+                    self.font_project.metrics.descender_y =
+                        world.y.max(self.font_project.metrics.baseline_y + 20.0);
+                }
+            }
+            self.status = "メトリクスガイドを移動しました".to_owned();
+        }
+        interacting
+    }
+
     fn canvas(&mut self, ui: &mut egui::Ui) {
         let size = ui.available_size();
         let (response, painter) = ui.allocate_painter(size, Sense::click_and_drag());
@@ -2561,24 +4390,29 @@ impl App {
         let is_space_drag = response.ctx.input(|i| i.key_down(Key::Space));
         let is_command = response.ctx.input(|i| i.modifiers.command);
         self.canvas_size = rect.size();
-        self.canvas_center = Point::new(self.canvas_size.x as f64 / 2.0, self.canvas_size.y as f64 / 2.0);
+        self.canvas_center = Point::new(
+            self.canvas_size.x as f64 / 2.0,
+            self.canvas_size.y as f64 / 2.0,
+        );
 
         self.rebuild_pegs(rect.size());
         let mut rendered = self.materialized_faces();
-        let hover = response
-            .hover_pos()
-            .map(|p| self.to_world(origin, p));
+        let hover = response.hover_pos().map(|p| self.to_world(origin, p));
+        let guide_interaction = self.interact_font_metric_guides(ui, origin);
 
-        if is_space_drag && response.dragged() {
+        if !guide_interaction && is_space_drag && response.dragged() {
             did_view_change = self.pan_view(response.drag_delta()) || did_view_change;
         }
         let can_zoom = is_command || (zoom_delta - 1.0).abs() > f32::EPSILON;
         if can_zoom {
             if let Some(cursor) = response.hover_pos() {
-                did_view_change = self.set_zoom(origin, cursor, self.view.zoom * zoom_delta) || did_view_change;
+                did_view_change =
+                    self.set_zoom(origin, cursor, self.view.zoom * zoom_delta) || did_view_change;
             }
         }
-        if !can_zoom && smooth_scroll != Vec2::ZERO {
+        // egui のスクロール値はコンテキスト全体から届くため、ポインタが
+        // グリフ等のパネル上にある時はキャンバスへ伝播させない。
+        if response.hovered() && !can_zoom && smooth_scroll != Vec2::ZERO {
             did_view_change = self.pan_view(smooth_scroll) || did_view_change;
         }
 
@@ -2604,7 +4438,11 @@ impl App {
                                 .map(|p| (*id, p.center))
                         })
                         .collect();
-                    self.grab = Some(GrabState { base: self.doc.clone(), origins, anchor });
+                    self.grab = Some(GrabState {
+                        base: self.doc.clone(),
+                        origins,
+                        anchor,
+                    });
                     self.status = "移動中… クリックで確定 / Escで取消".to_owned();
                 } else {
                     self.status = "移動する任意円を選んでください（G）".to_owned();
@@ -2613,8 +4451,7 @@ impl App {
         }
         let grabbing = self.grab.is_some();
         if grabbing {
-            let cancel =
-                ui.input(|i| i.key_pressed(Key::Escape)) || response.secondary_clicked();
+            let cancel = ui.input(|i| i.key_pressed(Key::Escape)) || response.secondary_clicked();
             let confirm = response.clicked() || ui.input(|i| i.key_pressed(Key::Enter));
             if let (Some(grab), Some(pos)) = (self.grab.as_ref(), hover) {
                 let delta = pos - grab.anchor;
@@ -2622,7 +4459,10 @@ impl App {
                     .origins
                     .iter()
                     .filter_map(|(id, origin)| {
-                        self.doc.custom_pegs.iter().find(|peg| peg.id == *id)
+                        self.doc
+                            .custom_pegs
+                            .iter()
+                            .find(|peg| peg.id == *id)
                             .map(|peg| (*id, *origin + delta, peg.radius))
                     })
                     .collect();
@@ -2687,7 +4527,14 @@ impl App {
         let customs = self.doc.custom_pegs.clone();
         let canvas_center = self.canvas_center;
         let appearance = self.doc.peg_appearance;
-        let mut live_snapshot: Option<(StartAnchor, Point, bool, Thread, Vec<Element>, Vec<usize>)> = None;
+        let mut live_snapshot: Option<(
+            StartAnchor,
+            Point,
+            bool,
+            Thread,
+            Vec<Element>,
+            Vec<usize>,
+        )> = None;
         let mut pin_request = false;
 
         let resolver = move |peg_ref: &PegRef| -> Option<Peg> {
@@ -2696,7 +4543,8 @@ impl App {
 
         if !grabbing && response.drag_started() {
             if let Some(pos) = hover {
-                if self.tool == Tool::Select && self.peg_at_cursor(pos).is_none() && !is_space_drag {
+                if self.tool == Tool::Select && self.peg_at_cursor(pos).is_none() && !is_space_drag
+                {
                     // 面のスナップ移動を開始
                     if let Some(Selection::Face(hit)) = self.hit_test_face(pos, &rendered) {
                         let shift = ui.input(|i| i.modifiers.shift);
@@ -2723,62 +4571,64 @@ impl App {
                     }
                 }
                 if let Some((peg_ref, pos_ref)) = self.peg_at_cursor(pos) {
-                    let radius = self
-                        .peg_refs
-                        .iter()
-                        .zip(self.pegs.iter())
-                        .find_map(|(pr, peg)| {
-                            (peg_ref == *pr).then_some((peg.radius - self.doc.grid.catch).max(0.0))
-                        });
+                    let radius =
+                        self.peg_refs
+                            .iter()
+                            .zip(self.pegs.iter())
+                            .find_map(|(pr, peg)| {
+                                (peg_ref == *pr)
+                                    .then_some((peg.radius - self.doc.grid.catch).max(0.0))
+                            });
                     if let Some(radius) = radius {
                         let shift = ui.input(|i| i.modifiers.shift);
                         match (self.tool, peg_ref) {
-                        (Tool::Select, PegRef::Custom { id }) => {
-                            if !self.drag_snapshot.is_some() {
-                                self.drag_snapshot = Some(self.doc.clone());
-                            }
-                            let sel = Selection::Peg(id);
-                            self.apply_click_selection(sel, shift);
-                            let ids = if self.is_selected(sel) {
-                                self.selected_pegs()
-                            } else {
-                                vec![id]
-                            };
-                            self.begin_drag(&ids, pos, false);
-                        }
-                        (Tool::DirectSelect, PegRef::Custom { id }) => {
-                            if !self.drag_snapshot.is_some() {
-                                self.drag_snapshot = Some(self.doc.clone());
-                            }
-                            let sel = Selection::Peg(id);
-                            self.apply_click_selection(sel, false);
-                            let ids = if self.is_selected(sel) {
-                                self.selected_pegs()
-                            } else {
-                                vec![id]
-                            };
-                            self.begin_drag(&ids, pos, false);
-                        }
-                        (Tool::DirectSelect, source) => {
-                            // 参照判定は変換「前」に行う。変換後は参照が新しい
-                            // Custom id に置換されるため、後から判定すると常に
-                            // false になりドラッグが成立しない
-                            if self.face_references_source(&source) {
-                                if self.drag_snapshot.is_none() {
+                            (Tool::Select, PegRef::Custom { id }) => {
+                                if !self.drag_snapshot.is_some() {
                                     self.drag_snapshot = Some(self.doc.clone());
                                 }
-                                self.set_single_selection(Some(Selection::PegRef(source)));
-                                let id = self.direct_select_drag_target(source, pos_ref, radius);
-                                self.set_single_selection(Some(Selection::Peg(id)));
-                                self.begin_drag(&[id], pos, true);
-                                self.rebuild_pegs(self.canvas_size);
-                            } else {
-                                self.set_single_selection(Some(Selection::PegRef(source)));
-                                self.status =
-                                    "この円は面に使われていません（面が参照する円のみ動かせます）".to_owned();
+                                let sel = Selection::Peg(id);
+                                self.apply_click_selection(sel, shift);
+                                let ids = if self.is_selected(sel) {
+                                    self.selected_pegs()
+                                } else {
+                                    vec![id]
+                                };
+                                self.begin_drag(&ids, pos, false);
                             }
-                        }
-                        _ => {}
+                            (Tool::DirectSelect, PegRef::Custom { id }) => {
+                                if !self.drag_snapshot.is_some() {
+                                    self.drag_snapshot = Some(self.doc.clone());
+                                }
+                                let sel = Selection::Peg(id);
+                                self.apply_click_selection(sel, false);
+                                let ids = if self.is_selected(sel) {
+                                    self.selected_pegs()
+                                } else {
+                                    vec![id]
+                                };
+                                self.begin_drag(&ids, pos, false);
+                            }
+                            (Tool::DirectSelect, source) => {
+                                // 参照判定は変換「前」に行う。変換後は参照が新しい
+                                // Custom id に置換されるため、後から判定すると常に
+                                // false になりドラッグが成立しない
+                                if self.face_references_source(&source) {
+                                    if self.drag_snapshot.is_none() {
+                                        self.drag_snapshot = Some(self.doc.clone());
+                                    }
+                                    self.set_single_selection(Some(Selection::PegRef(source)));
+                                    let id =
+                                        self.direct_select_drag_target(source, pos_ref, radius);
+                                    self.set_single_selection(Some(Selection::Peg(id)));
+                                    self.begin_drag(&[id], pos, true);
+                                    self.rebuild_pegs(self.canvas_size);
+                                } else {
+                                    self.set_single_selection(Some(Selection::PegRef(source)));
+                                    self.status =
+                                    "この円は面に使われていません（面が参照する円のみ動かせます）".to_owned();
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -2840,7 +4690,8 @@ impl App {
                 if can_move {
                     let mut changed = false;
                     for (id, origin) in start.iter() {
-                        if let Some(peg) = self.doc.custom_pegs.iter_mut().find(|peg| peg.id == *id) {
+                        if let Some(peg) = self.doc.custom_pegs.iter_mut().find(|peg| peg.id == *id)
+                        {
                             let target = Point {
                                 x: origin.x + delta.x,
                                 y: origin.y + delta.y,
@@ -2861,12 +4712,17 @@ impl App {
         if response.drag_stopped() {
             if let Some(drag) = self.active_custom_drag.take() {
                 let changed = match drag {
-                    ActiveDrag::Custom { start, converted, .. } => converted || start.iter().any(|(id, start_center)| {
-                        self.doc
-                            .custom_pegs
-                            .iter()
-                            .any(|peg| peg.id == *id && peg.center != *start_center)
-                    }),
+                    ActiveDrag::Custom {
+                        start, converted, ..
+                    } => {
+                        converted
+                            || start.iter().any(|(id, start_center)| {
+                                self.doc
+                                    .custom_pegs
+                                    .iter()
+                                    .any(|peg| peg.id == *id && peg.center != *start_center)
+                            })
+                    }
                 };
                 if changed {
                     if let Some(snap) = self.drag_snapshot.take() {
@@ -2947,7 +4803,12 @@ impl App {
                     active.th.tip = clamp_outside_pegs(cursor, &resolved_pegs);
                 } else {
                     // 無視を確定した円はストローク終了まで捕捉対象から外す
-                    update_thread_ignoring(&mut active.th, cursor, &resolved_pegs, &capture_ignored);
+                    update_thread_ignoring(
+                        &mut active.th,
+                        cursor,
+                        &resolved_pegs,
+                        &capture_ignored,
+                    );
                 }
             }
             if active.th.tip.distance(active.start_point) > close_radius * 2.0 {
@@ -3047,8 +4908,7 @@ impl App {
 
         if let Some((start, start_point, armed, th, base_elements, ignored)) = live_snapshot {
             let base_is_empty = base_elements.is_empty();
-            let live_preview =
-                thread_to_wrap_elements(&th, &resolved_pegs, &peg_refs, th.tip);
+            let live_preview = thread_to_wrap_elements(&th, &resolved_pegs, &peg_refs, th.tip);
             let live_closed = thread_to_wrap_elements(&th, &resolved_pegs, &peg_refs, start_point);
             if let (Some(lp), Some(lc)) = (live_preview, live_closed) {
                 let mut preview_elements = base_elements.clone();
@@ -3057,128 +4917,154 @@ impl App {
                 active_preview =
                     materialize_chain(start_point, &preview_elements, &resolver, th.tip);
 
-                let mut elements = base_elements.clone();
-                elements.extend(lc);
-                let preferred_start_s = if matches!(elements.last(), Some(Element::Wrap { peg, .. }) if *peg == start.peg) {
-                    None
-                } else {
-                    let head = th.head(&resolved_pegs);
-                    resolver(&start.peg).map(|start_peg| {
-                        let d = start_point - head;
-                        let to_center = start_peg.center - head;
-                        if d.cross(to_center) >= 0.0 { 1.0 } else { -1.0 }
-                    })
-                };
-                let mut variants = Vec::new();
-                if let Some(s) = preferred_start_s {
-                    for start_s in [s, -s] {
-                        let mut candidate = elements.clone();
-                        candidate.push(Element::Wrap {
-                            peg: start.peg,
-                            s: start_s,
-                            turns: 0,
-                            exit_offset: 0.0,
-                            sweep_hint: std::f64::consts::PI,
-                        });
-                        variants.push(candidate);
-                    }
-                } else {
-                    variants.push(elements.clone());
-                    if let Some(Element::Wrap { s, .. }) = elements.last_mut() {
-                        *s = -*s;
+                // 巻き方向の全候補探索は閉じる地点の近くでだけ必要。
+                // 再訪・多重巻き中の通常ドラッグではライブ経路だけを更新し、
+                // 毎フレームの指数的な再計算を避ける。
+                let in_close_radius = th.tip.distance(start_point) <= self.world_unit(CLOSE_RADIUS);
+                if in_close_radius {
+                    let mut elements = base_elements.clone();
+                    elements.extend(lc);
+                    let preferred_start_s = if matches!(elements.last(), Some(Element::Wrap { peg, .. }) if *peg == start.peg)
+                    {
+                        None
+                    } else {
+                        let head = th.head(&resolved_pegs);
+                        resolver(&start.peg).map(|start_peg| {
+                            let d = start_point - head;
+                            let to_center = start_peg.center - head;
+                            if d.cross(to_center) >= 0.0 {
+                                1.0
+                            } else {
+                                -1.0
+                            }
+                        })
+                    };
+                    let mut variants = Vec::new();
+                    if let Some(s) = preferred_start_s {
+                        for start_s in [s, -s] {
+                            let mut candidate = elements.clone();
+                            candidate.push(Element::Wrap {
+                                peg: start.peg,
+                                s: start_s,
+                                turns: 0,
+                                exit_offset: 0.0,
+                                sweep_hint: std::f64::consts::PI,
+                            });
+                            variants.push(candidate);
+                        }
+                    } else {
                         variants.push(elements.clone());
+                        if let Some(Element::Wrap { s, .. }) = elements.last_mut() {
+                            *s = -*s;
+                            variants.push(elements.clone());
+                        }
                     }
-                }
-                // ライブ描画時の局所的な巻き方向が、閉路全体では成立しない
-                // 三角形などがある。Wrapが8個以下なら全符号組合せを調べ、
-                // 複数箇所の反転が必要な閉路も候補に含める。
-                if let Some(seed) = variants.first() {
-                    variants = winding_variants(seed);
-                }
-                let distinct_wraps = variants.first().map_or(0, |candidate| {
-                    let mut refs = Vec::new();
-                    for element in candidate {
-                        if let Element::Wrap { peg, .. } = element {
-                            if !refs.contains(peg) {
-                                refs.push(*peg);
+                    // ライブ描画時の局所的な巻き方向が、閉路全体では成立しない
+                    // 三角形などがある。Wrapが8個以下なら全符号組合せを調べ、
+                    // 複数箇所の反転が必要な閉路も候補に含める。
+                    if let Some(seed) = variants.first() {
+                        variants = winding_variants(seed);
+                    }
+                    let distinct_wraps = variants.first().map_or(0, |candidate| {
+                        let mut refs = Vec::new();
+                        for element in candidate {
+                            if let Element::Wrap { peg, .. } = element {
+                                if !refs.contains(peg) {
+                                    refs.push(*peg);
+                                }
+                            }
+                        }
+                        refs.len()
+                    });
+                    if distinct_wraps == 1 {
+                        if let Some(single_circle) =
+                            intentional_single_circle_wrap(&th, start, &peg_refs)
+                        {
+                            variants = vec![vec![single_circle]];
+                        }
+                    }
+
+                    let preferred_elements = variants.first().cloned().unwrap_or_default();
+                    let ignored_refs: Vec<PegRef> = ignored
+                        .iter()
+                        .filter_map(|index| peg_refs.get(*index).copied())
+                        .collect();
+                    let obstacles: Vec<(PegRef, Peg)> = peg_refs
+                        .iter()
+                        .copied()
+                        .zip(resolved_pegs.iter().copied())
+                        .filter(|(peg_ref, _)| !ignored_refs.contains(peg_ref))
+                        .collect();
+                    let obstacle_pegs: Vec<Peg> = obstacles.iter().map(|(_, peg)| *peg).collect();
+                    let mut first_candidate = None;
+                    let mut chosen: Option<(Face, Vec<Seg>, usize, f64)> = None;
+                    for candidate_elements in variants {
+                        let winding_changes =
+                            winding_change_count(&preferred_elements, &candidate_elements);
+                        // 候補は反転数の少ない順。すでに有効解が見つかっていて、
+                        // それより多くの巻き方向変更が必要なら意図忠実度で必ず負ける。
+                        // 同じ変更数だけは円弧長を比較してから打ち切る。
+                        if chosen
+                            .as_ref()
+                            .is_some_and(|(_, _, best_changes, _)| winding_changes > *best_changes)
+                        {
+                            break;
+                        }
+                        let face = Face {
+                            start,
+                            elements: candidate_elements,
+                            visible: true,
+                            name: String::new(),
+                            baked: None,
+                            ignored_pegs: ignored_refs.clone(),
+                        };
+                        let Some(segs) =
+                            materialize_face_with_obstacles(&face, &resolver, &obstacles)
+                        else {
+                            continue;
+                        };
+                        if first_candidate.is_none() {
+                            first_candidate = Some((face.clone(), segs.clone()));
+                        }
+                        if !segments_penetrate_pegs(&segs, &obstacle_pegs) {
+                            let total_arc = segs
+                                .iter()
+                                .map(|segment| match *segment {
+                                    Seg::Arc { start, end, .. } => (end - start).abs(),
+                                    Seg::Line { .. } => 0.0,
+                                })
+                                .sum::<f64>();
+                            if closure_score_is_better(
+                                winding_changes,
+                                total_arc,
+                                chosen.as_ref().map(|(_, _, best_changes, best_arc)| {
+                                    (*best_changes, *best_arc)
+                                }),
+                            ) {
+                                chosen = Some((face, segs, winding_changes, total_arc));
                             }
                         }
                     }
-                    refs.len()
-                });
-                if distinct_wraps == 1 {
-                    if let Some(single_circle) = intentional_single_circle_wrap(&th, start, &peg_refs) {
-                        variants = vec![vec![single_circle]];
-                    }
-                }
-
-                let preferred_elements = variants.first().cloned().unwrap_or_default();
-                let ignored_refs: Vec<PegRef> = ignored
-                    .iter()
-                    .filter_map(|index| peg_refs.get(*index).copied())
-                    .collect();
-                let obstacles: Vec<(PegRef, Peg)> = peg_refs
-                    .iter()
-                    .copied()
-                    .zip(resolved_pegs.iter().copied())
-                    .filter(|(peg_ref, _)| !ignored_refs.contains(peg_ref))
-                    .collect();
-                let obstacle_pegs: Vec<Peg> = obstacles.iter().map(|(_, peg)| *peg).collect();
-                let mut first_candidate = None;
-                let mut chosen: Option<(Face, Vec<Seg>, usize, f64)> = None;
-                for candidate_elements in variants {
-                    let winding_changes = winding_change_count(&preferred_elements, &candidate_elements);
-                    let face = Face {
-                        start,
-                        elements: candidate_elements,
-                        visible: true,
-                        name: String::new(),
-                        baked: None,
-                        ignored_pegs: ignored_refs.clone(),
-                    };
-                    let Some(segs) = materialize_face_with_obstacles(&face, &resolver, &obstacles) else { continue };
-                    if first_candidate.is_none() {
-                        first_candidate = Some((face.clone(), segs.clone()));
-                    }
-                    if !self.has_penetration_on_lines(&segs)
-                        && !segments_penetrate_pegs(&segs, &obstacle_pegs)
-                    {
-                        let total_arc = segs.iter().map(|segment| match *segment {
-                            Seg::Arc { start, end, .. } => (end - start).abs(),
-                            Seg::Line { .. } => 0.0,
-                        }).sum::<f64>();
-                        if closure_score_is_better(
-                            winding_changes,
-                            total_arc,
-                            chosen
-                                .as_ref()
-                                .map(|(_, _, best_changes, best_arc)| (*best_changes, *best_arc)),
-                        ) {
-                            chosen = Some((face, segs, winding_changes, total_arc));
+                    let chosen = chosen.map(|(face, segs, _, _)| (face, segs));
+                    if let Some((face, segs)) = chosen.or(first_candidate) {
+                        let over_wrap = th.wraps.iter().any(|wrap| {
+                            ((wrap.exit - wrap.entry) * wrap.s).abs()
+                                > std::f64::consts::TAU * MAX_MANUAL_TURNS as f64
+                        });
+                        active_has_penetration =
+                            over_wrap || segments_penetrate_pegs(&segs, &obstacle_pegs);
+                        active_close_allowed = armed
+                            && !segs.is_empty()
+                            && face_has_minimum_constraints(&face)
+                            && in_close_radius
+                            && !active_has_penetration;
+                        // 始点付近では、赤/緑判定と確定後に使う同一の閉路を表示する。
+                        if in_close_radius {
+                            active_preview = Some(segs.clone());
+                            active_preview_is_closed = true;
                         }
+                        request_finish_face = Some((face, segs));
                     }
-                }
-                let chosen = chosen.map(|(face, segs, _, _)| (face, segs));
-                if let Some((face, segs)) = chosen.or(first_candidate) {
-                    let over_wrap = th.wraps.iter().any(|wrap| {
-                        ((wrap.exit - wrap.entry) * wrap.s).abs()
-                            > std::f64::consts::TAU * MAX_MANUAL_TURNS as f64
-                    });
-                    active_has_penetration = over_wrap
-                        || self.has_penetration_on_lines(&segs)
-                        || segments_penetrate_pegs(&segs, &obstacle_pegs);
-                    let in_close_radius = th.tip.distance(start_point) <= self.world_unit(CLOSE_RADIUS);
-                    active_close_allowed = armed
-                        && !segs.is_empty()
-                        && face_has_minimum_constraints(&face)
-                        && in_close_radius
-                        && !active_has_penetration;
-                    // 始点付近では、赤/緑判定と確定後に使う同一の閉路を表示する。
-                    if in_close_radius {
-                        active_preview = Some(segs.clone());
-                        active_preview_is_closed = true;
-                    }
-                    request_finish_face = Some((face, segs));
                 }
             }
 
@@ -3193,14 +5079,15 @@ impl App {
                 {
                     request_cancel_draw = true;
                 } else if th.wraps.is_empty() && base_is_empty {
-                            active_status = Some("ペグに引っかけてから始点に戻ると閉じられます".to_owned());
-                        } else if active_has_penetration {
-                            active_status = Some("輪郭が自己交差しています".to_owned());
-                        } else if !armed {
-                            active_status = Some("少し離れてから始点に戻ってください".to_owned());
-                        } else {
-                            active_status = Some("現在の輪郭は閉じられない状態です".to_owned());
-                        }
+                    active_status = Some("ペグに引っかけてから始点に戻ると閉じられます".to_owned());
+                } else if active_has_penetration {
+                    active_status =
+                        Some("糸が円を貫通しているか、巻き数が上限を超えています".to_owned());
+                } else if !armed {
+                    active_status = Some("少し離れてから始点に戻ってください".to_owned());
+                } else {
+                    active_status = Some("現在の輪郭は閉じられない状態です".to_owned());
+                }
             }
         }
 
@@ -3236,7 +5123,10 @@ impl App {
                             self.draw = Some(active);
                         } else {
                             let area = crate::geometry::signed_area(&pts);
-                            if area.abs() < 1e-9 {
+                            let self_intersects = self.has_self_intersections(&pts);
+                            if area.abs() < 1e-9
+                                && !(self_intersects && path_has_two_dimensional_extent(&pts))
+                            {
                                 self.status = "面積がないため確定できません".to_owned();
                                 self.draw = Some(active);
                             } else {
@@ -3259,13 +5149,9 @@ impl App {
             if let Some(mut active) = self.draw.take() {
                 let head = active.th.head(&resolved_pegs);
                 let exclude = active.th.wraps.last().map(|w| w.peg);
-                for idx in pegs_penetrated_by_line(
-                    head,
-                    pos,
-                    &resolved_pegs,
-                    exclude,
-                    &active.ignored,
-                ) {
+                for idx in
+                    pegs_penetrated_by_line(head, pos, &resolved_pegs, exclude, &active.ignored)
+                {
                     if !active.ignored.contains(&idx) {
                         active.ignored.push(idx);
                     }
@@ -3349,9 +5235,12 @@ impl App {
                     .collect()
             })
             .collect();
+        // 参照フォントは作図面より下へ敷き、現在の輪郭との差を見ながらなぞれるようにする。
+        self.draw_reference_font(&painter, origin);
         if let Some(mesh) = build_faces_mesh(&screen_polys, Pos2::new(0.0, 0.0), colors.face_fill) {
             painter.add(mesh);
         }
+        self.draw_onion_skin(&painter, origin);
 
         // 引っかかり範囲は糸より先に描く。同じ実効半径上の暗いガイドが
         // 円弧だけを後から上書きし、直線より細く見えていたため。
@@ -3359,16 +5248,32 @@ impl App {
             let zoom = self.view.zoom;
             for (peg, peg_ref) in self.pegs.iter().zip(self.peg_refs.iter()) {
                 if let PegRef::Custom { id } = peg_ref {
-                    if self.doc.custom_pegs.iter().find(|custom| custom.id == *id).is_some_and(|custom| !custom.visible) {
+                    if self
+                        .doc
+                        .custom_pegs
+                        .iter()
+                        .find(|custom| custom.id == *id)
+                        .is_some_and(|custom| !custom.visible)
+                    {
                         continue;
                     }
                 }
                 let c = self.to_screen(origin, peg.center);
                 if peg.shape == crate::model::PegShape::RoundedSquare {
-                    let catch_rect = Rect::from_center_size(c, Vec2::splat(peg.radius as f32 * zoom * 2.0));
-                    painter.rect_stroke(catch_rect, (peg.rounding as f32 * zoom).min(peg.radius as f32 * zoom), Stroke::new(0.6, colors.catch));
+                    let catch_rect =
+                        Rect::from_center_size(c, Vec2::splat(peg.radius as f32 * zoom * 2.0));
+                    painter.rect_stroke(
+                        catch_rect,
+                        (peg.rounding as f32 * zoom).min(peg.radius as f32 * zoom),
+                        Stroke::new(0.6, colors.catch),
+                        egui::StrokeKind::Inside,
+                    );
                 } else {
-                    painter.circle_stroke(c, peg.radius as f32 * zoom, Stroke::new(0.6, colors.catch));
+                    painter.circle_stroke(
+                        c,
+                        peg.radius as f32 * zoom,
+                        Stroke::new(0.6, colors.catch),
+                    );
                 }
             }
         }
@@ -3385,7 +5290,12 @@ impl App {
                     .map(|p| self.to_screen(origin, *p))
                     .collect();
                 let mut line = line;
-                if line.len() > 2 && line.first().zip(line.last()).is_some_and(|(a, b)| a.distance(*b) < 0.01) {
+                if line.len() > 2
+                    && line
+                        .first()
+                        .zip(line.last())
+                        .is_some_and(|(a, b)| a.distance(*b) < 0.01)
+                {
                     line.pop();
                 }
                 painter.add(egui::Shape::closed_line(
@@ -3413,7 +5323,12 @@ impl App {
                     .map(|p| self.to_screen(origin, *p))
                     .collect();
                 let mut line = line;
-                if line.len() > 2 && line.first().zip(line.last()).is_some_and(|(a, b)| a.distance(*b) < 0.01) {
+                if line.len() > 2
+                    && line
+                        .first()
+                        .zip(line.last())
+                        .is_some_and(|(a, b)| a.distance(*b) < 0.01)
+                {
                     line.pop();
                 }
                 painter.add(egui::Shape::closed_line(
@@ -3427,7 +5342,11 @@ impl App {
         let accent_gap_world = 2.8 / f64::from(self.view.zoom.max(0.01));
         for (list_idx, &(_, ref render)) in rendered.iter().enumerate() {
             let selected = selected_face_indices.contains(&list_idx);
-            let color = if selected { colors.select } else { colors.thread };
+            let color = if selected {
+                colors.select
+            } else {
+                colors.thread
+            };
             let width = if selected { 1.35 } else { 0.78 };
             for accent in &render.wrap_accents {
                 for layer in 1..=accent.turns.min(3) {
@@ -3436,9 +5355,7 @@ impl App {
                     let points: Vec<Pos2> = (0..=steps)
                         .map(|index| {
                             let angle = accent.start
-                                + accent.direction
-                                    * std::f64::consts::TAU
-                                    * index as f64
+                                + accent.direction * std::f64::consts::TAU * index as f64
                                     / steps as f64;
                             self.to_screen(
                                 origin,
@@ -3455,7 +5372,12 @@ impl App {
                 let c = self.to_screen(origin, p.center);
                 let r = p.radius as f32 * self.view.zoom + 2.0;
                 if self.doc.peg_appearance.shape == crate::model::PegShape::RoundedSquare {
-                    painter.rect_stroke(Rect::from_center_size(c, Vec2::splat(r * 2.0)), (self.doc.peg_appearance.rounding as f32 * self.view.zoom).min(r), Stroke::new(2.0, colors.select));
+                    painter.rect_stroke(
+                        Rect::from_center_size(c, Vec2::splat(r * 2.0)),
+                        (self.doc.peg_appearance.rounding as f32 * self.view.zoom).min(r),
+                        Stroke::new(2.0, colors.select),
+                        egui::StrokeKind::Inside,
+                    );
                 } else {
                     painter.circle_stroke(c, r, Stroke::new(2.0, colors.select));
                 }
@@ -3468,21 +5390,36 @@ impl App {
             let zoom = self.view.zoom;
             for (peg, peg_ref) in self.pegs.iter().zip(self.peg_refs.iter()) {
                 if let PegRef::Custom { id } = peg_ref {
-                    if self.doc.custom_pegs.iter().find(|custom| custom.id == *id).is_some_and(|custom| !custom.visible) {
+                    if self
+                        .doc
+                        .custom_pegs
+                        .iter()
+                        .find(|custom| custom.id == *id)
+                        .is_some_and(|custom| !custom.visible)
+                    {
                         continue;
                     }
                 }
                 let c = self.to_screen(origin, peg.center);
                 let r_draw = ((peg.radius - self.doc.grid.catch).max(0.0) as f32) * zoom;
                 // 任意円がグリッド/サブ円に被っているときは赤で警告表示
-                let overlaps = matches!(peg_ref, PegRef::Custom { .. })
-                    && self.custom_peg_overlaps_grid(peg);
-                let stroke_color = if overlaps { colors.close_ng } else { colors.peg_stroke };
+                let overlaps =
+                    matches!(peg_ref, PegRef::Custom { .. }) && self.custom_peg_overlaps_grid(peg);
+                let stroke_color = if overlaps {
+                    colors.close_ng
+                } else {
+                    colors.peg_stroke
+                };
                 if self.doc.peg_appearance.shape == crate::model::PegShape::RoundedSquare {
                     let peg_rect = Rect::from_center_size(c, Vec2::splat(r_draw * 2.0));
                     let rounding = (self.doc.peg_appearance.rounding as f32 * zoom).min(r_draw);
                     painter.rect_filled(peg_rect, rounding, colors.peg_fill);
-                    painter.rect_stroke(peg_rect, rounding, Stroke::new(1.2, stroke_color));
+                    painter.rect_stroke(
+                        peg_rect,
+                        rounding,
+                        Stroke::new(1.2, stroke_color),
+                        egui::StrokeKind::Inside,
+                    );
                 } else {
                     painter.circle(c, r_draw, colors.peg_fill, Stroke::new(1.2, stroke_color));
                 }
@@ -3536,7 +5473,9 @@ impl App {
                         / std::f64::consts::TAU)
                         .floor() as u32)
                         .min(3);
-                    let Some(peg) = resolved_pegs.get(wrap.peg) else { continue };
+                    let Some(peg) = resolved_pegs.get(wrap.peg) else {
+                        continue;
+                    };
                     let center = self.to_screen(origin, peg.center);
                     for layer in 1..=turns {
                         painter.circle_stroke(
@@ -3572,7 +5511,13 @@ impl App {
                 let preview_center = self.to_screen(origin, p);
                 let preview_radius = self.custom_radius as f32 * self.view.zoom;
                 if self.doc.peg_appearance.shape == crate::model::PegShape::RoundedSquare {
-                    painter.rect_stroke(Rect::from_center_size(preview_center, Vec2::splat(preview_radius * 2.0)), (self.doc.peg_appearance.rounding as f32 * self.view.zoom).min(preview_radius), Stroke::new(1.5, color));
+                    painter.rect_stroke(
+                        Rect::from_center_size(preview_center, Vec2::splat(preview_radius * 2.0)),
+                        (self.doc.peg_appearance.rounding as f32 * self.view.zoom)
+                            .min(preview_radius),
+                        Stroke::new(1.5, color),
+                        egui::StrokeKind::Inside,
+                    );
                 } else {
                     painter.circle_stroke(preview_center, preview_radius, Stroke::new(1.5, color));
                 }
@@ -3580,9 +5525,17 @@ impl App {
             }
         }
 
+        // ガイドとラベルはシェイプや円より前面に描き、文字が縁の下へ
+        // 隠れないようにする。
+        self.draw_font_metric_guides(&painter, origin);
+
         let minimap_alpha = response.ctx.animate_value_with_time(
             Id::new("minimap-alpha"),
-            if self.view_overlay_timer > 0.0 { 1.0 } else { 0.0 },
+            if self.view_overlay_timer > 0.0 {
+                1.0
+            } else {
+                0.0
+            },
             1.0,
         );
         if minimap_alpha > 0.01 {
@@ -3606,7 +5559,12 @@ impl App {
 
             let bounds = if face_min.x.is_finite() && face_min.y.is_finite() {
                 let pad = self.world_unit(30.0);
-                (face_min.x - pad, face_min.y - pad, face_max.x + pad, face_max.y + pad)
+                (
+                    face_min.x - pad,
+                    face_min.y - pad,
+                    face_max.x + pad,
+                    face_max.y + pad,
+                )
             } else {
                 let view_min = self.to_world(origin, rect.min);
                 let view_max = self.to_world(origin, rect.max);
@@ -3651,19 +5609,32 @@ impl App {
             painter.rect_filled(
                 map_rect,
                 6.0,
-                Color32::from_rgba_unmultiplied(colors.bg.r(), colors.bg.g(), colors.bg.b(), bg_alpha),
+                Color32::from_rgba_unmultiplied(
+                    colors.bg.r(),
+                    colors.bg.g(),
+                    colors.bg.b(),
+                    bg_alpha,
+                ),
             );
             painter.rect_stroke(
                 map_rect,
                 6.0,
                 Stroke::new(
                     1.0,
-                    Color32::from_rgba_unmultiplied(colors.peg_stroke.r(), colors.peg_stroke.g(), colors.peg_stroke.b(), stroke_alpha),
+                    Color32::from_rgba_unmultiplied(
+                        colors.peg_stroke.r(),
+                        colors.peg_stroke.g(),
+                        colors.peg_stroke.b(),
+                        stroke_alpha,
+                    ),
                 ),
+                egui::StrokeKind::Inside,
             );
-            if let Some(shape) =
-                build_faces_mesh(&map_polys, Pos2::new(0.0, 0.0), Color32::from_rgba_unmultiplied(160, 160, 160, face_alpha))
-            {
+            if let Some(shape) = build_faces_mesh(
+                &map_polys,
+                Pos2::new(0.0, 0.0),
+                Color32::from_rgba_unmultiplied(160, 160, 160, face_alpha),
+            ) {
                 if let egui::Shape::Mesh(mesh) = shape {
                     painter.add(egui::Shape::mesh(mesh));
                 }
@@ -3674,16 +5645,15 @@ impl App {
             let v0 = to_map(view_min);
             let v1 = to_map(view_max);
             painter.add(egui::Shape::line(
-                vec![
-                    v0,
-                    Pos2::new(v1.x, v0.y),
-                    v1,
-                    Pos2::new(v0.x, v1.y),
-                    v0,
-                ],
+                vec![v0, Pos2::new(v1.x, v0.y), v1, Pos2::new(v0.x, v1.y), v0],
                 Stroke::new(
                     1.0,
-                    Color32::from_rgba_unmultiplied(180, 220, 255, (minimap_alpha * 220.0).round() as u8),
+                    Color32::from_rgba_unmultiplied(
+                        180,
+                        220,
+                        255,
+                        (minimap_alpha * 220.0).round() as u8,
+                    ),
                 ),
             ));
         }
@@ -3729,6 +5699,7 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_save_operation(ctx);
         if !ENABLE_EXPERIMENTAL_SQUARE_PEGS {
             self.doc.peg_appearance.shape = crate::model::PegShape::Circle;
         }
@@ -3737,7 +5708,10 @@ impl eframe::App for App {
         }
         let redo = ctx.input_mut(|i| i.consume_shortcut(&SC_REDO) || i.consume_shortcut(&SC_REDO2));
         let undo = ctx.input_mut(|i| i.consume_shortcut(&SC_UNDO));
-        if redo {
+        let save = ctx.input_mut(|i| i.consume_shortcut(&SC_SAVE));
+        if save {
+            self.save_current_workspace();
+        } else if redo {
             self.do_redo();
         } else if undo {
             if self.draw.is_some() {
@@ -3745,6 +5719,19 @@ impl eframe::App for App {
                 self.undo_last_catch();
             } else {
                 self.do_undo();
+            }
+        }
+        if self.workspace_mode == WorkspaceMode::Font
+            && self.draw.is_none()
+            && !ctx.wants_keyboard_input()
+        {
+            let previous =
+                ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::ArrowLeft));
+            let next = ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::ArrowRight));
+            if previous && self.font_project.active_glyph > 0 {
+                self.switch_glyph(self.font_project.active_glyph - 1);
+            } else if next && self.font_project.active_glyph + 1 < self.font_project.glyphs.len() {
+                self.switch_glyph(self.font_project.active_glyph + 1);
             }
         }
         // テキスト編集中（名前変更など）は単キーショートカットを無効化
@@ -3769,13 +5756,38 @@ impl eframe::App for App {
         self.apply_theme(ctx);
 
         egui::TopBottomPanel::top("toolbar")
-            .exact_height(32.0)
+            .exact_height(42.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(ctx.style().visuals.panel_fill)
+                    .stroke(Stroke::new(
+                        1.0,
+                        ctx.style().visuals.widgets.inactive.bg_stroke.color,
+                    ))
+                    .inner_margin(egui::Margin::symmetric(10, 6)),
+            )
             .show(ctx, |ui| self.toolbar(ui));
         egui::TopBottomPanel::bottom("statusbar")
-            .exact_height(24.0)
+            .exact_height(28.0)
             .show(ctx, |ui| self.status_bar(ui));
+        egui::SidePanel::left("fixed-tool-sidebar")
+            .exact_width(68.0)
+            .resizable(false)
+            .frame(
+                egui::Frame::new()
+                    .fill(ctx.style().visuals.panel_fill)
+                    .stroke(Stroke::new(
+                        1.0,
+                        ctx.style().visuals.widgets.inactive.bg_stroke.color,
+                    ))
+                    .inner_margin(egui::Margin::symmetric(8, 4)),
+            )
+            .show(ctx, |ui| self.left_tool_sidebar(ui));
         // DockState と App の二重借用を避けるため一時的に取り出す
-        let mut dock = std::mem::replace(&mut self.dock, DockState::new(vec![DockTab::Canvas]));
+        let mut dock = std::mem::replace(
+            &mut self.dock,
+            DockState::new(vec![DockTab::Canvas, DockTab::Proof]),
+        );
         let colors = self.theme_colors();
         let mut dock_style = egui_dock::Style::from_egui(ctx.style().as_ref());
         // 区切り線の既定色は黒なので、テーマの枠色に上書きしてライトモードで
@@ -3789,7 +5801,7 @@ impl eframe::App for App {
         dock_style.tab_bar.hline_color = colors.border;
         dock_style.tab.tab_body.bg_fill = colors.panel;
         dock_style.tab.tab_body.stroke = Stroke::NONE;
-        dock_style.tab.tab_body.inner_margin = egui::Margin::same(10.0);
+        dock_style.tab.tab_body.inner_margin = egui::Margin::same(10);
         DockArea::new(&mut dock)
             .style(dock_style)
             // 常時表示の×ボタンは煩いので消す（パネルの開閉は上部「パネル」メニュー）
@@ -3797,10 +5809,6 @@ impl eframe::App for App {
             .show_window_close_buttons(false)
             .show(ctx, &mut AppTabViewer { app: self });
         self.dock = dock;
-
-        // ドックの上に浮く、細くて動かせるツールパレット
-        self.tool_palette(ctx);
-        self.alignment_palette(ctx);
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
@@ -3821,6 +5829,7 @@ impl TabViewer for AppTabViewer<'_> {
     fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
         match tab {
             DockTab::Canvas => "キャンバス".into(),
+            DockTab::Proof => "試打".into(),
             DockTab::Glyphs => "グリフ".into(),
             DockTab::Layers => "レイヤー".into(),
             DockTab::Circles => "円".into(),
@@ -3834,11 +5843,11 @@ impl TabViewer for AppTabViewer<'_> {
     }
 
     fn closeable(&mut self, tab: &mut Self::Tab) -> bool {
-        *tab != DockTab::Canvas
+        !matches!(*tab, DockTab::Canvas | DockTab::Proof)
     }
 
     fn allowed_in_windows(&self, tab: &mut Self::Tab) -> bool {
-        *tab != DockTab::Canvas
+        !matches!(*tab, DockTab::Canvas | DockTab::Proof)
     }
 }
 
@@ -3851,7 +5860,8 @@ fn tool_icon_button(ui: &mut egui::Ui, active: bool, tool: Tool, tooltip: &str) 
         ui.painter()
             .rect_filled(rect.shrink(1.0), 4.0, ui.visuals().selection.bg_fill);
     } else if resp.hovered() {
-        ui.painter().rect_filled(rect.shrink(1.0), 4.0, visuals.bg_fill);
+        ui.painter()
+            .rect_filled(rect.shrink(1.0), 4.0, visuals.bg_fill);
     }
     let color = if active {
         ui.visuals().selection.stroke.color
@@ -3902,7 +5912,7 @@ fn tool_icon_button(ui: &mut egui::Ui, active: bool, tool: Tool, tooltip: &str) 
             p.line_segment([top + n, mid + n], Stroke::new(1.3, color));
             p.line_segment([top - n, mid - n], Stroke::new(1.3, color));
             p.line_segment([top + n, top - n], Stroke::new(1.3, color)); // 消しゴム側
-            // 先端チップ（塗り三角）
+                                                                         // 先端チップ（塗り三角）
             p.add(egui::Shape::convex_polygon(
                 vec![mid + n, mid - n, tip],
                 color,
@@ -3935,19 +5945,24 @@ fn align_icon_button(ui: &mut egui::Ui, axis: AlignAxis, tooltip: &str) -> egui:
         ui.visuals().text_color()
     };
     if response.hovered() {
-        ui.painter().rect_filled(rect.shrink(1.0), 4.0, ui.visuals().widgets.hovered.bg_fill);
+        ui.painter()
+            .rect_filled(rect.shrink(1.0), 4.0, ui.visuals().widgets.hovered.bg_fill);
     }
     let c = rect.center();
     let stroke = Stroke::new(1.25, color);
     let guide = Stroke::new(0.9, color.gamma_multiply(0.55));
-    let horizontal = matches!(axis, AlignAxis::Left | AlignAxis::CenterX | AlignAxis::Right);
+    let horizontal = matches!(
+        axis,
+        AlignAxis::Left | AlignAxis::CenterX | AlignAxis::Right
+    );
     if horizontal {
         let gx = match axis {
             AlignAxis::Left => c.x - 7.0,
             AlignAxis::Right => c.x + 7.0,
             _ => c.x,
         };
-        ui.painter().line_segment([Pos2::new(gx, c.y - 9.0), Pos2::new(gx, c.y + 9.0)], guide);
+        ui.painter()
+            .line_segment([Pos2::new(gx, c.y - 9.0), Pos2::new(gx, c.y + 9.0)], guide);
         for (i, width) in [8.0, 5.0, 10.0].iter().enumerate() {
             let y = c.y - 6.0 + i as f32 * 6.0;
             let (x1, x2) = match axis {
@@ -3955,7 +5970,8 @@ fn align_icon_button(ui: &mut egui::Ui, axis: AlignAxis, tooltip: &str) -> egui:
                 AlignAxis::Right => (gx - *width, gx),
                 _ => (gx - *width * 0.5, gx + *width * 0.5),
             };
-            ui.painter().line_segment([Pos2::new(x1, y), Pos2::new(x2, y)], stroke);
+            ui.painter()
+                .line_segment([Pos2::new(x1, y), Pos2::new(x2, y)], stroke);
         }
     } else {
         let gy = match axis {
@@ -3963,7 +5979,8 @@ fn align_icon_button(ui: &mut egui::Ui, axis: AlignAxis, tooltip: &str) -> egui:
             AlignAxis::Bottom => c.y + 7.0,
             _ => c.y,
         };
-        ui.painter().line_segment([Pos2::new(c.x - 9.0, gy), Pos2::new(c.x + 9.0, gy)], guide);
+        ui.painter()
+            .line_segment([Pos2::new(c.x - 9.0, gy), Pos2::new(c.x + 9.0, gy)], guide);
         for (i, width) in [8.0, 5.0, 10.0].iter().enumerate() {
             let x = c.x - 6.0 + i as f32 * 6.0;
             let (y1, y2) = match axis {
@@ -3971,7 +5988,8 @@ fn align_icon_button(ui: &mut egui::Ui, axis: AlignAxis, tooltip: &str) -> egui:
                 AlignAxis::Bottom => (gy - *width, gy),
                 _ => (gy - *width * 0.5, gy + *width * 0.5),
             };
-            ui.painter().line_segment([Pos2::new(x, y1), Pos2::new(x, y2)], stroke);
+            ui.painter()
+                .line_segment([Pos2::new(x, y1), Pos2::new(x, y2)], stroke);
         }
     }
     response.on_hover_text(tooltip)
@@ -3983,7 +6001,8 @@ fn theme_icon_button(ui: &mut egui::Ui, dark: bool) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     let visuals = ui.style().interact(&resp);
     if resp.hovered() {
-        ui.painter().rect_filled(rect.shrink(1.0), 4.0, visuals.bg_fill);
+        ui.painter()
+            .rect_filled(rect.shrink(1.0), 4.0, visuals.bg_fill);
     }
     let color = visuals.fg_stroke.color;
     let c = rect.center();
@@ -4003,7 +6022,11 @@ fn theme_icon_button(ui: &mut egui::Ui, dark: bool) -> egui::Response {
         p.circle_filled(c, 6.0, color);
         p.circle_filled(Pos2::new(c.x + 3.0, c.y - 2.2), 5.4, bg);
     }
-    resp.on_hover_text(if dark { "ライトモードへ" } else { "ダークモードへ" })
+    resp.on_hover_text(if dark {
+        "ライトモードへ"
+    } else {
+        "ダークモードへ"
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -4031,7 +6054,12 @@ fn icon_toggle_button(
     let color = if on {
         ui.visuals().selection.stroke.color
     } else {
-        ui.visuals().widgets.inactive.fg_stroke.color.gamma_multiply(0.75)
+        ui.visuals()
+            .widgets
+            .inactive
+            .fg_stroke
+            .color
+            .gamma_multiply(0.75)
     };
     let c = rect.center();
     match kind {
@@ -4078,15 +6106,15 @@ fn scrub_value(
     ui.horizontal(|ui| {
         let colors_text3 = ui.visuals().weak_text_color();
         // ラベルチップ
-        egui::Frame::none()
+        egui::Frame::new()
             .fill(ui.visuals().faint_bg_color)
-            .rounding(egui::Rounding {
-                nw: 2.0,
-                sw: 2.0,
-                ne: 0.0,
-                se: 0.0,
+            .corner_radius(egui::CornerRadius {
+                nw: 2,
+                sw: 2,
+                ne: 0,
+                se: 0,
             })
-            .inner_margin(egui::Margin::symmetric(6.0, 2.0))
+            .inner_margin(egui::Margin::symmetric(6, 2))
             .show(ui, |ui| {
                 ui.label(egui::RichText::new(label).color(colors_text3).small());
             });
@@ -4124,8 +6152,11 @@ fn row_frame<R>(ui: &mut egui::Ui, selected: bool, add: impl FnOnce(&mut egui::U
         ui.painter()
             .rect_filled(bg_rect, 5.0, ui.visuals().selection.bg_fill);
     } else if hovered {
-        ui.painter()
-            .rect_filled(bg_rect, 5.0, ui.visuals().widgets.hovered.bg_fill.gamma_multiply(0.5));
+        ui.painter().rect_filled(
+            bg_rect,
+            5.0,
+            ui.visuals().widgets.hovered.bg_fill.gamma_multiply(0.5),
+        );
     }
     let inner = bg_rect.shrink2(Vec2::new(6.0, 2.0));
     let mut child = ui.new_child(
@@ -4167,7 +6198,8 @@ fn eye_button(ui: &mut egui::Ui, visible: bool) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
     let visuals = ui.style().interact(&resp);
     if resp.hovered() {
-        ui.painter().rect_filled(rect.shrink(1.0), 4.0, visuals.bg_fill);
+        ui.painter()
+            .rect_filled(rect.shrink(1.0), 4.0, visuals.bg_fill);
     }
     // 表示/非表示で色は変えず、目のアイコン（開き/斜線）だけで区別する
     let color = visuals.fg_stroke.color.gamma_multiply(0.85);
@@ -4184,8 +6216,10 @@ fn eye_button(ui: &mut egui::Ui, visible: bool) -> egui::Response {
         top.push(Pos2::new(x, c.y - arc));
         bottom.push(Pos2::new(x, c.y + arc));
     }
-    ui.painter().add(egui::Shape::line(top, Stroke::new(1.2, color)));
-    ui.painter().add(egui::Shape::line(bottom, Stroke::new(1.2, color)));
+    ui.painter()
+        .add(egui::Shape::line(top, Stroke::new(1.2, color)));
+    ui.painter()
+        .add(egui::Shape::line(bottom, Stroke::new(1.2, color)));
     if visible {
         ui.painter().circle_filled(c, size * 0.11, color);
     } else {
@@ -4198,7 +6232,11 @@ fn eye_button(ui: &mut egui::Ui, visible: bool) -> egui::Response {
             Stroke::new(1.2, color),
         );
     }
-    resp.on_hover_text(if visible { "非表示にする" } else { "表示する" })
+    resp.on_hover_text(if visible {
+        "非表示にする"
+    } else {
+        "表示する"
+    })
 }
 
 fn point_in_polygon(p: Point, poly: &[Point]) -> bool {
@@ -4231,11 +6269,7 @@ fn segments_intersect(a1: Point, a2: Point, b1: Point, b2: Point) -> bool {
         let max_x = a.x.max(b.x) + 1e-9;
         let min_y = a.y.min(b.y) - 1e-9;
         let max_y = a.y.max(b.y) + 1e-9;
-        c.x >= min_x
-            && c.x <= max_x
-            && c.y >= min_y
-            && c.y <= max_y
-            && orient(a, b, c).abs() <= eps
+        c.x >= min_x && c.x <= max_x && c.y >= min_y && c.y <= max_y && orient(a, b, c).abs() <= eps
     }
 
     let o1 = orient(a1, a2, b1);
@@ -4287,7 +6321,10 @@ fn build_faces_mesh(faces: &[Vec<Point>], origin: Pos2, color: Color32) -> Optio
             (origin.y as f64 + pts[0].y) as f32,
         ));
         for p in pts.iter().skip(1) {
-            builder.line_to(lpoint((origin.x as f64 + p.x) as f32, (origin.y as f64 + p.y) as f32));
+            builder.line_to(lpoint(
+                (origin.x as f64 + p.x) as f32,
+                (origin.y as f64 + p.y) as f32,
+            ));
         }
         builder.close();
     }
@@ -4323,7 +6360,9 @@ fn build_faces_mesh(faces: &[Vec<Point>], origin: Pos2, color: Color32) -> Optio
 /// 日本語表示用のシステムフォントを読み込んでフォールバックに追加する
 fn load_first_valid_font(paths: &[&str]) -> Option<Vec<u8>> {
     for path in paths {
-        let Ok(bytes) = std::fs::read(path) else { continue };
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
         if ab_glyph::FontArc::try_from_vec(bytes.clone()).is_ok() {
             return Some(bytes);
         }
@@ -4368,15 +6407,14 @@ fn install_cjk_fonts(ctx: &egui::Context) {
             scale: 1.0,
             y_offset_factor: 0.11,
             y_offset: 0.0,
-            baseline_offset_factor: 0.0,
         };
-        fonts.font_data.insert("cjk".to_owned(), data);
+        fonts.font_data.insert("cjk".to_owned(), data.into());
         order.push("cjk".to_owned());
     }
     if let Some(bytes) = load_first_valid_font(LATIN) {
         fonts
             .font_data
-            .insert("latin".to_owned(), egui::FontData::from_owned(bytes));
+            .insert("latin".to_owned(), egui::FontData::from_owned(bytes).into());
         order.push("latin".to_owned());
     }
     if order.is_empty() {
@@ -4400,9 +6438,21 @@ mod tests {
         let mut app = test_app();
         let target = PegRef::Grid { row: 0, col: 1 };
         app.doc.faces.push(Face {
-            start: StartAnchor { peg: PegRef::Grid { row: 0, col: 0 }, port: Port::Right },
-            elements: vec![Element::Wrap { peg: target, s: 1.0, turns: 0, exit_offset: 0.0, sweep_hint: 1.0 }],
-            name: String::new(), visible: true, baked: None, ignored_pegs: Vec::new(),
+            start: StartAnchor {
+                peg: PegRef::Grid { row: 0, col: 0 },
+                port: Port::Right,
+            },
+            elements: vec![Element::Wrap {
+                peg: target,
+                s: 1.0,
+                turns: 0,
+                exit_offset: 0.0,
+                sweep_hint: 1.0,
+            }],
+            name: String::new(),
+            visible: true,
+            baked: None,
+            ignored_pegs: Vec::new(),
         });
         app.set_single_selection(Some(Selection::PegRef(target)));
         app.delete_selected();
@@ -4416,10 +6466,25 @@ mod tests {
         app.canvas_size = Vec2::new(1280.0, 800.0);
         app.canvas_center = Point::new(640.0, 400.0);
         let mk = |c0: i32, c1: i32| Face {
-            start: StartAnchor { peg: PegRef::Grid { row: 0, col: c0 }, port: Port::Top },
+            start: StartAnchor {
+                peg: PegRef::Grid { row: 0, col: c0 },
+                port: Port::Top,
+            },
             elements: vec![
-                Element::Wrap { peg: PegRef::Grid { row: 0, col: c0 }, s: 1.0, turns: 0, exit_offset: 0.0, sweep_hint: 3.0 },
-                Element::Wrap { peg: PegRef::Grid { row: 0, col: c1 }, s: 1.0, turns: 0, exit_offset: 0.0, sweep_hint: 3.0 },
+                Element::Wrap {
+                    peg: PegRef::Grid { row: 0, col: c0 },
+                    s: 1.0,
+                    turns: 0,
+                    exit_offset: 0.0,
+                    sweep_hint: 3.0,
+                },
+                Element::Wrap {
+                    peg: PegRef::Grid { row: 0, col: c1 },
+                    s: 1.0,
+                    turns: 0,
+                    exit_offset: 0.0,
+                    sweep_hint: 3.0,
+                },
             ],
             name: String::new(),
             visible: true,
@@ -4453,21 +6518,48 @@ mod tests {
             visible: true,
         });
         app.doc.faces.push(Face {
-            start: StartAnchor { peg: PegRef::Grid { row: 0, col: 0 }, port: Port::TopRight },
+            start: StartAnchor {
+                peg: PegRef::Grid { row: 0, col: 0 },
+                port: Port::TopRight,
+            },
             elements: vec![
-                Element::Wrap { peg: PegRef::Grid { row: 0, col: 1 }, s: 1.0, turns: 0, exit_offset: 0.2, sweep_hint: 1.0 },
-                Element::Wrap { peg: PegRef::Sub { row: 0, col: 0 }, s: -1.0, turns: 0, exit_offset: 0.0, sweep_hint: 2.0 },
-                Element::Wrap { peg: PegRef::Custom { id: 0 }, s: 1.0, turns: 1, exit_offset: -0.1, sweep_hint: 0.1 },
+                Element::Wrap {
+                    peg: PegRef::Grid { row: 0, col: 1 },
+                    s: 1.0,
+                    turns: 0,
+                    exit_offset: 0.2,
+                    sweep_hint: 1.0,
+                },
+                Element::Wrap {
+                    peg: PegRef::Sub { row: 0, col: 0 },
+                    s: -1.0,
+                    turns: 0,
+                    exit_offset: 0.0,
+                    sweep_hint: 2.0,
+                },
+                Element::Wrap {
+                    peg: PegRef::Custom { id: 0 },
+                    s: 1.0,
+                    turns: 1,
+                    exit_offset: -0.1,
+                    sweep_hint: 0.1,
+                },
             ],
             visible: true,
-            name: String::new(), baked: None, ignored_pegs: Vec::new(),
+            name: String::new(),
+            baked: None,
+            ignored_pegs: Vec::new(),
         });
         for i in 0..600 {
             app.doc.grid.spacing = 40.0 + (i as f64 * 11.7) % 280.0;
             app.doc.grid.radius = (i as f64 * 5.3) % 100.0;
             app.doc.grid.catch = (i as f64 * 1.7) % 24.0;
             app.doc.grid.sub_radius = (i as f64 * 3.1) % 60.0;
-            app.doc.grid.scale_anchor = if i % 2 == 0 { ScaleAnchor::TopLeft } else { ScaleAnchor::Center };
+            app.doc.grid.scale_anchor = if i % 2 == 0 {
+                ScaleAnchor::TopLeft
+            } else {
+                ScaleAnchor::Center
+            };
             app.view.zoom = 0.2 + ((i as f32 * 0.37) % 3.8);
             app.rebuild_pegs(app.canvas_size);
             let rendered = app.materialized_faces();
@@ -4515,7 +6607,7 @@ mod tests {
     }
 
     #[test]
-    fn switching_glyphs_preserves_each_document_independently() {
+    fn workspace_modes_preserve_shape_document_independently() {
         let mut app = test_app();
         app.doc.custom_pegs.push(CustomPeg {
             id: 7,
@@ -4523,21 +6615,233 @@ mod tests {
             radius: 12.0,
             visible: true,
         });
+        let original_radius = app.doc.grid.radius;
+        app.push_history();
+        app.doc.grid.radius = 42.0;
+
+        app.switch_workspace_mode(WorkspaceMode::Font);
+        assert!(app.doc.custom_pegs.is_empty());
+
+        app.switch_workspace_mode(WorkspaceMode::Shape);
+        assert_eq!(app.doc.custom_pegs[0].id, 7);
+        assert_eq!(app.doc.grid.radius, 42.0);
+        app.do_undo();
+        assert_eq!(app.doc.grid.radius, original_radius);
+        assert_eq!(app.doc.custom_pegs[0].id, 7);
+    }
+
+    #[test]
+    fn workspace_snapshot_contains_shape_and_live_active_glyph() {
+        let mut app = test_app();
+        app.doc.grid.radius = 41.0;
+        app.switch_workspace_mode(WorkspaceMode::Font);
+        app.doc.grid.radius = 27.0;
+
+        let snapshot = app.workspace_snapshot();
+        assert_eq!(snapshot.shape.grid.radius, 41.0);
+        assert_eq!(
+            snapshot.font.glyphs[snapshot.font.active_glyph]
+                .document
+                .grid
+                .radius,
+            27.0
+        );
+        let encoded = serde_json::to_string(&snapshot).unwrap();
+        let decoded: WorkspaceFile = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.mode, WorkspaceMode::Font);
+        assert_eq!(decoded.shape.grid.radius, 41.0);
+    }
+
+    #[test]
+    fn switching_glyphs_restores_document_and_undo_history() {
+        let mut app = test_app();
+        app.switch_workspace_mode(WorkspaceMode::Font);
+
+        let original_radius = app.doc.grid.radius;
+        app.push_history();
+        app.doc.grid.radius = 42.0;
 
         app.switch_glyph(1);
-        assert!(app.doc.custom_pegs.is_empty());
-        assert_eq!(app.font_project.glyphs[0].document.custom_pegs.len(), 1);
+        app.push_history();
+        app.doc.grid.radius = 36.0;
 
-        app.doc.grid.radius = 42.0;
         app.switch_glyph(0);
-        assert_eq!(app.doc.custom_pegs[0].id, 7);
-        assert_eq!(app.font_project.glyphs[1].document.grid.radius, 42.0);
+        assert_eq!(app.doc.grid.radius, 42.0);
+        app.do_undo();
+        assert_eq!(app.doc.grid.radius, original_radius);
+    }
+
+    #[test]
+    fn background_save_uses_snapshot_while_editing_continues() {
+        let mut app = test_app();
+        app.doc.grid.radius = 42.0;
+        let path = std::env::temp_dir().join(format!(
+            "threadtype-save-test-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        app.start_background_save(path.clone(), SavePayload::Shape(app.doc.clone()), "test");
+        app.doc.grid.radius = 36.0;
+
+        let operation = app.save_operation.as_mut().unwrap();
+        let result = loop {
+            match operation
+                .receiver
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+            {
+                SaveEvent::Progress(_) => {}
+                SaveEvent::Finished(result) => break result,
+            }
+        };
+        result.unwrap();
+        let saved: Document = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved.grid.radius, 42.0);
+        assert_eq!(app.doc.grid.radius, 36.0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn onion_skin_uses_previous_glyph_document() {
+        let mut app = test_app();
+        app.switch_workspace_mode(WorkspaceMode::Font);
+        app.doc.faces.push(Face {
+            start: StartAnchor {
+                peg: PegRef::Grid { row: 0, col: 0 },
+                port: Port::Top,
+            },
+            elements: Vec::new(),
+            name: "previous".to_owned(),
+            visible: true,
+            baked: Some(crate::model::BakedShape {
+                rings: vec![vec![
+                    Point::new(10.0, 10.0),
+                    Point::new(80.0, 10.0),
+                    Point::new(40.0, 90.0),
+                ]],
+                bevel: 0.0,
+            }),
+            ignored_pegs: Vec::new(),
+        });
+        app.switch_glyph(1);
+        app.onion_skin = true;
+
+        let (character, rings) = app.glyph_rings(0).unwrap();
+        assert_eq!(character, 'A');
+        assert_eq!(rings.len(), 1);
+        assert_eq!(rings[0].len(), 3);
+    }
+
+    #[test]
+    fn onion_skin_can_read_next_glyph_document() {
+        let mut app = test_app();
+        app.switch_workspace_mode(WorkspaceMode::Font);
+        app.switch_glyph(2);
+        app.doc.faces.push(Face {
+            start: StartAnchor {
+                peg: PegRef::Grid { row: 0, col: 0 },
+                port: Port::Top,
+            },
+            elements: Vec::new(),
+            name: "next".to_owned(),
+            visible: true,
+            baked: Some(crate::model::BakedShape {
+                rings: vec![vec![
+                    Point::new(10.0, 10.0),
+                    Point::new(80.0, 10.0),
+                    Point::new(40.0, 90.0),
+                ]],
+                bevel: 0.0,
+            }),
+            ignored_pegs: Vec::new(),
+        });
+        app.switch_glyph(1);
+        app.onion_next = true;
+
+        let (character, rings) = app.glyph_rings(2).unwrap();
+        assert_eq!(character, 'C');
+        assert_eq!(rings.len(), 1);
+    }
+
+    #[test]
+    fn proof_outline_is_cached_until_the_glyph_changes() {
+        let mut app = test_app();
+        app.switch_workspace_mode(WorkspaceMode::Font);
+        app.doc.faces.push(Face {
+            start: StartAnchor {
+                peg: PegRef::Grid { row: 0, col: 0 },
+                port: Port::Top,
+            },
+            elements: Vec::new(),
+            name: "proof-cache".to_owned(),
+            visible: true,
+            baked: Some(crate::model::BakedShape {
+                rings: vec![vec![
+                    Point::new(0.0, 0.0),
+                    Point::new(100.0, 0.0),
+                    Point::new(100.0, 100.0),
+                    Point::new(0.0, 100.0),
+                ]],
+                bevel: 0.0,
+            }),
+            ignored_pegs: Vec::new(),
+        });
+        let (_, first) = app.proof_glyph_rings(0).unwrap();
+        let (_, second) = app.proof_glyph_rings(0).unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+
+        app.doc.faces[0].baked.as_mut().unwrap().rings[0][0].x = 10.0;
+        let (_, changed) = app.proof_glyph_rings(0).unwrap();
+        assert!(!Arc::ptr_eq(&second, &changed));
+    }
+
+    #[test]
+    fn proof_fill_adds_opposite_overlapping_faces_instead_of_knocking_them_out() {
+        let mut app = test_app();
+        app.switch_workspace_mode(WorkspaceMode::Font);
+        app.font_project.render_style = FontRenderStyle::Fill;
+        let ring = vec![
+            Point::new(0.0, 0.0),
+            Point::new(100.0, 0.0),
+            Point::new(100.0, 100.0),
+            Point::new(0.0, 100.0),
+        ];
+        for points in [ring.clone(), ring.into_iter().rev().collect()] {
+            app.doc.faces.push(Face {
+                start: StartAnchor {
+                    peg: PegRef::Grid { row: 0, col: 0 },
+                    port: Port::Top,
+                },
+                elements: Vec::new(),
+                name: "overlap".to_owned(),
+                visible: true,
+                baked: Some(crate::model::BakedShape {
+                    rings: vec![points],
+                    bevel: 0.0,
+                }),
+                ignored_pegs: Vec::new(),
+            });
+        }
+        let (_, rings) = app.proof_glyph_rings(0).unwrap();
+        let area: f64 = rings.iter().map(|ring| signed_area(ring).abs()).sum();
+        assert!(area > 9_000.0);
     }
 
     fn test_app() -> App {
+        let font_project = FontProject::default();
+        let glyph_count = font_project.glyphs.len();
         App {
             doc: Document::default(),
-            font_project: FontProject::default(),
+            workspace_mode: WorkspaceMode::Shape,
+            shape_document: Document::default(),
+            shape_undo: Vec::new(),
+            shape_redo: Vec::new(),
+            font_project,
+            glyph_undo: vec![Vec::new(); glyph_count],
+            glyph_redo: vec![Vec::new(); glyph_count],
             new_glyph_text: String::new(),
             undo: Vec::new(),
             redo: Vec::new(),
@@ -4568,6 +6872,23 @@ mod tests {
             face_name_snapshot: None,
             tool: Tool::Draw,
             status: String::new(),
+            shape_save_path: None,
+            font_save_path: None,
+            workspace_save_path: None,
+            save_operation: None,
+            onion_skin: false,
+            onion_next: false,
+            onion_opacity: 0.42,
+            onion_previous_color: Color32::from_rgb(116, 184, 255),
+            onion_next_color: Color32::from_rgb(255, 137, 174),
+            proof_text: String::new(),
+            proof_size: 64.0,
+            proof_tracking: 0.0,
+            proof_cache: HashMap::new(),
+            reference_font: None,
+            reference_font_opacity: 0.28,
+            reference_font_scale: 1.0,
+            reference_font_offset: Vec2::ZERO,
         }
     }
 
@@ -4592,7 +6913,7 @@ mod tests {
                 to: Point::new(0.0, 0.0),
             },
         ];
-        assert!(!app.has_penetration_on_lines(&segs));
+        assert!(!app.segments_self_intersect(&segs));
     }
 
     #[test]
@@ -4616,7 +6937,7 @@ mod tests {
                 to: Point::new(0.0, 0.0),
             },
         ];
-        assert!(app.has_penetration_on_lines(&segs));
+        assert!(app.segments_self_intersect(&segs));
     }
 
     #[test]
@@ -4634,6 +6955,32 @@ mod tests {
     }
 
     #[test]
+    fn zero_signed_area_self_crossing_still_has_shape_extent() {
+        let app = test_app();
+        let points = vec![
+            Point::new(0.0, 0.0),
+            Point::new(120.0, 120.0),
+            Point::new(0.0, 120.0),
+            Point::new(120.0, 0.0),
+            Point::new(0.0, 0.0),
+        ];
+        assert!(app.has_self_intersections(&points));
+        assert!(signed_area(&points).abs() < 1e-9);
+        assert!(path_has_two_dimensional_extent(&points));
+    }
+
+    #[test]
+    fn collinear_round_trip_remains_degenerate() {
+        let points = vec![
+            Point::new(0.0, 0.0),
+            Point::new(120.0, 0.0),
+            Point::new(30.0, 0.0),
+            Point::new(0.0, 0.0),
+        ];
+        assert!(!path_has_two_dimensional_extent(&points));
+    }
+
+    #[test]
     fn drawing_undo_uses_temporary_guard_not_persistent_ignore() {
         let mut app = test_app();
         let anchor = Point::new(0.0, 0.0);
@@ -4648,7 +6995,10 @@ mod tests {
                 }],
                 tip: Point::new(100.0, 0.0),
             },
-            start: StartAnchor { peg: PegRef::Grid { row: 0, col: 0 }, port: Port::Right },
+            start: StartAnchor {
+                peg: PegRef::Grid { row: 0, col: 0 },
+                port: Port::Right,
+            },
             start_point: anchor,
             elements: Vec::new(),
             armed: true,
@@ -4672,7 +7022,10 @@ mod tests {
         let mut app = test_app();
         app.draw = Some(ActiveDraw {
             th: Thread::new(Point::new(0.0, 0.0)),
-            start: StartAnchor { peg: PegRef::Grid { row: 0, col: 0 }, port: Port::Right },
+            start: StartAnchor {
+                peg: PegRef::Grid { row: 0, col: 0 },
+                port: Port::Right,
+            },
             start_point: Point::new(0.0, 0.0),
             elements: Vec::new(),
             armed: true,
@@ -4708,12 +7061,19 @@ mod tests {
         let mut app = test_app();
         app.doc.grid.spacing = 100.0;
         app.doc.faces.push(Face {
-            start: StartAnchor { peg: PegRef::Grid { row: 0, col: 0 }, port: Port::Top },
+            start: StartAnchor {
+                peg: PegRef::Grid { row: 0, col: 0 },
+                port: Port::Top,
+            },
             elements: Vec::new(),
             name: String::new(),
             visible: true,
             baked: Some(crate::model::BakedShape {
-                rings: vec![vec![Point::new(1.0, 2.0), Point::new(3.0, 2.0), Point::new(1.0, 4.0)]],
+                rings: vec![vec![
+                    Point::new(1.0, 2.0),
+                    Point::new(3.0, 2.0),
+                    Point::new(1.0, 4.0),
+                ]],
                 bevel: 0.0,
             }),
             ignored_pegs: Vec::new(),
@@ -4737,7 +7097,9 @@ mod tests {
         let variants = winding_variants(&[wrap(0), wrap(1), wrap(2)]);
         assert_eq!(variants.len(), 8);
         assert!(variants.iter().any(|variant| {
-            variant.iter().all(|element| matches!(element, Element::Wrap { s, .. } if *s < 0.0))
+            variant
+                .iter()
+                .all(|element| matches!(element, Element::Wrap { s, .. } if *s < 0.0))
         }));
     }
 
@@ -4775,18 +7137,126 @@ mod tests {
             sweep_hint: std::f64::consts::PI,
         };
         let variants = winding_variants(&[wrap(0, 1), wrap(1, 0), wrap(0, 2)]);
-        assert_eq!(variants.len(), 4, "two unique contacts have four sign combinations");
+        assert_eq!(
+            variants.len(),
+            4,
+            "two unique contacts have four sign combinations"
+        );
         assert!(variants.iter().all(|variant| variant.len() == 2));
         assert!(matches!(
             variants[0][0],
-            Element::Wrap { peg: PegRef::Custom { id: 0 }, turns: 3, .. }
+            Element::Wrap {
+                peg: PegRef::Custom { id: 0 },
+                turns: 3,
+                ..
+            }
         ));
+    }
+
+    #[test]
+    fn nonconsecutive_revisited_peg_is_preserved_for_self_crossing_cycle() {
+        let wrap = |id| Element::Wrap {
+            peg: PegRef::Custom { id },
+            s: 1.0,
+            turns: 0,
+            exit_offset: 0.0,
+            sweep_hint: std::f64::consts::PI,
+        };
+        let variants = winding_variants(&[wrap(0), wrap(1), wrap(0), wrap(2)]);
+        assert_eq!(variants.len(), 16);
+        assert!(variants.iter().all(|variant| {
+            variant.len() == 4
+                && matches!(
+                    variant[0],
+                    Element::Wrap {
+                        peg: PegRef::Custom { id: 0 },
+                        ..
+                    }
+                )
+                && matches!(
+                    variant[2],
+                    Element::Wrap {
+                        peg: PegRef::Custom { id: 0 },
+                        ..
+                    }
+                )
+        }));
+    }
+
+    #[test]
+    fn revisited_peg_cycle_materializes_without_penetrating_pegs() {
+        let pegs = [
+            Peg {
+                center: Point::new(0.0, 0.0),
+                radius: 40.0,
+                shape: crate::model::PegShape::Circle,
+                rounding: 0.0,
+            },
+            Peg {
+                center: Point::new(180.0, -140.0),
+                radius: 40.0,
+                shape: crate::model::PegShape::Circle,
+                rounding: 0.0,
+            },
+            Peg {
+                center: Point::new(180.0, 140.0),
+                radius: 40.0,
+                shape: crate::model::PegShape::Circle,
+                rounding: 0.0,
+            },
+        ];
+        let refs = [
+            PegRef::Custom { id: 0 },
+            PegRef::Custom { id: 1 },
+            PegRef::Custom { id: 2 },
+        ];
+        let wrap = |peg| Element::Wrap {
+            peg,
+            s: 1.0,
+            turns: 0,
+            exit_offset: 0.0,
+            sweep_hint: std::f64::consts::PI,
+        };
+        let resolver = |peg_ref: &PegRef| match *peg_ref {
+            PegRef::Custom { id } => pegs.get(id as usize).copied(),
+            _ => None,
+        };
+        let obstacles: Vec<_> = refs.iter().copied().zip(pegs.iter().copied()).collect();
+        let candidate =
+            winding_variants(&[wrap(refs[0]), wrap(refs[1]), wrap(refs[0]), wrap(refs[2])])
+                .into_iter()
+                .find_map(|elements| {
+                    let face = Face {
+                        start: StartAnchor {
+                            peg: refs[0],
+                            port: Port::Top,
+                        },
+                        elements,
+                        name: String::new(),
+                        visible: true,
+                        baked: None,
+                        ignored_pegs: Vec::new(),
+                    };
+                    let segments = materialize_face_with_obstacles(&face, &resolver, &obstacles)?;
+                    (!segments_penetrate_pegs(&segments, &pegs)).then_some(segments)
+                })
+                .expect("a cycle that revisits one peg should still have a physical solution");
+        let revisited_arc_count = candidate
+            .iter()
+            .filter(|segment| {
+                matches!(segment, Seg::Arc { center, .. } if center.distance(pegs[0].center) < 1e-8)
+            })
+            .count();
+        assert_eq!(revisited_arc_count, 2);
     }
 
     #[test]
     fn one_circle_cannot_create_degenerate_closed_face() {
         let one = Face {
-            start: StartAnchor { peg: PegRef::Custom { id: 0 }, port: Port::Top },
+            start: StartAnchor {
+                peg: PegRef::Custom { id: 0 },
+                port: Port::Top,
+            },
             elements: vec![Element::Wrap {
                 peg: PegRef::Custom { id: 0 },
                 s: 1.0,
@@ -4819,7 +7289,10 @@ mod tests {
 
     #[test]
     fn single_circle_requires_half_turn_and_normalizes_to_full_circle() {
-        let start = StartAnchor { peg: PegRef::Custom { id: 0 }, port: Port::Top };
+        let start = StartAnchor {
+            peg: PegRef::Custom { id: 0 },
+            port: Port::Top,
+        };
         let refs = [start.peg];
         let make_thread = |sweep: f64| Thread {
             anchor: Point::new(0.0, -50.0),
@@ -4837,12 +7310,9 @@ mod tests {
             &refs,
         )
         .is_none());
-        let full = intentional_single_circle_wrap(
-            &make_thread(std::f64::consts::PI + 0.01),
-            start,
-            &refs,
-        )
-        .unwrap();
+        let full =
+            intentional_single_circle_wrap(&make_thread(std::f64::consts::PI + 0.01), start, &refs)
+                .unwrap();
         assert!(matches!(
             &full,
             Element::Wrap { sweep_hint, turns: 0, .. }
@@ -4856,12 +7326,14 @@ mod tests {
             baked: None,
             ignored_pegs: Vec::new(),
         };
-        let resolver = |peg_ref: &PegRef| (*peg_ref == start.peg).then_some(Peg {
-            center: Point::new(0.0, 0.0),
-            radius: 50.0,
-            shape: crate::model::PegShape::Circle,
-            rounding: 0.0,
-        });
+        let resolver = |peg_ref: &PegRef| {
+            (*peg_ref == start.peg).then_some(Peg {
+                center: Point::new(0.0, 0.0),
+                radius: 50.0,
+                shape: crate::model::PegShape::Circle,
+                rounding: 0.0,
+            })
+        };
         let segs = materialize_face(&face, &resolver).unwrap();
         let mut points = Vec::new();
         let app = test_app();
@@ -4892,7 +7364,6 @@ mod tests {
     }
 
     fn assert_simple_cycle_can_close(centers: &[Point], radii: &[f64]) {
-        let app = test_app();
         let pegs: Vec<Peg> = centers
             .iter()
             .zip(radii)
@@ -4920,11 +7391,15 @@ mod tests {
             PegRef::Custom { id } => pegs.get(id as usize).copied(),
             _ => None,
         };
-        let obstacles: Vec<(PegRef, Peg)> = refs.iter().copied().zip(pegs.iter().copied()).collect();
+        let obstacles: Vec<(PegRef, Peg)> =
+            refs.iter().copied().zip(pegs.iter().copied()).collect();
         let obstacle_pegs: Vec<Peg> = pegs.clone();
         let valid = winding_variants(&seed).into_iter().any(|elements| {
             let face = Face {
-                start: StartAnchor { peg: refs[0], port: Port::Top },
+                start: StartAnchor {
+                    peg: refs[0],
+                    port: Port::Top,
+                },
                 elements,
                 name: String::new(),
                 visible: true,
@@ -4934,10 +7409,12 @@ mod tests {
             let Some(segs) = materialize_face_with_obstacles(&face, &resolver, &obstacles) else {
                 return false;
             };
-            !app.has_penetration_on_lines(&segs)
-                && !segments_penetrate_pegs(&segs, &obstacle_pegs)
+            !segments_penetrate_pegs(&segs, &obstacle_pegs)
         });
-        assert!(valid, "at least one winding combination must form a valid cycle");
+        assert!(
+            valid,
+            "at least one winding combination must form a valid cycle"
+        );
     }
 
     #[test]

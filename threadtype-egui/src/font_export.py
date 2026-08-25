@@ -29,21 +29,23 @@ def notdef_glyph():
     return pen.glyph()
 
 
-def glyph_from_svg(svg, advance):
+def glyph_from_svg(svg, font_metrics, left_side_bearing=0):
     root = ET.fromstring(svg)
-    view_box = [float(value) for value in root.attrib.get("viewBox", "0 0 100 100").split()]
-    min_x, min_y, width, height = view_box
     paths = root.findall(".//{http://www.w3.org/2000/svg}path")
     if not paths or not any(path.attrib.get("d", "").strip() for path in paths):
         return empty_glyph()
-    width = max(width, 1.0)
-    height = max(height, 1.0)
-    scale = min(max(advance - 80, 1) / width, 700.0 / height)
-    tx = (advance - width * scale) * 0.5 - min_x * scale
-    ty = 80.0 + (min_y + height) * scale
+    ascender_y = float(font_metrics["ascender_y"])
+    descender_y = float(font_metrics["descender_y"])
+    baseline_y = float(font_metrics["baseline_y"])
+    origin_x = float(font_metrics["origin_x"])
+    y_scale = 1000.0 / max(descender_y - ascender_y, 40.0)
+    # 作図時の縦横比を保持する。左右の箱幅は変形ではなく送り幅として扱う。
+    x_scale = y_scale
+    tx = -origin_x * x_scale + float(left_side_bearing)
+    ty = baseline_y * y_scale
     target = TTGlyphPen(None)
     quadratic = Cu2QuPen(target, max_err=1.0, reverse_direction=True)
-    transformed = TransformPen(quadratic, (scale, 0, 0, -scale, tx, ty))
+    transformed = TransformPen(quadratic, (x_scale, 0, 0, -y_scale, tx, ty))
     for path in paths:
         data = path.attrib.get("d", "").strip()
         if data:
@@ -60,6 +62,34 @@ def main(payload_path, output_path):
     with open(payload_path, "r", encoding="utf-8") as handle:
         payload = json.load(handle)
 
+    font_metrics = payload.get(
+        "metrics",
+        {
+            "origin_x": 70.0,
+            "right_x": 550.0,
+            "ascender_y": 70.0,
+            "x_height_y": 310.0,
+            "baseline_y": 710.0,
+            "descender_y": 870.0,
+        },
+    )
+    metric_scale = 1000.0 / max(
+        float(font_metrics["descender_y"]) - float(font_metrics["ascender_y"]),
+        40.0,
+    )
+    ascender = round(
+        (float(font_metrics["baseline_y"]) - float(font_metrics["ascender_y"]))
+        * metric_scale
+    )
+    descender = -round(
+        (float(font_metrics["descender_y"]) - float(font_metrics["baseline_y"]))
+        * metric_scale
+    )
+    x_height = round(
+        (float(font_metrics["baseline_y"]) - float(font_metrics["x_height_y"]))
+        * metric_scale
+    )
+
     glyph_order = [".notdef"]
     glyphs = {".notdef": notdef_glyph()}
     metrics = {".notdef": (600, 0)}
@@ -73,8 +103,11 @@ def main(payload_path, output_path):
         seen.add(name)
         advance = max(100, int(item.get("advance_width", 600)))
         glyph_order.append(name)
-        glyphs[name] = glyph_from_svg(item.get("svg", ""), advance)
-        metrics[name] = (advance, 0)
+        left_side_bearing = int(item.get("left_side_bearing", 0))
+        glyphs[name] = glyph_from_svg(
+            item.get("svg", ""), font_metrics, left_side_bearing
+        )
+        metrics[name] = (advance, left_side_bearing)
         cmap[ord(item["character"])] = name
 
     family = payload.get("family_name", "ThreadType")
@@ -87,13 +120,14 @@ def main(payload_path, output_path):
     builder.setupCharacterMap(cmap)
     builder.setupGlyf(glyphs)
     builder.setupHorizontalMetrics(metrics)
-    builder.setupHorizontalHeader(ascent=800, descent=-200)
+    builder.setupHorizontalHeader(ascent=ascender, descent=descender)
     builder.setupOS2(
-        sTypoAscender=800,
-        sTypoDescender=-200,
+        sTypoAscender=ascender,
+        sTypoDescender=descender,
         sTypoLineGap=0,
-        usWinAscent=800,
-        usWinDescent=200,
+        usWinAscent=max(0, ascender),
+        usWinDescent=max(0, -descender),
+        sxHeight=x_height,
     )
     builder.setupNameTable(
         {
