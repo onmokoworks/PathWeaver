@@ -17,6 +17,7 @@ use egui::{
 };
 use egui_dock::{DockArea, DockState, NodeIndex, TabViewer};
 use kurbo::Point;
+use lucide_icons::Icon as LucideIcon;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
@@ -360,7 +361,7 @@ impl Theme {
         } else {
             egui::Visuals::light()
         };
-        visuals.widgets.inactive.bg_fill = self.bg1;
+        visuals.widgets.inactive.bg_fill = Color32::TRANSPARENT;
         visuals.widgets.active.bg_fill = self.bg2;
         visuals.widgets.hovered.bg_fill = self.bg2;
         visuals.widgets.noninteractive.bg_fill = self.panel;
@@ -393,9 +394,9 @@ impl Theme {
             spread: 0,
             color: Color32::from_black_alpha(if dark { 80 } else { 28 }),
         };
-        visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, self.border);
-        visuals.widgets.active.bg_stroke = Stroke::new(1.0, self.border);
-        visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, self.border);
+        visuals.widgets.inactive.bg_stroke = Stroke::NONE;
+        visuals.widgets.active.bg_stroke = Stroke::NONE;
+        visuals.widgets.hovered.bg_stroke = Stroke::NONE;
         visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, self.border);
         // After Effects風: トラックは細い一本線、操作点は小さな丸。
         // 値まで塗りつぶさず、位置そのものをノブで読む編集UIにする。
@@ -405,29 +406,32 @@ impl Theme {
 
         let mut style = (*ctx.style()).clone();
         style.text_styles = [
-            (TextStyle::Body, FontId::new(13.0, FontFamily::Proportional)),
+            (TextStyle::Body, FontId::new(11.0, FontFamily::Proportional)),
             (
                 TextStyle::Button,
-                FontId::new(13.0, FontFamily::Proportional),
+                FontId::new(11.0, FontFamily::Proportional),
             ),
             (
                 TextStyle::Small,
-                FontId::new(11.5, FontFamily::Proportional),
+                FontId::new(10.0, FontFamily::Proportional),
             ),
             (
                 TextStyle::Heading,
-                FontId::new(14.0, FontFamily::Proportional),
+                FontId::new(12.0, FontFamily::Proportional),
             ),
             (
                 TextStyle::Monospace,
-                FontId::new(13.0, FontFamily::Monospace),
+                FontId::new(11.0, FontFamily::Monospace),
             ),
         ]
         .into_iter()
         .collect();
-        style.spacing.item_spacing = Vec2::new(8.0, 7.0);
-        style.spacing.button_padding = Vec2::new(10.0, 4.0);
+        style.spacing.item_spacing = Vec2::new(6.0, 4.0);
+        style.spacing.button_padding = Vec2::new(8.0, 2.0);
         style.spacing.interact_size.y = 26.0;
+        style.spacing.icon_width = 12.0;
+        style.spacing.icon_width_inner = 6.0;
+        style.spacing.icon_spacing = 4.0;
         style.spacing.slider_width = 144.0;
         style.spacing.slider_rail_height = 1.5;
         ctx.set_style(style);
@@ -3280,10 +3284,12 @@ impl App {
             ui.checkbox(&mut self.onion_next, language.text("次", "Next"));
             ui.color_edit_button_srgba(&mut self.onion_next_color);
         });
-        compact_slider_row(
+        mock_slider_row_f32(
             ui,
             language.text("透明度", "Opacity"),
-            egui::Slider::new(&mut self.onion_opacity, 0.05..=1.0).fixed_decimals(2),
+            &mut self.onion_opacity,
+            0.05..=1.0,
+            2,
         );
         section_header(ui, language.text("下書きフォント", "Reference font"));
         ui.horizontal_wrapped(|ui| {
@@ -3302,16 +3308,18 @@ impl App {
             }
         });
         if self.reference_font.is_some() {
-            compact_slider_row(
+            mock_slider_row_f32(
                 ui,
                 language.text("濃度", "Opacity"),
-                egui::Slider::new(&mut self.reference_font_opacity, 0.03..=0.8).fixed_decimals(2),
+                &mut self.reference_font_opacity,
+                0.03..=0.8,
+                2,
             );
-            compact_slider_row(
+            mock_percent_slider_row_f32(
                 ui,
                 language.text("サイズ", "Scale"),
-                egui::Slider::new(&mut self.reference_font_scale, 0.25..=2.0)
-                    .custom_formatter(|value, _| format!("{:.0}%", value * 100.0)),
+                &mut self.reference_font_scale,
+                0.25..=2.0,
             );
             ui.horizontal(|ui| {
                 ui.add(
@@ -3776,31 +3784,31 @@ impl App {
                 egui::Frame::new()
                     .fill(colors.panel)
                     .stroke(Stroke::new(1.0, colors.border))
-                    .corner_radius(8)
+                    .corner_radius(9)
                     .shadow(egui::epaint::Shadow {
                         offset: [0, 2],
                         blur: 10,
                         spread: 0,
                         color: Color32::from_black_alpha(if self.dark_theme { 90 } else { 30 }),
                     })
-                    .inner_margin(egui::Margin::symmetric(5, 5))
+                    .inner_margin(egui::Margin::same(4))
                     .show(ui, |ui| {
-                        ui.set_width(34.0);
+                        ui.set_width(30.0);
+                        ui.spacing_mut().item_spacing.y = 2.0;
                         ui.vertical_centered(|ui| {
-                            // 掴みバー（横棒）
+                            // モックの22×9pxグリップ: 下線 + 1列のドット。
                             let (bar, _) =
-                                ui.allocate_exact_size(Vec2::new(20.0, 10.0), Sense::hover());
-                            for row in 0..2 {
-                                for column in 0..3 {
-                                    ui.painter().circle_filled(
-                                        Pos2::new(
-                                            bar.center().x - 5.0 + column as f32 * 5.0,
-                                            bar.center().y - 2.2 + row as f32 * 4.4,
-                                        ),
-                                        1.0,
-                                        colors.text3,
-                                    );
-                                }
+                                ui.allocate_exact_size(Vec2::new(22.0, 9.0), Sense::hover());
+                            ui.painter().line_segment(
+                                [bar.left_bottom(), bar.right_bottom()],
+                                Stroke::new(1.0, colors.border),
+                            );
+                            for column in 0..4 {
+                                ui.painter().circle_filled(
+                                    Pos2::new(bar.center().x - 4.5 + column as f32 * 3.0, bar.top() + 3.0),
+                                    0.8,
+                                    colors.text3,
+                                );
                             }
                             ui.add_space(2.0);
                             for (tool, tooltip) in [
@@ -3837,7 +3845,6 @@ impl App {
                                 {
                                     self.tool = tool;
                                 }
-                                ui.add_space(2.0);
                             }
                         });
                     });
@@ -3924,10 +3931,19 @@ impl App {
             }
             if self.tool == Tool::CustomPeg {
                 ui.separator();
-                ui.add_sized(
-                    [190.0, 22.0],
-                    egui::Slider::new(&mut self.custom_radius, 4.0..=120.0)
-                        .text(language.text("新規円 半径", "New peg radius")),
+                ui.allocate_ui_with_layout(
+                    Vec2::new(190.0, 22.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        mock_slider_row_f64(
+                            ui,
+                            language.text("新規円 半径", "New peg radius"),
+                            &mut self.custom_radius,
+                            4.0..=120.0,
+                            1,
+                            "",
+                        )
+                    },
                 );
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -3955,45 +3971,27 @@ impl App {
                         WorkspaceMode::Font => self.save_font_project(),
                     }
                 }
-                egui::Frame::new()
-                    .fill(ui.visuals().widgets.noninteractive.weak_bg_fill)
-                    .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
-                    .corner_radius(6)
-                    .inner_margin(egui::Margin::same(2))
-                    .show(ui, |ui| {
-                        let colors = self.theme_colors();
-                        ui.visuals_mut().selection.bg_fill = colors.bg2;
-                        ui.visuals_mut().selection.stroke.color = colors.text1;
-                        ui.spacing_mut().item_spacing.x = 2.0;
-                        ui.horizontal(|ui| {
-                            if ui
-                                .add_sized(
-                                    [30.0, 22.0],
-                                    egui::Button::selectable(
-                                        self.language == UiLanguage::Japanese,
-                                        "JA",
-                                    ),
-                                )
-                                .on_hover_text("日本語に切り替え")
-                                .clicked()
-                            {
-                                self.language = UiLanguage::Japanese;
-                            }
-                            if ui
-                                .add_sized(
-                                    [30.0, 22.0],
-                                    egui::Button::selectable(
-                                        self.language == UiLanguage::English,
-                                        "EN",
-                                    ),
-                                )
-                                .on_hover_text("Switch to English")
-                                .clicked()
-                            {
-                                self.language = UiLanguage::English;
-                            }
-                        });
-                    });
+                let language_response = language_menu_button(
+                    ui,
+                    self.language,
+                    language.text("表示言語", "Display language"),
+                );
+                egui::Popup::menu(&language_response).show(|ui| {
+                    if ui
+                        .selectable_label(self.language == UiLanguage::Japanese, "日本語")
+                        .clicked()
+                    {
+                        self.language = UiLanguage::Japanese;
+                        ui.close();
+                    }
+                    if ui
+                        .selectable_label(self.language == UiLanguage::English, "English")
+                        .clicked()
+                    {
+                        self.language = UiLanguage::English;
+                        ui.close();
+                    }
+                });
                 let panels_response = header_menu_icon_button(
                     ui,
                     HeaderMenuGlyph::Panels,
@@ -4365,11 +4363,8 @@ impl App {
     fn render_layers_tab(&mut self, ui: &mut egui::Ui) {
         let language = self.language;
         let shift = ui.input(|i| i.modifiers.shift);
-        let mut remove_face: Option<usize> = None;
         let mut toggle_folder: Option<u64> = None;
         let mut toggle_folder_visibility: Option<u64> = None;
-        let mut remove_folder: Option<u64> = None;
-        let mut remove_empty: Option<u64> = None;
         let mut toggle_empty_visibility: Option<u64> = None;
         let mut select_empty_layer: Option<u64> = None;
         let mut select_layer_folder: Option<u64> = None;
@@ -4406,9 +4401,6 @@ impl App {
                         }
                         panel_glyph(ui, PanelGlyph::Folder);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if delete_button(ui).clicked() {
-                                remove_folder = Some(folder.id);
-                            }
                             if eye_button(ui, folder.visible).clicked() {
                                 toggle_folder_visibility = Some(folder.id);
                             }
@@ -4485,9 +4477,6 @@ impl App {
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if delete_button(ui).clicked() {
-                                            remove_face = Some(face_idx);
-                                        }
                                         let visible = self.doc.faces[face_idx].visible;
                                         if eye_button(ui, visible).clicked() {
                                             let snapshot = self.doc.clone();
@@ -4543,9 +4532,6 @@ impl App {
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if delete_button(ui).clicked() {
-                                            remove_empty = Some(empty.id);
-                                        }
                                         if eye_button(ui, empty.visible).clicked() {
                                             toggle_empty_visibility = Some(empty.id);
                                         }
@@ -4609,11 +4595,7 @@ impl App {
                     };
                     row_frame(ui, selected, |ui| {
                         self.face_preview_widget(ui, i, 20.0);
-                        // × を右端に固定し、名前は残り幅いっぱいに広げる
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if delete_button(ui).clicked() {
-                                remove_face = Some(i);
-                            }
                             let visible = self.doc.faces[i].visible;
                             if eye_button(ui, visible).clicked() {
                                 let snapshot = self.doc.clone();
@@ -4660,9 +4642,6 @@ impl App {
                     row_frame(ui, selected, |ui| {
                         panel_glyph(ui, PanelGlyph::EmptyLayer);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if delete_button(ui).clicked() {
-                                remove_empty = Some(empty.id);
-                            }
                             if eye_button(ui, empty.visible).clicked() {
                                 toggle_empty_visibility = Some(empty.id);
                             }
@@ -4716,10 +4695,6 @@ impl App {
         if commit_layer_item_edit {
             self.commit_layer_item_edit();
         }
-        if let Some(i) = remove_face {
-            self.set_single_selection(Some(Selection::Face(i)));
-            self.delete_selected();
-        }
         if let Some(id) = toggle_folder {
             if let Some(folder) = self
                 .doc
@@ -4751,23 +4726,6 @@ impl App {
                 }
                 self.push_history_snapshot(snapshot);
             }
-        }
-        if let Some(id) = remove_folder {
-            let snapshot = self.doc.clone();
-            self.doc.layer_folders.retain(|folder| folder.id != id);
-            self.selected_layer_folders.remove(&id);
-            for layer in &mut self.doc.empty_layers {
-                if layer.folder_id == Some(id) {
-                    layer.folder_id = None;
-                }
-            }
-            self.push_history_snapshot(snapshot);
-        }
-        if let Some(id) = remove_empty {
-            let snapshot = self.doc.clone();
-            self.doc.empty_layers.retain(|layer| layer.id != id);
-            self.selected_empty_layers.remove(&id);
-            self.push_history_snapshot(snapshot);
         }
         if let Some(id) = toggle_empty_visibility {
             let snapshot = self.doc.clone();
@@ -4806,6 +4764,27 @@ impl App {
             {
                 self.add_layer_folder();
             }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let has_layer_selection = self
+                    .selection
+                    .iter()
+                    .any(|selection| matches!(selection, Selection::Face(_)))
+                    || !self.selected_empty_layers.is_empty()
+                    || !self.selected_layer_folders.is_empty();
+                let response = ui
+                    .add_enabled_ui(has_layer_selection, |ui| {
+                        layer_action_button(
+                            ui,
+                            LayerActionGlyph::Trash,
+                            language.text("削除", "Delete"),
+                        )
+                    })
+                    .inner
+                    .on_hover_text(language.text("選択項目を削除", "Delete selected items"));
+                if response.clicked() {
+                    self.delete_selected();
+                }
+            });
         });
     }
 
@@ -5295,15 +5274,18 @@ impl App {
             if is_baked {
                 ui.add_space(6.0);
                 let mut bevel = self.doc.faces[face_idx].baked.as_ref().unwrap().bevel;
-                let resp = ui
-                    .add(
-                        egui::Slider::new(&mut bevel, 0.0..=1000.0)
-                            .text(language.text("丸ベベル", "Round bevel")),
-                    )
-                    .on_hover_text(language.text(
-                        "最大1000。実際の丸みは各辺長の49%まで安全に制限されます",
-                        "Maximum 1000; each corner is limited to 49% of its adjacent edges",
-                    ));
+                let resp = mock_slider_row_f64(
+                    ui,
+                    language.text("丸ベベル", "Round bevel"),
+                    &mut bevel,
+                    0.0..=1000.0,
+                    1,
+                    "",
+                )
+                .on_hover_text(language.text(
+                    "最大1000。実際の丸みは各辺長の49%まで安全に制限されます",
+                    "Maximum 1000; each corner is limited to 49% of its adjacent edges",
+                ));
                 if resp.changed() {
                     if self.bevel_edit_orig.is_none() {
                         self.bevel_edit_orig = Some(self.doc.clone());
@@ -5328,18 +5310,30 @@ impl App {
             let before_doc = self.doc.clone();
             let before_grid = self.doc.grid;
             section_header(ui, language.text("基本グリッド", "Grid geometry"));
-            ui.add(
-                egui::Slider::new(&mut self.doc.grid.spacing, 40.0..=320.0)
-                    .text(language.text("間隔", "Spacing")),
+            mock_slider_row_f64(
+                ui,
+                language.text("間隔", "Spacing"),
+                &mut self.doc.grid.spacing,
+                40.0..=320.0,
+                1,
+                "",
             );
-            ui.add(
-                egui::Slider::new(&mut self.doc.grid.catch, 0.0..=24.0)
-                    .text(language.text("引っかかり範囲", "Snap range")),
+            mock_slider_row_f64(
+                ui,
+                language.text("引っかかり範囲", "Snap range"),
+                &mut self.doc.grid.catch,
+                0.0..=24.0,
+                1,
+                "",
             );
             let (main_max, _) = safe_grid_radius_limits(&self.doc.grid);
-            ui.add(
-                egui::Slider::new(&mut self.doc.grid.radius, 0.0..=main_max)
-                    .text(language.text("半径", "Radius")),
+            mock_slider_row_f64(
+                ui,
+                language.text("半径", "Radius"),
+                &mut self.doc.grid.radius,
+                0.0..=main_max,
+                1,
+                "",
             );
             if ENABLE_EXPERIMENTAL_SQUARE_PEGS {
                 ui.horizontal(|ui| {
@@ -5356,9 +5350,13 @@ impl App {
                     );
                 });
                 if self.doc.peg_appearance.shape == crate::model::PegShape::RoundedSquare {
-                    ui.add(
-                        egui::Slider::new(&mut self.doc.peg_appearance.rounding, 0.0..=100.0)
-                            .text(language.text("角のラウンド", "Corner roundness")),
+                    mock_slider_row_f64(
+                        ui,
+                        language.text("角のラウンド", "Corner roundness"),
+                        &mut self.doc.peg_appearance.rounding,
+                        0.0..=100.0,
+                        1,
+                        "",
                     );
                 }
             }
@@ -5385,9 +5383,13 @@ impl App {
             }
             let (_, sub_max) = safe_grid_radius_limits(&self.doc.grid);
             ui.add_enabled_ui(self.doc.grid.subs_enabled, |ui| {
-                ui.add(
-                    egui::Slider::new(&mut self.doc.grid.sub_radius, 0.0..=sub_max)
-                        .text(language.text("半径", "Radius")),
+                mock_slider_row_f64(
+                    ui,
+                    language.text("半径", "Radius"),
+                    &mut self.doc.grid.sub_radius,
+                    0.0..=sub_max,
+                    1,
+                    "",
                 );
             });
             if self.doc.grid.subs_enabled {
@@ -7260,11 +7262,13 @@ impl App {
                                     self.set_zoom(origin, rect.center(), self.view.zoom * 0.9);
                             }
                             let mut pct = f64::from(self.view.zoom) * 100.0;
-                            let resp = ui.add(
-                                egui::Slider::new(&mut pct, 20.0..=400.0)
-                                    .suffix("%")
-                                    .fixed_decimals(0),
-                            );
+                            let resp = ui
+                                .allocate_ui_with_layout(
+                                    Vec2::new(92.0, 22.0),
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| mock_slider_f64(ui, &mut pct, 20.0..=400.0, 0, "%"),
+                                )
+                                .inner;
                             if resp.changed() {
                                 changed |=
                                     self.set_zoom(origin, rect.center(), (pct / 100.0) as f32);
@@ -7349,7 +7353,7 @@ impl eframe::App for App {
         self.apply_theme(ctx);
 
         egui::TopBottomPanel::top("toolbar")
-            .exact_height(42.0)
+            .exact_height(40.0)
             .frame(
                 egui::Frame::new()
                     .fill(ctx.style().visuals.panel_fill)
@@ -7361,7 +7365,7 @@ impl eframe::App for App {
             )
             .show(ctx, |ui| self.toolbar(ui));
         egui::TopBottomPanel::bottom("statusbar")
-            .exact_height(28.0)
+            .exact_height(24.0)
             .show(ctx, |ui| self.status_bar(ui));
         // 編集ツールは中央リーフでキャンバスが前面のときだけ出す。
         // 試し組みの入力や表示へ被せない。
@@ -7393,20 +7397,30 @@ impl eframe::App for App {
         dock_style.tab.spacing = 2.0;
         dock_style.tab.active.bg_fill = colors.bg2;
         dock_style.tab.active.text_color = colors.text1;
-        dock_style.tab.active.corner_radius = egui::CornerRadius::same(5);
-        dock_style.tab.active.outline_color = colors.border;
+        dock_style.tab.active.corner_radius = egui::CornerRadius {
+            nw: 5,
+            ne: 5,
+            sw: 0,
+            se: 0,
+        };
+        dock_style.tab.active.outline_color = Color32::TRANSPARENT;
         dock_style.tab.focused = dock_style.tab.active.clone();
-        dock_style.tab.inactive.bg_fill = colors.bg1;
+        dock_style.tab.inactive.bg_fill = Color32::TRANSPARENT;
         dock_style.tab.inactive.text_color = colors.text2;
-        dock_style.tab.inactive.corner_radius = egui::CornerRadius::same(5);
+        dock_style.tab.inactive.corner_radius = egui::CornerRadius::ZERO;
         dock_style.tab.inactive.outline_color = Color32::TRANSPARENT;
         dock_style.tab.hovered.bg_fill = colors.bg2;
         dock_style.tab.hovered.text_color = colors.text1;
-        dock_style.tab.hovered.corner_radius = egui::CornerRadius::same(5);
-        dock_style.tab.hovered.outline_color = colors.border;
+        dock_style.tab.hovered.corner_radius = egui::CornerRadius {
+            nw: 5,
+            ne: 5,
+            sw: 0,
+            se: 0,
+        };
+        dock_style.tab.hovered.outline_color = Color32::TRANSPARENT;
         dock_style.tab.tab_body.bg_fill = colors.panel;
         dock_style.tab.tab_body.stroke = Stroke::NONE;
-        dock_style.tab.tab_body.inner_margin = egui::Margin::same(10);
+        dock_style.tab.tab_body.inner_margin = egui::Margin::same(6);
         DockArea::new(&mut dock)
             .style(dock_style)
             // 常時表示の×ボタンは煩いので消す（パネルの開閉は上部「パネル」メニュー）
@@ -7477,7 +7491,7 @@ impl TabViewer for AppTabViewer<'_> {
 
 /// ツールアイコンボタン（Illustrator風、描画ベース）
 fn tool_icon_button(ui: &mut egui::Ui, active: bool, tool: Tool, tooltip: &str) -> egui::Response {
-    let size = Vec2::new(30.0, 28.0);
+    let size = Vec2::splat(30.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     resp.widget_info(|| {
         egui::WidgetInfo::selected(
@@ -7500,73 +7514,21 @@ fn tool_icon_button(ui: &mut egui::Ui, active: bool, tool: Tool, tooltip: &str) 
     } else {
         visuals.fg_stroke.color
     };
-    let c = rect.center();
-    let p = ui.painter();
-    let icon_stroke = Stroke::new(1.5, color);
-    match tool {
-        Tool::Select => {
-            // 塗りのカーソル矢印
-            let pts = vec![
-                Pos2::new(c.x - 3.5, c.y - 6.5),
-                Pos2::new(c.x - 3.5, c.y + 5.0),
-                Pos2::new(c.x - 0.5, c.y + 2.2),
-                Pos2::new(c.x + 1.6, c.y + 6.5),
-                Pos2::new(c.x + 3.2, c.y + 5.7),
-                Pos2::new(c.x + 1.1, c.y + 1.4),
-                Pos2::new(c.x + 4.5, c.y + 1.0),
-            ];
-            p.add(egui::Shape::convex_polygon(
-                pts[..3].to_vec(),
-                color,
-                Stroke::NONE,
-            ));
-            p.add(egui::Shape::closed_line(pts, icon_stroke));
-        }
-        Tool::DirectSelect => {
-            // 白抜きのカーソル矢印
-            let pts = vec![
-                Pos2::new(c.x - 3.5, c.y - 6.5),
-                Pos2::new(c.x - 3.5, c.y + 5.0),
-                Pos2::new(c.x - 0.5, c.y + 2.2),
-                Pos2::new(c.x + 1.6, c.y + 6.5),
-                Pos2::new(c.x + 3.2, c.y + 5.7),
-                Pos2::new(c.x + 1.1, c.y + 1.4),
-                Pos2::new(c.x + 4.5, c.y + 1.0),
-            ];
-            p.add(egui::Shape::closed_line(pts, icon_stroke));
-        }
-        Tool::Draw => {
-            // 素直な鉛筆: 斜めの軸 + 先端の三角チップ
-            let top = Pos2::new(c.x + 5.0, c.y - 5.5);
-            let mid = Pos2::new(c.x - 2.0, c.y + 1.5);
-            let tip = Pos2::new(c.x - 5.0, c.y + 5.5);
-            // 軸（2本の平行線）
-            let n = Vec2::new(0.9, 0.9); // 軸に直交する太さ方向
-            p.line_segment([top + n, mid + n], icon_stroke);
-            p.line_segment([top - n, mid - n], icon_stroke);
-            p.line_segment([top + n, top - n], icon_stroke); // 消しゴム側
-                                                             // 先端チップ（塗り三角）
-            p.add(egui::Shape::convex_polygon(
-                vec![mid + n, mid - n, tip],
-                color,
-                Stroke::NONE,
-            ));
-        }
-        Tool::CustomPeg => {
-            // 円 + プラス
-            p.circle_stroke(Pos2::new(c.x - 1.5, c.y), 5.4, icon_stroke);
-            let px = c.x + 5.0;
-            let py = c.y - 4.5;
-            p.line_segment(
-                [Pos2::new(px - 2.5, py), Pos2::new(px + 2.5, py)],
-                icon_stroke,
-            );
-            p.line_segment(
-                [Pos2::new(px, py - 2.5), Pos2::new(px, py + 2.5)],
-                icon_stroke,
-            );
-        }
-    }
+    // モックの data-lucide と同じ配布フォントを使う。手描きの近似ではなく、
+    // 元モックと同じ4種類のベクターグリフを描画する。
+    let icon = match tool {
+        Tool::Select => LucideIcon::MousePointer2,
+        Tool::DirectSelect => LucideIcon::MousePointer,
+        Tool::Draw => LucideIcon::PenTool,
+        Tool::CustomPeg => LucideIcon::CircleDotDashed,
+    };
+    ui.painter().text(
+        rect.center() + Vec2::new(0.0, 0.5),
+        egui::Align2::CENTER_CENTER,
+        icon.unicode(),
+        lucide_font_id(16.0),
+        color,
+    );
     resp.on_hover_text(tooltip)
 }
 
@@ -7585,7 +7547,6 @@ enum PanelGlyph {
 /// 24pxグリッド・1.35pxストロークで描く。
 fn panel_glyph(ui: &mut egui::Ui, glyph: PanelGlyph) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
-    let center = rect.center();
     let color = ui
         .visuals()
         .widgets
@@ -7593,94 +7554,22 @@ fn panel_glyph(ui: &mut egui::Ui, glyph: PanelGlyph) -> egui::Response {
         .fg_stroke
         .color
         .gamma_multiply(0.82);
-    let stroke = Stroke::new(1.35, color);
-    let painter = ui.painter();
-    match glyph {
-        PanelGlyph::Shape => {
-            painter.circle_stroke(center - Vec2::new(2.5, 1.5), 4.2, stroke);
-            painter.add(egui::Shape::closed_line(
-                vec![
-                    Pos2::new(center.x + 0.5, center.y - 5.8),
-                    Pos2::new(center.x + 6.4, center.y + 4.8),
-                    Pos2::new(center.x - 2.2, center.y + 4.8),
-                ],
-                stroke,
-            ));
-        }
-        PanelGlyph::Type => {
-            painter.line_segment(
-                [
-                    Pos2::new(center.x - 5.5, center.y - 5.5),
-                    Pos2::new(center.x + 5.5, center.y - 5.5),
-                ],
-                stroke,
-            );
-            painter.line_segment(
-                [
-                    Pos2::new(center.x, center.y - 5.5),
-                    Pos2::new(center.x, center.y + 5.5),
-                ],
-                stroke,
-            );
-            painter.line_segment(
-                [
-                    Pos2::new(center.x - 3.5, center.y + 5.5),
-                    Pos2::new(center.x + 3.5, center.y + 5.5),
-                ],
-                stroke,
-            );
-        }
-        PanelGlyph::Layers => {
-            for offset in [-3.5_f32, 0.0, 3.5] {
-                let y = center.y + offset;
-                painter.add(egui::Shape::closed_line(
-                    vec![
-                        Pos2::new(center.x, y - 3.0),
-                        Pos2::new(center.x + 6.5, y),
-                        Pos2::new(center.x, y + 3.0),
-                        Pos2::new(center.x - 6.5, y),
-                    ],
-                    stroke,
-                ));
-            }
-        }
-        PanelGlyph::Peg => {
-            painter.circle_stroke(center, 6.2, stroke);
-            painter.circle_filled(center, 1.4, color);
-        }
-        PanelGlyph::Grid => {
-            for row in -1..=1 {
-                for column in -1..=1 {
-                    painter.circle_filled(
-                        center + Vec2::new(column as f32 * 5.0, row as f32 * 5.0),
-                        1.15,
-                        color,
-                    );
-                }
-            }
-        }
-        PanelGlyph::Folder => {
-            painter.add(egui::Shape::closed_line(
-                vec![
-                    Pos2::new(center.x - 7.0, center.y - 4.5),
-                    Pos2::new(center.x - 1.5, center.y - 4.5),
-                    Pos2::new(center.x + 0.5, center.y - 2.2),
-                    Pos2::new(center.x + 7.0, center.y - 2.2),
-                    Pos2::new(center.x + 7.0, center.y + 5.0),
-                    Pos2::new(center.x - 7.0, center.y + 5.0),
-                ],
-                stroke,
-            ));
-        }
-        PanelGlyph::EmptyLayer => {
-            painter.rect_stroke(
-                Rect::from_center_size(center, Vec2::splat(12.0)),
-                2.0,
-                stroke,
-                egui::StrokeKind::Inside,
-            );
-        }
-    }
+    let icon = match glyph {
+        PanelGlyph::Shape => LucideIcon::Shapes,
+        PanelGlyph::Type => LucideIcon::Type,
+        PanelGlyph::Layers => LucideIcon::Layers2,
+        PanelGlyph::Peg => LucideIcon::CircleDot,
+        PanelGlyph::Grid => LucideIcon::Grid3x3,
+        PanelGlyph::Folder => LucideIcon::Folder,
+        PanelGlyph::EmptyLayer => LucideIcon::Square,
+    };
+    ui.painter().text(
+        rect.center() + Vec2::new(0.0, 0.5),
+        egui::Align2::CENTER_CENTER,
+        icon.unicode(),
+        lucide_font_id(14.0),
+        color,
+    );
     response
 }
 
@@ -7744,6 +7633,7 @@ fn project_section_label(ui: &mut egui::Ui, text: &str) {
 enum LayerActionGlyph {
     Plus,
     Folder,
+    Trash,
 }
 
 /// レイヤーパネルの追加操作。モック同様、24pxのアイコンボタンに揃え、
@@ -7758,40 +7648,19 @@ fn layer_action_button(ui: &mut egui::Ui, glyph: LayerActionGlyph, label: &str) 
         ui.painter().rect_filled(rect, 5.0, visuals.weak_bg_fill);
     }
 
-    let icon_center = rect.center();
     let color = visuals.fg_stroke.color;
-    let stroke = Stroke::new(1.35, color);
-    match glyph {
-        LayerActionGlyph::Plus => {
-            ui.painter().line_segment(
-                [
-                    icon_center - Vec2::new(5.0, 0.0),
-                    icon_center + Vec2::new(5.0, 0.0),
-                ],
-                stroke,
-            );
-            ui.painter().line_segment(
-                [
-                    icon_center - Vec2::new(0.0, 5.0),
-                    icon_center + Vec2::new(0.0, 5.0),
-                ],
-                stroke,
-            );
-        }
-        LayerActionGlyph::Folder => {
-            ui.painter().add(egui::Shape::closed_line(
-                vec![
-                    Pos2::new(icon_center.x - 6.5, icon_center.y - 4.0),
-                    Pos2::new(icon_center.x - 1.7, icon_center.y - 4.0),
-                    Pos2::new(icon_center.x + 0.4, icon_center.y - 1.8),
-                    Pos2::new(icon_center.x + 6.5, icon_center.y - 1.8),
-                    Pos2::new(icon_center.x + 6.5, icon_center.y + 4.5),
-                    Pos2::new(icon_center.x - 6.5, icon_center.y + 4.5),
-                ],
-                stroke,
-            ));
-        }
-    }
+    let icon = match glyph {
+        LayerActionGlyph::Plus => LucideIcon::Plus,
+        LayerActionGlyph::Folder => LucideIcon::FolderPlus,
+        LayerActionGlyph::Trash => LucideIcon::Trash2,
+    };
+    ui.painter().text(
+        rect.center() + Vec2::new(0.0, 0.5),
+        egui::Align2::CENTER_CENTER,
+        icon.unicode(),
+        lucide_font_id(14.0),
+        color,
+    );
     response
 }
 
@@ -7815,14 +7684,14 @@ fn layer_item_label(
         Pos2::new(rect.left(), rect.top() + 3.0),
         egui::Align2::LEFT_TOP,
         name,
-        FontId::proportional(11.5),
+        FontId::proportional(11.0),
         name_color,
     );
     painter.text(
         Pos2::new(rect.left(), rect.bottom() - 2.0),
         egui::Align2::LEFT_BOTTOM,
         kind,
-        FontId::proportional(9.5),
+        FontId::proportional(9.0),
         ui.visuals().weak_text_color(),
     );
     response
@@ -7883,6 +7752,54 @@ fn align_icon_button(ui: &mut egui::Ui, axis: AlignAxis, tooltip: &str) -> egui:
                 .line_segment([Pos2::new(x, y1), Pos2::new(x, y2)], stroke);
         }
     }
+    response.on_hover_text(tooltip)
+}
+
+/// モックのselectと同じ26px高の言語メニュー。選択言語によって外形が変わらない。
+fn language_menu_button(ui: &mut egui::Ui, language: UiLanguage, tooltip: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(82.0, 26.0), Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), tooltip)
+    });
+    let colors = if ui.visuals().dark_mode {
+        (Color32::from_rgb(21, 21, 24), Color32::from_rgb(43, 43, 48))
+    } else {
+        (
+            Color32::from_rgb(247, 247, 247),
+            Color32::from_rgb(0, 0, 0).gamma_multiply(0.12),
+        )
+    };
+    let fill = if response.hovered() {
+        ui.visuals().widgets.hovered.bg_fill
+    } else {
+        colors.0
+    };
+    ui.painter().rect(
+        rect,
+        6.0,
+        fill,
+        Stroke::new(1.0, colors.1),
+        egui::StrokeKind::Inside,
+    );
+    ui.painter().text(
+        Pos2::new(rect.left() + 8.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        match language {
+            UiLanguage::Japanese => "日本語",
+            UiLanguage::English => "English",
+        },
+        FontId::proportional(11.0),
+        ui.visuals().text_color(),
+    );
+    let c = Pos2::new(rect.right() - 10.0, rect.center().y + 0.5);
+    ui.painter().add(egui::Shape::line(
+        vec![
+            Pos2::new(c.x - 3.2, c.y - 1.7),
+            Pos2::new(c.x, c.y + 1.7),
+            Pos2::new(c.x + 3.2, c.y - 1.7),
+        ],
+        Stroke::new(1.2, ui.visuals().weak_text_color()),
+    ));
     response.on_hover_text(tooltip)
 }
 
@@ -7992,8 +7909,27 @@ enum IconKind {
     Eye,
 }
 
-/// アクティブ状態がはっきり分かるアイコントグル。ON のとき accent 背景 + 白、
-/// OFF のとき淡色。テキストトグルの見づらさを避ける
+/// Lucide eyeに近い14pxの細線アイコン。表示時も背景箱を付けない。
+fn paint_eye_icon(painter: &egui::Painter, center: Pos2, color: Color32, visible: bool) {
+    let icon = if visible {
+        LucideIcon::Eye
+    } else {
+        LucideIcon::EyeOff
+    };
+    painter.text(
+        center + Vec2::new(0.0, 0.5),
+        egui::Align2::CENTER_CENTER,
+        icon.unicode(),
+        lucide_font_id(14.0),
+        color,
+    );
+}
+
+fn lucide_font_id(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name("lucide".into()))
+}
+
+/// 表示切替はモックどおり背景なしの目だけで示す。
 fn icon_toggle_button(
     ui: &mut egui::Ui,
     on: bool,
@@ -8005,51 +7941,16 @@ fn icon_toggle_button(
     resp.widget_info(|| {
         egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), on, tooltip)
     });
-    if on {
-        ui.painter()
-            .rect_filled(rect.shrink(1.0), 4.0, ui.visuals().selection.bg_fill);
-    } else if resp.hovered() {
+    if resp.hovered() {
         ui.painter()
             .rect_filled(rect.shrink(1.0), 4.0, ui.style().interact(&resp).bg_fill);
     }
-    let color = if on {
-        ui.visuals().selection.stroke.color
-    } else {
-        ui.visuals()
-            .widgets
-            .inactive
-            .fg_stroke
-            .color
-            .gamma_multiply(0.75)
-    };
-    let c = rect.center();
+    let color = ui
+        .visuals()
+        .weak_text_color()
+        .gamma_multiply(if on { 0.95 } else { 0.72 });
     match kind {
-        IconKind::Eye => {
-            let p = ui.painter();
-            let w = 6.5;
-            let h = 4.0;
-            let mut top = Vec::new();
-            let mut bottom = Vec::new();
-            for i in 0..=12 {
-                let t = i as f32 / 12.0;
-                let x = c.x - w + 2.0 * w * t;
-                let arc = (t * std::f32::consts::PI).sin() * h;
-                top.push(Pos2::new(x, c.y - arc));
-                bottom.push(Pos2::new(x, c.y + arc));
-            }
-            p.add(egui::Shape::line(top, Stroke::new(1.3, color)));
-            p.add(egui::Shape::line(bottom, Stroke::new(1.3, color)));
-            p.circle_filled(c, 1.9, color);
-            if !on {
-                p.line_segment(
-                    [
-                        Pos2::new(rect.left() + 4.0, rect.bottom() - 4.0),
-                        Pos2::new(rect.right() - 4.0, rect.top() + 4.0),
-                    ],
-                    Stroke::new(1.4, color),
-                );
-            }
-        }
+        IconKind::Eye => paint_eye_icon(ui.painter(), rect.center(), color, on),
     }
     resp.on_hover_text(tooltip)
 }
@@ -8108,21 +8009,160 @@ fn scrub_value(
     .inner
 }
 
-/// 狭いインスペクターでもラベルを欠けさせない、AE風の一行スライダー。
-/// Slider 自身には text を持たせず、左の固定ラベルと細いレールへ分離する。
-fn compact_slider_row(ui: &mut egui::Ui, label: &str, slider: egui::Slider<'_>) -> egui::Response {
+/// モックの1pxレール＋9pxノブをそのまま描く数値スライダー。
+/// 右の数値欄は24px高・5px角丸に固定し、ドラッグと直接入力の両方を維持する。
+fn mock_slider_f64(
+    ui: &mut egui::Ui,
+    value: &mut f64,
+    range: std::ops::RangeInclusive<f64>,
+    decimals: usize,
+    suffix: &str,
+) -> egui::Response {
+    let old_value = *value;
+    let min = *range.start();
+    let max = *range.end();
+    let mut response = ui
+        .horizontal(|ui| {
+            let field_width = 50.0;
+            let rail_width =
+                (ui.available_width() - field_width - ui.spacing().item_spacing.x).max(28.0);
+            let (rect, rail_response) =
+                ui.allocate_exact_size(Vec2::new(rail_width, 22.0), Sense::click_and_drag());
+            if ui.is_enabled() {
+                if let Some(pointer) = rail_response.interact_pointer_pos() {
+                    let usable = (rect.width() - 9.0).max(1.0);
+                    let t = ((pointer.x - rect.left() - 4.5) / usable).clamp(0.0, 1.0);
+                    *value = min + (max - min) * f64::from(t);
+                }
+            }
+            rail_response.widget_info(|| egui::WidgetInfo::slider(ui.is_enabled(), *value, ""));
+            let t = if max > min {
+                ((*value - min) / (max - min)).clamp(0.0, 1.0) as f32
+            } else {
+                0.0
+            };
+            let center = Pos2::new(
+                egui::lerp((rect.left() + 4.5)..=(rect.right() - 4.5), t),
+                rect.center().y,
+            );
+            let rail_color = if ui.visuals().dark_mode {
+                Color32::from_rgb(58, 58, 65)
+            } else {
+                Color32::from_rgb(190, 190, 196)
+            };
+            let knob_color = if ui.is_enabled() {
+                if ui.visuals().dark_mode {
+                    Color32::from_rgb(215, 215, 220)
+                } else {
+                    Color32::from_rgb(76, 76, 82)
+                }
+            } else {
+                ui.visuals().weak_text_color()
+            };
+            ui.painter().line_segment(
+                [
+                    Pos2::new(rect.left(), rect.center().y),
+                    Pos2::new(rect.right(), rect.center().y),
+                ],
+                Stroke::new(1.0, rail_color),
+            );
+            ui.painter()
+                .circle_filled(center, 6.5, ui.visuals().extreme_bg_color);
+            ui.painter().circle_filled(center, 4.5, knob_color);
+
+            let field_response = ui
+                .scope(|ui| {
+                    let dark = ui.visuals().dark_mode;
+                    let field_fill = if dark {
+                        Color32::from_rgb(21, 21, 24)
+                    } else {
+                        Color32::from_rgb(247, 247, 247)
+                    };
+                    let field_border = if dark {
+                        Color32::from_rgb(43, 43, 48)
+                    } else {
+                        Color32::from_rgb(0, 0, 0).gamma_multiply(0.12)
+                    };
+                    let visuals = ui.visuals_mut();
+                    for state in [
+                        &mut visuals.widgets.inactive,
+                        &mut visuals.widgets.hovered,
+                        &mut visuals.widgets.active,
+                    ] {
+                        state.bg_fill = field_fill;
+                        state.bg_stroke = Stroke::new(1.0, field_border);
+                        state.corner_radius = 5.into();
+                    }
+                    ui.spacing_mut().interact_size.y = 24.0;
+                    ui.add_sized(
+                        [field_width, 24.0],
+                        egui::DragValue::new(value)
+                            .range(range)
+                            .speed(((max - min).abs() / 240.0).max(0.01))
+                            .fixed_decimals(decimals)
+                            .suffix(suffix),
+                    )
+                })
+                .inner;
+            rail_response.union(field_response)
+        })
+        .inner;
+    if *value != old_value {
+        response.mark_changed();
+    }
+    response
+}
+
+fn mock_slider_row_f64(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut f64,
+    range: std::ops::RangeInclusive<f64>,
+    decimals: usize,
+    suffix: &str,
+) -> egui::Response {
     ui.horizontal(|ui| {
         ui.add_sized(
-            [58.0, 22.0],
+            [58.0, 24.0],
             egui::Label::new(
                 egui::RichText::new(label)
                     .small()
                     .color(ui.visuals().weak_text_color()),
             ),
         );
-        ui.add_sized([ui.available_width(), 22.0], slider)
+        mock_slider_f64(ui, value, range, decimals, suffix)
     })
     .inner
+}
+
+fn mock_slider_row_f32(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f64>,
+    decimals: usize,
+) -> egui::Response {
+    let mut converted = f64::from(*value);
+    let response = mock_slider_row_f64(ui, label, &mut converted, range, decimals, "");
+    if response.changed() {
+        *value = converted as f32;
+    }
+    response
+}
+
+fn mock_percent_slider_row_f32(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f64>,
+) -> egui::Response {
+    let mut percent = f64::from(*value) * 100.0;
+    let percent_range = (*range.start() * 100.0)..=(*range.end() * 100.0);
+    let response = mock_slider_row_f64(ui, label, &mut percent, percent_range, 0, "%");
+    if response.changed() {
+        *value = (percent / 100.0) as f32;
+    }
+    response
 }
 
 /// パネル内のセクション見出し（小さめ・弱色 + 下線）
@@ -8130,7 +8170,7 @@ fn section_header(ui: &mut egui::Ui, text: &str) {
     ui.add_space(2.0);
     ui.label(
         egui::RichText::new(text)
-            .size(11.5)
+            .size(11.0)
             .strong()
             .color(ui.visuals().text_color().gamma_multiply(0.68)),
     );
@@ -8213,44 +8253,15 @@ fn delete_button(ui: &mut egui::Ui) -> egui::Response {
 
 /// 目アイコンのトグルボタン（表示/非表示）。フォント依存を避けて描画で作る
 fn eye_button(ui: &mut egui::Ui, visible: bool) -> egui::Response {
-    let size = 20.0;
+    let size = 18.0;
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
     let visuals = ui.style().interact(&resp);
     if resp.hovered() {
         ui.painter()
             .rect_filled(rect.shrink(1.0), 4.0, visuals.bg_fill);
     }
-    // 表示/非表示で色は変えず、目のアイコン（開き/斜線）だけで区別する
-    let color = visuals.fg_stroke.color.gamma_multiply(0.85);
-    let c = rect.center();
-    let w = size * 0.36;
-    let h = size * 0.22;
-    // アーモンド形の輪郭
-    let mut top = Vec::new();
-    let mut bottom = Vec::new();
-    for i in 0..=12 {
-        let t = i as f32 / 12.0;
-        let x = c.x - w + 2.0 * w * t;
-        let arc = (t * std::f32::consts::PI).sin() * h;
-        top.push(Pos2::new(x, c.y - arc));
-        bottom.push(Pos2::new(x, c.y + arc));
-    }
-    ui.painter()
-        .add(egui::Shape::line(top, Stroke::new(1.2, color)));
-    ui.painter()
-        .add(egui::Shape::line(bottom, Stroke::new(1.2, color)));
-    if visible {
-        ui.painter().circle_filled(c, size * 0.11, color);
-    } else {
-        // 斜線
-        ui.painter().line_segment(
-            [
-                Pos2::new(rect.left() + 4.0, rect.bottom() - 4.0),
-                Pos2::new(rect.right() - 4.0, rect.top() + 4.0),
-            ],
-            Stroke::new(1.2, color),
-        );
-    }
+    let color = visuals.fg_stroke.color.gamma_multiply(0.78);
+    paint_eye_icon(ui.painter(), rect.center(), color, visible);
     resp.on_hover_text(if visible {
         "非表示にする"
     } else {
@@ -8442,6 +8453,14 @@ fn install_cjk_fonts(ctx: &egui::Context) {
         "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
     ];
     let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "lucide".to_owned(),
+        egui::FontData::from_static(lucide_icons::LUCIDE_FONT_BYTES).into(),
+    );
+    fonts.families.insert(
+        egui::FontFamily::Name("lucide".into()),
+        vec!["lucide".to_owned()],
+    );
     let mut order: Vec<String> = Vec::new();
     // 混植でベースラインがガタつくのを防ぐため、和欧混在に強い CJK フォントを
     // 「主フォント」にする（ヒラギノ等は欧文グリフも持つので日本語・英字を

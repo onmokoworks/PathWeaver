@@ -17,6 +17,7 @@ rfd = "=0.16.0"
 ab_glyph = "0.2"
 geo = "0.29"
 ttf-parser = "0.25.1"
+lucide-icons = "0.555.0"
 
 [profile.dev]
 opt-level = 1
