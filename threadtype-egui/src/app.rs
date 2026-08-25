@@ -738,9 +738,11 @@ pub struct App {
     radius_edit_orig: Option<u64>,
     bevel_edit_orig: Option<Document>,
     face_name_snapshot: Option<Document>,
+    layer_item_name_snapshot: Option<Document>,
     draw: Option<ActiveDraw>,
     selection: Vec<Selection>,
     face_editor: Option<usize>,
+    layer_item_editor: Option<u64>,
     tool: Tool,
     status: String,
     shape_save_path: Option<PathBuf>,
@@ -803,9 +805,11 @@ impl App {
             radius_edit_orig: None,
             bevel_edit_orig: None,
             face_name_snapshot: None,
+            layer_item_name_snapshot: None,
             draw: None,
             selection: Vec::new(),
             face_editor: None,
+            layer_item_editor: None,
             tool: Tool::Draw,
             status: "クリックで線を引き始め、始点に戻ってクリックで面を閉じます".to_owned(),
             shape_save_path: None,
@@ -3666,6 +3670,18 @@ impl App {
         self.face_editor = None;
     }
 
+    fn begin_layer_item_edit(&mut self, id: u64) {
+        self.layer_item_name_snapshot = Some(self.doc.clone());
+        self.layer_item_editor = Some(id);
+    }
+
+    fn commit_layer_item_edit(&mut self) {
+        if let Some(snapshot) = self.layer_item_name_snapshot.take() {
+            self.push_history_snapshot(snapshot);
+        }
+        self.layer_item_editor = None;
+    }
+
     fn render_layers_tab(&mut self, ui: &mut egui::Ui) {
         let shift = ui.input(|i| i.modifiers.shift);
         let mut remove_face: Option<usize> = None;
@@ -3674,6 +3690,8 @@ impl App {
         let mut remove_folder: Option<u64> = None;
         let mut remove_empty: Option<u64> = None;
         let mut toggle_empty_visibility: Option<u64> = None;
+        let mut begin_layer_item_edit: Option<u64> = None;
+        let mut commit_layer_item_edit = false;
         let grouped_faces: std::collections::HashSet<usize> = self
             .doc
             .layer_folders
@@ -3699,28 +3717,40 @@ impl App {
                             if delete_button(ui).clicked() {
                                 remove_folder = Some(folder.id);
                             }
-                            let mut folder_name = folder.name.clone();
-                            let response = ui.add_sized(
-                                [ui.available_width(), 22.0],
-                                egui::TextEdit::singleline(&mut folder_name).hint_text(format!(
-                                    "フォルダ · {}項目",
-                                    folder.face_indices.len()
-                                        + self
-                                            .doc
-                                            .empty_layers
-                                            .iter()
-                                            .filter(|layer| layer.folder_id == Some(folder.id))
-                                            .count()
-                                )),
-                            );
-                            if response.changed() {
+                            let width = ui.available_width();
+                            if self.layer_item_editor == Some(folder.id) {
                                 if let Some(target) = self
                                     .doc
                                     .layer_folders
                                     .iter_mut()
                                     .find(|target| target.id == folder.id)
                                 {
-                                    target.name = folder_name;
+                                    let response = ui.add_sized(
+                                        [width, 22.0],
+                                        egui::TextEdit::singleline(&mut target.name),
+                                    );
+                                    response.request_focus();
+                                    if response.lost_focus()
+                                        || ui.input(|input| input.key_pressed(Key::Enter))
+                                    {
+                                        commit_layer_item_edit = true;
+                                    }
+                                }
+                            } else {
+                                let item_count = folder.face_indices.len()
+                                    + self
+                                        .doc
+                                        .empty_layers
+                                        .iter()
+                                        .filter(|layer| layer.folder_id == Some(folder.id))
+                                        .count();
+                                let response = ui.add_sized(
+                                    [width, 22.0],
+                                    egui::Label::new(format!("{}  ·  {}", folder.name, item_count))
+                                        .sense(Sense::click()),
+                                );
+                                if response.double_clicked() {
+                                    begin_layer_item_edit = Some(folder.id);
                                 }
                             }
                         });
@@ -3747,15 +3777,43 @@ impl App {
                                 }
                             });
                         }
-                        for empty in self
+                        let folder_empty_layers: Vec<_> = self
                             .doc
                             .empty_layers
                             .iter()
                             .filter(|layer| layer.folder_id == Some(folder.id))
-                        {
+                            .cloned()
+                            .collect();
+                        for empty in folder_empty_layers {
                             ui.horizontal(|ui| {
                                 ui.add_space(18.0);
-                                ui.label(format!("□  {}", empty.name));
+                                if self.layer_item_editor == Some(empty.id) {
+                                    if let Some(target) = self
+                                        .doc
+                                        .empty_layers
+                                        .iter_mut()
+                                        .find(|target| target.id == empty.id)
+                                    {
+                                        let response = ui.add_sized(
+                                            [ui.available_width() - 24.0, 22.0],
+                                            egui::TextEdit::singleline(&mut target.name),
+                                        );
+                                        response.request_focus();
+                                        if response.lost_focus()
+                                            || ui.input(|input| input.key_pressed(Key::Enter))
+                                        {
+                                            commit_layer_item_edit = true;
+                                        }
+                                    }
+                                } else {
+                                    let response = ui.add(
+                                        egui::Label::new(format!("□  {}", empty.name))
+                                            .sense(Sense::click()),
+                                    );
+                                    if response.double_clicked() {
+                                        begin_layer_item_edit = Some(empty.id);
+                                    }
+                                }
                                 if delete_button(ui).clicked() {
                                     remove_empty = Some(empty.id);
                                 }
@@ -3826,12 +3884,14 @@ impl App {
                         });
                     });
                 }
-                for empty in self
+                let root_empty_layers: Vec<_> = self
                     .doc
                     .empty_layers
                     .iter()
                     .filter(|layer| layer.folder_id.is_none())
-                {
+                    .cloned()
+                    .collect();
+                for empty in root_empty_layers {
                     row_frame(ui, false, |ui| {
                         if eye_button(ui, empty.visible).clicked() {
                             toggle_empty_visibility = Some(empty.id);
@@ -3841,11 +3901,44 @@ impl App {
                             if delete_button(ui).clicked() {
                                 remove_empty = Some(empty.id);
                             }
-                            ui.label(&empty.name);
+                            let width = ui.available_width();
+                            if self.layer_item_editor == Some(empty.id) {
+                                if let Some(target) = self
+                                    .doc
+                                    .empty_layers
+                                    .iter_mut()
+                                    .find(|target| target.id == empty.id)
+                                {
+                                    let response = ui.add_sized(
+                                        [width, 22.0],
+                                        egui::TextEdit::singleline(&mut target.name),
+                                    );
+                                    response.request_focus();
+                                    if response.lost_focus()
+                                        || ui.input(|input| input.key_pressed(Key::Enter))
+                                    {
+                                        commit_layer_item_edit = true;
+                                    }
+                                }
+                            } else {
+                                let response = ui.add_sized(
+                                    [width, 22.0],
+                                    egui::Label::new(&empty.name).sense(Sense::click()),
+                                );
+                                if response.double_clicked() {
+                                    begin_layer_item_edit = Some(empty.id);
+                                }
+                            }
                         });
                     });
                 }
             });
+        if let Some(id) = begin_layer_item_edit {
+            self.begin_layer_item_edit(id);
+        }
+        if commit_layer_item_edit {
+            self.commit_layer_item_edit();
+        }
         if let Some(i) = remove_face {
             self.set_single_selection(Some(Selection::Face(i)));
             self.delete_selected();
@@ -7284,6 +7377,8 @@ mod tests {
             dock: App::default_dock_layout(),
             face_editor: None,
             face_name_snapshot: None,
+            layer_item_editor: None,
+            layer_item_name_snapshot: None,
             tool: Tool::Draw,
             status: String::new(),
             shape_save_path: None,
