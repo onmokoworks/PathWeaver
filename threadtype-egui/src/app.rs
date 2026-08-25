@@ -4277,13 +4277,24 @@ impl App {
 
     fn render_grid_tab(&mut self, ui: &mut egui::Ui) {
         let colors = self.theme_colors();
+        let language = self.language;
         ui.vertical(|ui| {
             let before_doc = self.doc.clone();
             let before_grid = self.doc.grid;
-            ui.add(egui::Slider::new(&mut self.doc.grid.spacing, 40.0..=320.0).text("間隔"));
-            ui.add(egui::Slider::new(&mut self.doc.grid.catch, 0.0..=24.0).text("引っかかり範囲"));
+            section_header(ui, language.text("基本グリッド", "Grid geometry"));
+            ui.add(
+                egui::Slider::new(&mut self.doc.grid.spacing, 40.0..=320.0)
+                    .text(language.text("間隔", "Spacing")),
+            );
+            ui.add(
+                egui::Slider::new(&mut self.doc.grid.catch, 0.0..=24.0)
+                    .text(language.text("引っかかり範囲", "Snap range")),
+            );
             let (main_max, _) = safe_grid_radius_limits(&self.doc.grid);
-            ui.add(egui::Slider::new(&mut self.doc.grid.radius, 0.0..=main_max).text("半径"));
+            ui.add(
+                egui::Slider::new(&mut self.doc.grid.radius, 0.0..=main_max)
+                    .text(language.text("半径", "Radius")),
+            );
             if ENABLE_EXPERIMENTAL_SQUARE_PEGS {
                 ui.horizontal(|ui| {
                     ui.label("ピン形状");
@@ -4305,11 +4316,19 @@ impl App {
                     );
                 }
             }
-            ui.checkbox(&mut self.doc.grid.subs_enabled, "サブ円を使う");
+            ui.add_space(6.0);
+            section_header(ui, language.text("サブ円", "Sub pegs"));
+            ui.checkbox(
+                &mut self.doc.grid.subs_enabled,
+                language.text("サブ円を使う", "Enable sub pegs"),
+            );
             if !self.doc.disabled_pegs.is_empty() {
                 let count = self.doc.disabled_pegs.len();
                 if ui
-                    .button(format!("無効化した円をすべて戻す ({count})"))
+                    .button(format!(
+                        "{} ({count})",
+                        language.text("無効化した円をすべて戻す", "Restore disabled pegs")
+                    ))
                     .clicked()
                 {
                     self.push_history();
@@ -4318,28 +4337,46 @@ impl App {
                     self.status = "無効化したグリッド円を戻しました".to_owned();
                 }
             }
-            ui.label(egui::RichText::new("サブ円の半径").color(colors.text2));
             let (_, sub_max) = safe_grid_radius_limits(&self.doc.grid);
-            ui.add(egui::Slider::new(&mut self.doc.grid.sub_radius, 0.0..=sub_max).text("サブ"));
+            ui.add_enabled_ui(self.doc.grid.subs_enabled, |ui| {
+                ui.add(
+                    egui::Slider::new(&mut self.doc.grid.sub_radius, 0.0..=sub_max)
+                        .text(language.text("半径", "Radius")),
+                );
+            });
             if self.doc.grid.subs_enabled {
                 ui.label(
-                    egui::RichText::new(format!("重ならない上限: {sub_max:.1}"))
-                        .small()
-                        .color(colors.text2),
+                    egui::RichText::new(format!(
+                        "{}: {sub_max:.1}",
+                        language.text("重ならない上限", "Non-overlap limit")
+                    ))
+                    .small()
+                    .color(colors.text2),
                 );
             }
+            ui.add_space(6.0);
+            section_header(ui, language.text("拡縮", "Scaling"));
             ui.checkbox(
                 &mut self.doc.grid.scale_link,
-                "間隔に合わせて円の大きさも変える",
+                language.text(
+                    "間隔に合わせて円の大きさも変える",
+                    "Scale peg size with spacing",
+                ),
             );
-            ui.label("拡縮の基準");
-            ui.horizontal(|ui| {
-                ui.radio_value(
-                    &mut self.doc.grid.scale_anchor,
-                    ScaleAnchor::TopLeft,
-                    "左上",
-                );
-                ui.radio_value(&mut self.doc.grid.scale_anchor, ScaleAnchor::Center, "中央");
+            ui.add_enabled_ui(self.doc.grid.scale_link, |ui| {
+                ui.label(language.text("拡縮の基準", "Scale anchor"));
+                ui.horizontal(|ui| {
+                    ui.radio_value(
+                        &mut self.doc.grid.scale_anchor,
+                        ScaleAnchor::TopLeft,
+                        language.text("左上", "Top left"),
+                    );
+                    ui.radio_value(
+                        &mut self.doc.grid.scale_anchor,
+                        ScaleAnchor::Center,
+                        language.text("中央", "Center"),
+                    );
+                });
             });
             if self.doc.grid != before_grid && self.draw.is_some() {
                 self.draw = None;
@@ -4366,7 +4403,11 @@ impl App {
             }
             ui.add_space(8.0);
             ui.separator();
-            if ui.button("グリフをクリア").clicked() {
+            let clear_label = match self.workspace_mode {
+                WorkspaceMode::Shape => language.text("シェイプをクリア", "Clear shape"),
+                WorkspaceMode::Font => language.text("グリフをクリア", "Clear glyph"),
+            };
+            if ui.button(clear_label).clicked() {
                 self.clear_glyph();
             }
         });
