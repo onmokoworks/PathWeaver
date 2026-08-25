@@ -852,18 +852,17 @@ impl App {
     fn default_dock_layout() -> DockState<DockTab> {
         // 試打はフォントモードでのみキャンバスの兄弟タブとして追加する。
         let mut dock = DockState::new(vec![DockTab::Canvas]);
-        // 右側の情報は縦に細切れにせず、一つのインスペクター領域へ集約する。
-        // 必要な情報だけをタブで切り替え、キャンバス面積と視線の流れを安定させる。
-        dock.main_surface_mut().split_right(
+        // 左はプロジェクト／素材、中央は制作面、右は選択内容のインスペクター。
+        // 各タブは egui_dock のドラッグで従来どおり分離できる。
+        let [center, _left] = dock.main_surface_mut().split_left(
             NodeIndex::root(),
-            0.76,
-            vec![
-                DockTab::Grid,
-                DockTab::Properties,
-                DockTab::Layers,
-                DockTab::Glyphs,
-                DockTab::Circles,
-            ],
+            0.78,
+            vec![DockTab::Glyphs, DockTab::Circles],
+        );
+        dock.main_surface_mut().split_right(
+            center,
+            0.72,
+            vec![DockTab::Properties, DockTab::Grid, DockTab::Layers],
         );
         dock
     }
@@ -3236,6 +3235,16 @@ impl App {
             egui_shadcn::ColorPalette::shadcn_light(egui_shadcn::ShadcnBaseColor::Zinc)
         });
         ui.horizontal_centered(|ui| {
+            ui.label(egui::RichText::new("ThreadType").strong());
+            ui.label(egui::RichText::new("/").weak());
+            ui.label(
+                egui::RichText::new(match self.workspace_mode {
+                    WorkspaceMode::Shape => language.text("無題のシェイプ", "Untitled shape"),
+                    WorkspaceMode::Font => &self.font_project.family_name,
+                })
+                .weak(),
+            );
+            ui.add_space(12.0);
             let shape_selected = self.workspace_mode == WorkspaceMode::Shape;
             if egui_shadcn::button(
                 ui,
