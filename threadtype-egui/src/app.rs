@@ -3031,6 +3031,13 @@ impl App {
                 .size(16.0)
                 .strong(),
         );
+        ui.add_space(2.0);
+        ui.label(
+            egui::RichText::new(language.text("表示", "APPEARANCE"))
+                .size(10.0)
+                .strong()
+                .color(colors.text3),
+        );
         ui.horizontal(|ui| {
             let (swatch_rect, _) = ui.allocate_exact_size(Vec2::new(46.0, 38.0), Sense::hover());
             let fill_on = matches!(
@@ -3087,9 +3094,17 @@ impl App {
                 }
             });
         });
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(language.text("テキスト", "TEXT"))
+                .size(10.0)
+                .strong()
+                .color(colors.text3),
+        );
         ui.add(
             egui::TextEdit::multiline(&mut self.proof_text)
                 .desired_rows(2)
+                .desired_width(f32::INFINITY)
                 .hint_text(language.text("ここに試したい文字を入力", "Type proof text")),
         );
         ui.horizontal_wrapped(|ui| {
@@ -3124,9 +3139,9 @@ impl App {
             });
             widest = widest.max(width);
         }
-        let desired_width = widest.max(ui.available_width() - 8.0) + 24.0;
+        let desired_width = widest.max(ui.available_width() - 8.0) + 32.0;
         let preview_height = ui.available_height().max(180.0);
-        let desired_height = (line_count * line_height + 28.0).max(preview_height);
+        let desired_height = (line_count * line_height + 40.0).max(preview_height);
         egui::ScrollArea::both()
             .id_salt("font-proof-scroll")
             .auto_shrink([false, false])
@@ -3134,14 +3149,32 @@ impl App {
             .show(ui, |ui| {
                 let (rect, _) = ui
                     .allocate_exact_size(Vec2::new(desired_width, desired_height), Sense::hover());
-                ui.painter().rect_filled(rect, 2.0, colors.bg);
+                ui.painter().rect_filled(rect, 6.0, colors.bg);
+                ui.painter().rect_stroke(
+                    rect,
+                    6.0,
+                    Stroke::new(1.0, colors.border),
+                    egui::StrokeKind::Inside,
+                );
                 let metrics = self.font_project.metrics;
-                let mut pen_x = rect.left() + 12.0;
-                let mut baseline = rect.top() + size + 10.0;
+                let mut pen_x = rect.left() + 16.0;
+                let mut baseline = rect.top() + size + 16.0;
+                for line in 0..line_count as usize {
+                    let y = baseline + line as f32 * line_height;
+                    ui.painter().add(egui::Shape::dashed_line(
+                        &[
+                            Pos2::new(rect.left() + 12.0, y),
+                            Pos2::new(rect.right() - 12.0, y),
+                        ],
+                        Stroke::new(0.75, colors.text3.gamma_multiply(0.35)),
+                        4.0,
+                        5.0,
+                    ));
+                }
                 let mut frame_rings: HashMap<usize, Arc<Vec<Vec<Point>>>> = HashMap::new();
                 for character in text.chars() {
                     if character == '\n' {
-                        pen_x = rect.left() + 12.0;
+                        pen_x = rect.left() + 16.0;
                         baseline += line_height;
                         continue;
                     }
@@ -3209,7 +3242,10 @@ impl App {
                 }
             });
         ui.label(
-            egui::RichText::new("未作成・未登録の文字は □。左右余白と送り幅は上で調整できます。")
+            egui::RichText::new(language.text(
+                "未作成・未登録の文字は □。左右余白と送り幅は上で調整できます。",
+                "Unbuilt or unavailable glyphs appear as □. Adjust bearings and advance in the inspector.",
+            ))
                 .small()
                 .color(colors.text2),
         );
