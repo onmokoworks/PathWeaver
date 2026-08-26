@@ -612,6 +612,14 @@ enum Selection {
     PegRef(PegRef),
 }
 
+/// レイヤーパネル内で移動できる項目。インデックス／IDだけを運び、
+/// ドロップ確定時に最新のDocumentへ適用する。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum LayerDragPayload {
+    Face(usize),
+    EmptyLayer(u64),
+}
+
 enum ActiveDrag {
     Custom {
         start: Vec<(u64, Point)>,
@@ -1209,6 +1217,53 @@ impl App {
                 peg.center.y += dy;
             }
         }
+    }
+
+    /// マージ済み輪郭は円参照を持たないため、グリッド変更時に元スナップショット
+    /// から座標を再計算する。Grid(0,0) の新旧原点を使うため、Center 基準では
+    /// 参照セル (3,2) がキャンバス中央に固定されたまま間隔へ追従する。
+    fn remap_baked_shapes_for_grid_change(
+        document: &mut Document,
+        source: &Document,
+        canvas_center: Point,
+    ) -> bool {
+        let old_spacing = source.grid.spacing;
+        let new_spacing = document.grid.spacing;
+        if old_spacing.abs() <= f64::EPSILON || new_spacing.abs() <= f64::EPSILON {
+            return false;
+        }
+        let origin = |grid: &GridSettings| match grid.scale_anchor {
+            ScaleAnchor::TopLeft => Point::new(110.0, 110.0),
+            ScaleAnchor::Center => Point::new(
+                canvas_center.x - 3.0 * grid.spacing,
+                canvas_center.y - 2.0 * grid.spacing,
+            ),
+        };
+        let old_origin = origin(&source.grid);
+        let new_origin = origin(&document.grid);
+        let scale = new_spacing / old_spacing;
+        let mut changed = false;
+        for (face, source_face) in document.faces.iter_mut().zip(&source.faces) {
+            let (Some(baked), Some(source_baked)) =
+                (face.baked.as_mut(), source_face.baked.as_ref())
+            else {
+                continue;
+            };
+            for (ring, source_ring) in baked.rings.iter_mut().zip(&source_baked.rings) {
+                if ring.len() != source_ring.len() {
+                    continue;
+                }
+                for (point, source_point) in ring.iter_mut().zip(source_ring) {
+                    let mapped = Point::new(
+                        new_origin.x + (source_point.x - old_origin.x) * scale,
+                        new_origin.y + (source_point.y - old_origin.y) * scale,
+                    );
+                    changed |= *point != mapped;
+                    *point = mapped;
+                }
+            }
+        }
+        changed
     }
 
     /// レイヤー行の小さな形状プレビュー
@@ -4360,6 +4415,70 @@ impl App {
         id
     }
 
+    /// レイヤー項目を既存フォルダへ移す。所属は排他的で、同じシェイプが
+    /// 複数フォルダへ残らない。D&D 1回をUndo 1回として記録する。
+    fn move_layer_item_to_folder(
+        &mut self,
+        payload: LayerDragPayload,
+        target_folder_id: u64,
+    ) -> bool {
+        let Some(target_index) = self
+            .doc
+            .layer_folders
+            .iter()
+            .position(|folder| folder.id == target_folder_id)
+        else {
+            return false;
+        };
+        let snapshot = self.doc.clone();
+        let changed = match payload {
+            LayerDragPayload::Face(face_index) if face_index < self.doc.faces.len() => {
+                let already_there = self.doc.layer_folders[target_index]
+                    .face_indices
+                    .contains(&face_index);
+                let membership_count = self
+                    .doc
+                    .layer_folders
+                    .iter()
+                    .filter(|folder| folder.face_indices.contains(&face_index))
+                    .count();
+                for folder in &mut self.doc.layer_folders {
+                    folder.face_indices.retain(|index| *index != face_index);
+                }
+                self.doc.layer_folders[target_index]
+                    .face_indices
+                    .push(face_index);
+                !already_there || membership_count != 1
+            }
+            LayerDragPayload::EmptyLayer(layer_id) => {
+                let Some(layer) = self
+                    .doc
+                    .empty_layers
+                    .iter_mut()
+                    .find(|layer| layer.id == layer_id)
+                else {
+                    return false;
+                };
+                let changed = layer.folder_id != Some(target_folder_id);
+                layer.folder_id = Some(target_folder_id);
+                changed
+            }
+            LayerDragPayload::Face(_) => return false,
+        };
+        self.doc.layer_folders[target_index].expanded = true;
+        if changed {
+            self.push_history_snapshot(snapshot);
+            self.status = self
+                .language
+                .text(
+                    "レイヤーをフォルダへ移動しました",
+                    "Layer moved into folder",
+                )
+                .to_owned();
+        }
+        changed
+    }
+
     fn render_layers_tab(&mut self, ui: &mut egui::Ui) {
         let language = self.language;
         let shift = ui.input(|i| i.modifiers.shift);
@@ -4370,6 +4489,7 @@ impl App {
         let mut select_layer_folder: Option<u64> = None;
         let mut begin_layer_item_edit: Option<u64> = None;
         let mut commit_layer_item_edit = false;
+        let mut move_to_folder: Option<(LayerDragPayload, u64)> = None;
         let grouped_faces: std::collections::HashSet<usize> = self
             .doc
             .layer_folders
@@ -4445,6 +4565,20 @@ impl App {
                                     &kind,
                                     folder_selected,
                                 );
+                                if response.dnd_hover_payload::<LayerDragPayload>().is_some() {
+                                    let drop_rect = ui.max_rect().shrink2(Vec2::new(0.0, 1.0));
+                                    ui.painter().rect_stroke(
+                                        drop_rect,
+                                        5.0,
+                                        Stroke::new(1.0, self.theme_colors().accent),
+                                        egui::StrokeKind::Inside,
+                                    );
+                                }
+                                if let Some(payload) =
+                                    response.dnd_release_payload::<LayerDragPayload>()
+                                {
+                                    move_to_folder = Some((*payload, folder.id));
+                                }
                                 if response.clicked() {
                                     select_layer_folder = Some(folder.id);
                                 }
@@ -4498,6 +4632,12 @@ impl App {
                                         } else {
                                             let response =
                                                 layer_item_label(ui, width, &name, kind, selected);
+                                            layer_drag_source(
+                                                ui,
+                                                &response,
+                                                LayerDragPayload::Face(face_idx),
+                                                &name,
+                                            );
                                             if response.clicked() {
                                                 if shift {
                                                     self.toggle_selection(Selection::Face(
@@ -4564,6 +4704,12 @@ impl App {
                                                 language.text("空レイヤー", "Empty layer"),
                                                 selected,
                                             );
+                                            layer_drag_source(
+                                                ui,
+                                                &response,
+                                                LayerDragPayload::EmptyLayer(empty.id),
+                                                &empty.name,
+                                            );
                                             if response.clicked() {
                                                 select_empty_layer = Some(empty.id);
                                             }
@@ -4616,6 +4762,7 @@ impl App {
                                 // 選択ハイライトは行フレームが全幅で描くので、ここは
                                 // 背景なしのクリック可能ラベルにする（二重の枠を避ける）
                                 let resp = layer_item_label(ui, w, &name, kind, selected);
+                                layer_drag_source(ui, &resp, LayerDragPayload::Face(i), &name);
                                 if resp.clicked() {
                                     if shift {
                                         self.toggle_selection(Selection::Face(i));
@@ -4672,6 +4819,12 @@ impl App {
                                     language.text("空レイヤー", "Empty layer"),
                                     selected,
                                 );
+                                layer_drag_source(
+                                    ui,
+                                    &response,
+                                    LayerDragPayload::EmptyLayer(empty.id),
+                                    &empty.name,
+                                );
                                 if response.clicked() {
                                     select_empty_layer = Some(empty.id);
                                 }
@@ -4683,6 +4836,9 @@ impl App {
                     });
                 }
             });
+        if let Some((payload, folder_id)) = move_to_folder {
+            self.move_layer_item_to_folder(payload, folder_id);
+        }
         if let Some(id) = select_empty_layer {
             self.select_empty_layer(id, shift);
         }
@@ -5443,6 +5599,20 @@ impl App {
             }
             if self.doc.grid != before_grid && self.grid_edit_orig.is_none() {
                 self.grid_edit_orig = Some(before_doc);
+            }
+            if let Some(source) = self.grid_edit_orig.clone() {
+                if Self::remap_baked_shapes_for_grid_change(
+                    &mut self.doc,
+                    &source,
+                    self.canvas_center,
+                ) {
+                    self.status = language
+                        .text(
+                            "結合シェイプもグリッド間隔に追従しました",
+                            "Merged shapes followed the grid spacing",
+                        )
+                        .to_owned();
+                }
             }
             if self.grid_edit_orig.is_some() && !ui.input(|input| input.pointer.primary_down()) {
                 if let Some(snapshot) = self.grid_edit_orig.take() {
@@ -7673,7 +7843,8 @@ fn layer_item_label(
     kind: &str,
     selected: bool,
 ) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width.max(8.0), 32.0), Sense::click());
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(width.max(8.0), 32.0), Sense::click_and_drag());
     let painter = ui.painter().with_clip_rect(rect);
     let name_color = if selected {
         ui.visuals().strong_text_color()
@@ -7695,6 +7866,41 @@ fn layer_item_label(
         ui.visuals().weak_text_color(),
     );
     response
+}
+
+/// 行ラベルをD&Dソースにし、ドラッグ中は移動対象をカーソル脇に表示する。
+fn layer_drag_source(
+    ui: &mut egui::Ui,
+    response: &egui::Response,
+    payload: LayerDragPayload,
+    label: &str,
+) {
+    response.dnd_set_drag_payload(payload);
+    if response.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        ui.painter().rect_stroke(
+            response.rect,
+            5.0,
+            Stroke::new(1.0, ui.visuals().selection.stroke.color),
+            egui::StrokeKind::Inside,
+        );
+        if let Some(pointer) = ui.ctx().pointer_interact_pos() {
+            egui::Area::new(Id::new(("layer-drag-preview", payload)))
+                .order(egui::Order::Tooltip)
+                .fixed_pos(pointer + Vec2::new(12.0, 10.0))
+                .interactable(false)
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::new()
+                        .fill(ui.visuals().panel_fill)
+                        .stroke(Stroke::new(1.0, ui.visuals().selection.stroke.color))
+                        .corner_radius(5)
+                        .inner_margin(egui::Margin::symmetric(8, 4))
+                        .show(ui, |ui| {
+                            ui.label(label);
+                        });
+                });
+        }
+    }
 }
 
 fn align_icon_button(ui: &mut egui::Ui, axis: AlignAxis, tooltip: &str) -> egui::Response {
@@ -8855,6 +9061,36 @@ mod tests {
     }
 
     #[test]
+    fn dragging_a_shape_between_folders_is_exclusive_and_undoable() {
+        let mut app = test_app();
+        let first_folder = app.add_layer_folder();
+        app.clear_selection();
+        let second_folder = app.add_layer_folder();
+        app.clear_selection();
+        app.doc.faces.push(Face {
+            start: StartAnchor {
+                peg: PegRef::Grid { row: 0, col: 0 },
+                port: Port::Top,
+            },
+            elements: Vec::new(),
+            name: "Shape".to_owned(),
+            visible: true,
+            baked: None,
+            ignored_pegs: Vec::new(),
+        });
+
+        assert!(app.move_layer_item_to_folder(LayerDragPayload::Face(0), first_folder));
+        assert_eq!(app.doc.layer_folders[0].face_indices, vec![0]);
+        assert!(app.move_layer_item_to_folder(LayerDragPayload::Face(0), second_folder));
+        assert!(app.doc.layer_folders[0].face_indices.is_empty());
+        assert_eq!(app.doc.layer_folders[1].face_indices, vec![0]);
+
+        app.do_undo();
+        assert_eq!(app.doc.layer_folders[0].face_indices, vec![0]);
+        assert!(app.doc.layer_folders[1].face_indices.is_empty());
+    }
+
+    #[test]
     fn clear_glyph_removes_all_document_content_but_keeps_grid_settings() {
         let mut app = test_app();
         app.doc.grid.spacing = 240.0;
@@ -9381,6 +9617,78 @@ mod tests {
         let moved = &app.doc.faces[0].baked.as_ref().unwrap().rings[0];
         assert_eq!(moved[0], Point::new(101.0, 202.0));
         assert_eq!(moved[2], Point::new(101.0, 204.0));
+    }
+
+    #[test]
+    fn baked_faces_follow_grid_spacing_without_changing_bevel_amount() {
+        let mut app = test_app();
+        app.doc.grid.spacing = 200.0;
+        app.doc.grid.scale_anchor = ScaleAnchor::TopLeft;
+        app.doc.faces.push(Face {
+            start: StartAnchor {
+                peg: PegRef::Grid { row: 0, col: 0 },
+                port: Port::Top,
+            },
+            elements: Vec::new(),
+            name: String::new(),
+            visible: true,
+            baked: Some(crate::model::BakedShape {
+                rings: vec![vec![
+                    Point::new(110.0, 110.0),
+                    Point::new(310.0, 110.0),
+                    Point::new(110.0, 310.0),
+                ]],
+                bevel: 32.0,
+            }),
+            ignored_pegs: Vec::new(),
+        });
+        let source = app.doc.clone();
+        app.doc.grid.spacing = 300.0;
+
+        assert!(App::remap_baked_shapes_for_grid_change(
+            &mut app.doc,
+            &source,
+            app.canvas_center,
+        ));
+        let baked = app.doc.faces[0].baked.as_ref().unwrap();
+        assert_eq!(baked.rings[0][0], Point::new(110.0, 110.0));
+        assert_eq!(baked.rings[0][1], Point::new(410.0, 110.0));
+        assert_eq!(baked.rings[0][2], Point::new(110.0, 410.0));
+        assert_eq!(baked.bevel, 32.0);
+    }
+
+    #[test]
+    fn baked_faces_keep_the_reference_cell_fixed_for_center_scaling() {
+        let mut app = test_app();
+        app.doc.grid.spacing = 200.0;
+        app.doc.grid.scale_anchor = ScaleAnchor::Center;
+        let center = app.canvas_center;
+        app.doc.faces.push(Face {
+            start: StartAnchor {
+                peg: PegRef::Grid { row: 0, col: 0 },
+                port: Port::Top,
+            },
+            elements: Vec::new(),
+            name: String::new(),
+            visible: true,
+            baked: Some(crate::model::BakedShape {
+                rings: vec![vec![
+                    center,
+                    Point::new(center.x - 600.0, center.y - 400.0),
+                    Point::new(center.x + 200.0, center.y),
+                ]],
+                bevel: 0.0,
+            }),
+            ignored_pegs: Vec::new(),
+        });
+        let source = app.doc.clone();
+        app.doc.grid.spacing = 300.0;
+
+        App::remap_baked_shapes_for_grid_change(&mut app.doc, &source, center);
+        let ring = &app.doc.faces[0].baked.as_ref().unwrap().rings[0];
+        assert_eq!(ring[0], center);
+        assert_eq!(ring[1], Point::new(center.x - 900.0, center.y - 600.0));
+        assert_eq!(ring[2], Point::new(center.x + 300.0, center.y));
     }
 
     #[test]
