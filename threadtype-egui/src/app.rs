@@ -1723,13 +1723,6 @@ impl App {
         })
     }
 
-    fn face_references_source(&self, source: &PegRef) -> bool {
-        self.doc
-            .faces
-            .iter()
-            .any(|face| self.face_references_peg(face, source))
-    }
-
     fn replace_peg_ref_in_faces(&mut self, source: PegRef, target: PegRef) {
         for face in &mut self.doc.faces {
             if face.start.peg == source {
@@ -1761,6 +1754,11 @@ impl App {
             radius: source_radius,
             visible: true,
         });
+        // 元のグリッド円を残すと、新しい任意円と完全に重なり、衝突判定が
+        // ドラッグを常に拒否する。移動対象へ置き換えた時点で元を無効化する。
+        if !self.doc.disabled_pegs.contains(&source) {
+            self.doc.disabled_pegs.push(source);
+        }
         self.replace_peg_ref_in_faces(source, PegRef::Custom { id });
         self.doc.next_peg_id = self.next_peg_id();
         id
@@ -6363,24 +6361,17 @@ impl App {
                                 self.begin_drag(&ids, pos, false);
                             }
                             (Tool::DirectSelect, source) => {
-                                // 参照判定は変換「前」に行う。変換後は参照が新しい
-                                // Custom id に置換されるため、後から判定すると常に
-                                // false になりドラッグが成立しない
-                                if self.face_references_source(&source) {
-                                    if self.drag_snapshot.is_none() {
-                                        self.drag_snapshot = Some(self.doc.clone());
-                                    }
-                                    self.set_single_selection(Some(Selection::PegRef(source)));
-                                    let id =
-                                        self.direct_select_drag_target(source, pos_ref, radius);
-                                    self.set_single_selection(Some(Selection::Peg(id)));
-                                    self.begin_drag(&[id], pos, true);
-                                    self.rebuild_pegs(self.canvas_size);
-                                } else {
-                                    self.set_single_selection(Some(Selection::PegRef(source)));
-                                    self.status =
-                                    "この円は面に使われていません（面が参照する円のみ動かせます）".to_owned();
+                                // 使用中／未使用にかかわらず、グリッド円をその場で
+                                // 任意円へ置き換えてドラッグ可能にする。使用中なら
+                                // すべての面参照も同じ任意円へ付け替わる。
+                                if self.drag_snapshot.is_none() {
+                                    self.drag_snapshot = Some(self.doc.clone());
                                 }
+                                self.set_single_selection(Some(Selection::PegRef(source)));
+                                let id = self.direct_select_drag_target(source, pos_ref, radius);
+                                self.set_single_selection(Some(Selection::Peg(id)));
+                                self.begin_drag(&[id], pos, true);
+                                self.rebuild_pegs(self.canvas_size);
                             }
                             _ => {}
                         }
@@ -8731,6 +8722,52 @@ mod tests {
         app.delete_selected();
         assert!(app.doc.disabled_pegs.contains(&target));
         assert!(app.doc.faces[0].elements.is_empty());
+    }
+
+    #[test]
+    fn direct_select_replaces_the_grid_peg_before_dragging_it() {
+        let mut app = test_app();
+        app.canvas_size = Vec2::new(1280.0, 800.0);
+        app.canvas_center = Point::new(640.0, 400.0);
+        let source = PegRef::Grid { row: 0, col: 0 };
+        app.doc.faces.push(Face {
+            start: StartAnchor {
+                peg: source,
+                port: Port::Right,
+            },
+            elements: Vec::new(),
+            name: String::new(),
+            visible: true,
+            baked: None,
+            ignored_pegs: Vec::new(),
+        });
+        let source_peg = resolve_peg(
+            &app.doc.grid,
+            &app.doc.custom_pegs,
+            app.canvas_center,
+            app.doc.peg_appearance,
+            &source,
+        )
+        .unwrap();
+
+        let id = app.direct_select_drag_target(
+            source,
+            source_peg.center,
+            source_peg.radius - app.doc.grid.catch,
+        );
+        app.rebuild_pegs(app.canvas_size);
+
+        assert!(app.doc.disabled_pegs.contains(&source));
+        assert_eq!(app.doc.faces[0].start.peg, PegRef::Custom { id });
+        assert!(app.doc.custom_pegs.iter().any(|peg| peg.id == id));
+        assert!(app.can_place_custom_pegs(
+            &[(
+                id,
+                Point::new(source_peg.center.x + 20.0, source_peg.center.y),
+                source_peg.radius - app.doc.grid.catch,
+            )],
+            &[id],
+        ));
     }
 
     #[test]
