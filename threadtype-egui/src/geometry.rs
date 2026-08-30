@@ -702,6 +702,7 @@ pub fn materialize_face_with_obstacles(
     }
 
     let mut last_segs = None;
+    let mut automatically_inserted = Vec::new();
     for _ in 0..MAX_STEPS {
         let probe = Face {
             start: face.start,
@@ -722,6 +723,13 @@ pub fn materialize_face_with_obstacles(
             let d = to - from;
             let mut best: Option<(f64, PegRef, f64)> = None;
             for (peg_ref, peg) in obstacles {
+                // Once an obstacle has been inserted into this derived taut cycle,
+                // do not discover the same peg again from another edge. Explicit
+                // repeated wraps remain intact in `face.elements`; this only
+                // prevents automatic capture from multiplying while a peg moves.
+                if automatically_inserted.contains(peg_ref) {
+                    continue;
+                }
                 let Some(t) = segment_first_entry(from, to, peg) else {
                     continue;
                 };
@@ -753,6 +761,7 @@ pub fn materialize_face_with_obstacles(
                 sweep_hint: PI,
             },
         );
+        automatically_inserted.push(peg);
     }
     // 高密度配置で上限に達しても面を消さない。未解決の貫通は呼び出し側の
     // invalid表示で明示し、ユーザーが半径や配置を戻せる状態を保つ。
@@ -1906,9 +1915,15 @@ mod tests {
             .collect::<Vec<_>>();
 
         let segs = materialize_face_with_obstacles(&face, &peg_for, &obstacles).unwrap();
-        assert!(segs.iter().any(|segment| matches!(segment,
-            Seg::Arc { center, .. } if center.distance(Point::new(0.0, -20.0)) < 1e-8
-        )));
+        assert_eq!(
+            segs.iter()
+                .filter(|segment| matches!(segment,
+                    Seg::Arc { center, .. } if center.distance(Point::new(0.0, -20.0)) < 1e-8
+                ))
+                .count(),
+            1,
+            "an automatically caught peg must occur only once in the taut cycle"
+        );
         assert_seg_chain_connected(&segs);
 
         for pair in segs.windows(2) {
