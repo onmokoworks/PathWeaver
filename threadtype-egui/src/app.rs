@@ -1445,6 +1445,23 @@ impl App {
     }
 
     fn begin_drag(&mut self, ids: &[u64], anchor: Point, converted: bool) {
+        // Moving a peg must not silently change the topology of unrelated faces.
+        // The obstacle solver considers every visible peg, so a peg dragged across
+        // an existing strand would otherwise be picked up as a new wrap. Faces
+        // that do not explicitly use the moving peg keep ignoring it while it is
+        // repositioned; faces that reference it continue to follow it normally.
+        for face in &mut self.doc.faces {
+            for id in ids {
+                let peg_ref = PegRef::Custom { id: *id };
+                let referenced = face.start.peg == peg_ref
+                    || face.elements.iter().any(
+                        |element| matches!(element, Element::Wrap { peg, .. } if *peg == peg_ref),
+                    );
+                if !referenced && !face.ignored_pegs.contains(&peg_ref) {
+                    face.ignored_pegs.push(peg_ref);
+                }
+            }
+        }
         let mut start = Vec::new();
         for id in ids {
             if let Some(peg) = self.doc.custom_pegs.iter().find(|peg| peg.id == *id) {
@@ -8741,6 +8758,17 @@ mod tests {
             baked: None,
             ignored_pegs: Vec::new(),
         });
+        app.doc.faces.push(Face {
+            start: StartAnchor {
+                peg: PegRef::Grid { row: 2, col: 2 },
+                port: Port::Right,
+            },
+            elements: Vec::new(),
+            name: "unrelated".to_owned(),
+            visible: true,
+            baked: None,
+            ignored_pegs: Vec::new(),
+        });
         let source_peg = resolve_peg(
             &app.doc.grid,
             &app.doc.custom_pegs,
@@ -8756,9 +8784,16 @@ mod tests {
             source_peg.radius - app.doc.grid.catch,
         );
         app.rebuild_pegs(app.canvas_size);
+        app.begin_drag(&[id], source_peg.center, true);
 
         assert!(app.doc.disabled_pegs.contains(&source));
         assert_eq!(app.doc.faces[0].start.peg, PegRef::Custom { id });
+        assert!(!app.doc.faces[0]
+            .ignored_pegs
+            .contains(&PegRef::Custom { id }));
+        assert!(app.doc.faces[1]
+            .ignored_pegs
+            .contains(&PegRef::Custom { id }));
         assert!(app.doc.custom_pegs.iter().any(|peg| peg.id == id));
         assert!(app.can_place_custom_pegs(
             &[(
