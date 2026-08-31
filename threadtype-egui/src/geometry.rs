@@ -658,12 +658,31 @@ pub fn materialize_face_with_obstacles(
     resolve: &impl Fn(&PegRef) -> Option<Peg>,
     obstacles: &[(PegRef, Peg)],
 ) -> Option<Vec<Seg>> {
+    materialize_face_with_obstacles_derived(face, resolve, obstacles).map(|(segments, _)| segments)
+}
+
+/// Resolve a taut face and return the wrap sequence produced by automatic
+/// obstacle capture. The editor uses this during peg dragging to commit a
+/// newly caught peg to the document instead of forgetting it next frame.
+pub fn capture_face_obstacles(
+    face: &Face,
+    resolve: &impl Fn(&PegRef) -> Option<Peg>,
+    obstacles: &[(PegRef, Peg)],
+) -> Option<Vec<Element>> {
+    materialize_face_with_obstacles_derived(face, resolve, obstacles).map(|(_, elements)| elements)
+}
+
+fn materialize_face_with_obstacles_derived(
+    face: &Face,
+    resolve: &impl Fn(&PegRef) -> Option<Peg>,
+    obstacles: &[(PegRef, Peg)],
+) -> Option<(Vec<Seg>, Vec<Element>)> {
     if !face
         .elements
         .iter()
         .all(|element| matches!(element, Element::Wrap { .. }))
     {
-        return materialize_face(face, resolve);
+        return materialize_face(face, resolve).map(|segments| (segments, face.elements.clone()));
     }
     if face
         .elements
@@ -672,7 +691,7 @@ pub fn materialize_face_with_obstacles(
         .count()
         < 2
     {
-        return materialize_face(face, resolve);
+        return materialize_face(face, resolve).map(|segments| (segments, face.elements.clone()));
     }
 
     let mut elements = face.elements.clone();
@@ -749,7 +768,7 @@ pub fn materialize_face_with_obstacles(
             line_index += 1;
         }
         let Some((index, peg, s)) = insertion else {
-            return Some(segs);
+            return Some((segs, elements));
         };
         elements.insert(
             index.min(elements.len()),
@@ -765,7 +784,7 @@ pub fn materialize_face_with_obstacles(
     }
     // 高密度配置で上限に達しても面を消さない。未解決の貫通は呼び出し側の
     // invalid表示で明示し、ユーザーが半径や配置を戻せる状態を保つ。
-    last_segs
+    last_segs.map(|segments| (segments, elements))
 }
 
 /// 開始点から要素列をたどり、end で終わる開いた経路を実体化する。
@@ -1925,6 +1944,16 @@ mod tests {
             "an automatically caught peg must occur only once in the taut cycle"
         );
         assert_seg_chain_connected(&segs);
+        let captured = capture_face_obstacles(&face, &peg_for, &[(sub, peg_for(&sub).unwrap())])
+            .expect("moving obstacle should produce a persistent wrap sequence");
+        assert_eq!(
+            captured
+                .iter()
+                .filter(|element| matches!(element, Element::Wrap { peg, .. } if *peg == sub))
+                .count(),
+            1,
+            "the caught peg must be committed exactly once"
+        );
 
         for pair in segs.windows(2) {
             match (pair[0], pair[1]) {

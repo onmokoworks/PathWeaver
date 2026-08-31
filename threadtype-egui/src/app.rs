@@ -1,7 +1,7 @@
 use crate::export::{document_to_svg, document_to_svg_styled};
 use crate::font_export::export_ttf;
 use crate::geometry::{
-    bevel_ring, clamp_outside_pegs, materialize_chain, materialize_face,
+    bevel_ring, capture_face_obstacles, clamp_outside_pegs, materialize_chain, materialize_face,
     materialize_face_with_obstacles, peg_signed_distance, pegs_penetrated_by_line,
     segments_penetrate_pegs, signed_area, stroke_visible_ring_sets, thread_to_wrap_elements,
     union_polygon_ring_sets, union_visible_ring_sets, update_thread_ignoring, Peg, Seg, Thread,
@@ -2085,6 +2085,61 @@ impl App {
             }
         }
         true
+    }
+
+    fn commit_moved_peg_captures(&mut self, moving_ids: &[u64]) {
+        let resolver = |peg_ref: &PegRef| {
+            resolve_peg(
+                &self.doc.grid,
+                &self.doc.custom_pegs,
+                self.canvas_center,
+                self.doc.peg_appearance,
+                peg_ref,
+            )
+        };
+        let obstacles: Vec<(PegRef, Peg)> = moving_ids
+            .iter()
+            .filter_map(|id| {
+                let peg_ref = PegRef::Custom { id: *id };
+                resolver(&peg_ref).map(|peg| (peg_ref, peg))
+            })
+            .collect();
+        if obstacles.is_empty() {
+            return;
+        }
+
+        let updates: Vec<(usize, Vec<Element>)> = self
+            .doc
+            .faces
+            .iter()
+            .enumerate()
+            .filter(|(_, face)| face.visible && face.baked.is_none())
+            .filter(|(_, face)| {
+                !moving_ids.iter().any(|id| {
+                    self.face_references_peg(face, &PegRef::Custom { id: *id })
+                })
+            })
+            .filter_map(|(index, face)| {
+                let filtered: Vec<(PegRef, Peg)> = obstacles
+                    .iter()
+                    .copied()
+                    .filter(|(peg_ref, _)| !face.ignored_pegs.contains(peg_ref))
+                    .collect();
+                let elements = capture_face_obstacles(face, &resolver, &filtered)?;
+                let caught = moving_ids.iter().any(|id| {
+                    elements.iter().any(|element| {
+                        matches!(element, Element::Wrap { peg: PegRef::Custom { id: used }, .. } if used == id)
+                    })
+                });
+                caught.then_some((index, elements))
+            })
+            .collect();
+
+        for (index, elements) in updates {
+            if let Some(face) = self.doc.faces.get_mut(index) {
+                face.elements = elements;
+            }
+        }
     }
 
     fn materialized_faces(&self) -> Vec<(usize, FaceRender)> {
@@ -6448,6 +6503,7 @@ impl App {
                         }
                     }
                     if changed {
+                        self.commit_moved_peg_captures(&moving_ids);
                         rebuild_pegs = true;
                     }
                 }
