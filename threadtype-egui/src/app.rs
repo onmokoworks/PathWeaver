@@ -565,7 +565,7 @@ impl Default for WorkspaceDockLayout {
             left_fraction: 0.14,
             right_fraction: 0.19,
             center_active: Some(DockTab::Canvas),
-            inspector_active: Some(DockTab::Properties),
+            inspector_active: Some(DockTab::Grid),
             floating: Vec::new(),
         }
     }
@@ -962,17 +962,19 @@ impl App {
         // 各タブは egui_dock のドラッグで従来どおり分離できる。
         let right = right.clamp(0.16, 0.36);
         let left = left.clamp(0.12, 0.34).min(0.82 - right);
-        let [center, _right] = dock.main_surface_mut().split_right(
+        let [center, right_top] = dock.main_surface_mut().split_right(
             NodeIndex::root(),
             1.0 - right,
-            vec![DockTab::Properties, DockTab::Grid, DockTab::Layers],
+            vec![DockTab::Grid, DockTab::Properties],
         );
+        dock.main_surface_mut()
+            .split_below(right_top, 0.54, vec![DockTab::Layers]);
         // split_left は画面上の左側（新規ノード）の比率を受け取る。
         // 参照モックは Project 155px / Inspector 210px の固定幅に近い。
         // egui_dock は比率指定なので、既定ウィンドウで同寸法になる比率を使う。
         dock.main_surface_mut()
             .split_left(center, left / (1.0 - right), vec![DockTab::Project]);
-        if let Some(location) = dock.find_tab(&DockTab::Properties) {
+        if let Some(location) = dock.find_tab(&DockTab::Grid) {
             dock.set_active_tab(location);
         }
         dock
@@ -5694,7 +5696,7 @@ impl App {
             section_header(ui, language.text("ライン", "Line grid"));
             ui.checkbox(
                 &mut self.doc.grid.lines_enabled,
-                language.text("無限ラインを表示", "Show infinite grid lines"),
+                language.text("グリッド線を表示", "Show grid lines"),
             );
             ui.add_enabled_ui(self.doc.grid.lines_enabled, |ui| {
                 ui.checkbox(

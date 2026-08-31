@@ -204,7 +204,7 @@ impl Default for GridSettings {
             spacing: 200.0,
             lines_enabled: true,
             snap_to_lines: true,
-            pegs_enabled: true,
+            pegs_enabled: false,
             radius: 60.0,
             catch: 6.0,
             sub_radius: 24.0,
@@ -656,6 +656,9 @@ mod tests {
     #[test]
     fn sub_pegs_are_off_by_default() {
         assert!(!GridSettings::default().subs_enabled);
+        assert!(!GridSettings::default().pegs_enabled);
+        assert!(GridSettings::default().lines_enabled);
+        assert!(GridSettings::default().snap_to_lines);
     }
 
     #[test]
