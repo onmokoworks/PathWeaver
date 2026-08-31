@@ -4550,19 +4550,6 @@ impl App {
             .flat_map(|folder| folder.face_indices.iter().copied())
             .collect();
 
-        let layer_count = self.doc.faces.len() + self.doc.empty_layers.len();
-        ui.label(
-            egui::RichText::new(if language == UiLanguage::Japanese {
-                format!("レイヤー {layer_count}・名前はダブルクリックで変更")
-            } else if layer_count == 1 {
-                "1 layer · Double-click a name to rename".to_owned()
-            } else {
-                format!("{layer_count} layers · Double-click a name to rename")
-            })
-            .size(10.0)
-            .color(self.theme_colors().text3),
-        );
-        ui.add_space(4.0);
         egui::ScrollArea::vertical()
             .id_salt("layer-list")
             .show(ui, |ui| {
