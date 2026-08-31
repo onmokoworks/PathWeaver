@@ -151,6 +151,12 @@ pub struct EmptyLayer {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GridSettings {
     pub spacing: f64,
+    #[serde(default = "default_true")]
+    pub lines_enabled: bool,
+    #[serde(default = "default_true")]
+    pub snap_to_lines: bool,
+    #[serde(default = "default_true")]
+    pub pegs_enabled: bool,
     pub radius: f64,
     pub catch: f64,
     pub sub_radius: f64,
@@ -196,6 +202,9 @@ impl Default for GridSettings {
     fn default() -> Self {
         GridSettings {
             spacing: 200.0,
+            lines_enabled: true,
+            snap_to_lines: true,
+            pegs_enabled: true,
             radius: 60.0,
             catch: 6.0,
             sub_radius: 24.0,
@@ -658,6 +667,9 @@ mod tests {
             catch: 6.0,
             sub_radius: 24.0,
             subs_enabled: true,
+            lines_enabled: true,
+            snap_to_lines: true,
+            pegs_enabled: true,
             scale_link: false,
         };
         let peg = resolve_peg(
@@ -681,6 +693,9 @@ mod tests {
             catch: 4.0,
             sub_radius: 24.0,
             subs_enabled: true,
+            lines_enabled: true,
+            snap_to_lines: true,
+            pegs_enabled: true,
             scale_link: false,
         };
         let peg = resolve_peg(
@@ -704,6 +719,9 @@ mod tests {
             catch: 6.0,
             sub_radius: 24.0,
             subs_enabled: false,
+            lines_enabled: true,
+            snap_to_lines: true,
+            pegs_enabled: true,
             scale_link: false,
         };
         assert!(resolve_peg(
@@ -726,6 +744,9 @@ mod tests {
             catch: 5.0,
             sub_radius: 22.0,
             subs_enabled: true,
+            lines_enabled: true,
+            snap_to_lines: true,
+            pegs_enabled: true,
             scale_link: false,
         };
         let large_grid = GridSettings {
@@ -735,6 +756,9 @@ mod tests {
             catch: 5.0,
             sub_radius: 22.0,
             subs_enabled: true,
+            lines_enabled: true,
+            snap_to_lines: true,
+            pegs_enabled: true,
             scale_link: false,
         };
         let first = resolve_peg(
@@ -767,6 +791,9 @@ mod tests {
             catch: 6.0,
             sub_radius: 24.0,
             subs_enabled: true,
+            lines_enabled: true,
+            snap_to_lines: true,
+            pegs_enabled: true,
             scale_link: false,
         };
 

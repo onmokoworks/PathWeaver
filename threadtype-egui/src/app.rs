@@ -1708,6 +1708,24 @@ impl App {
         true
     }
 
+    fn snap_to_grid_lines(&self, point: Point) -> Point {
+        if !self.doc.grid.lines_enabled || !self.doc.grid.snap_to_lines {
+            return point;
+        }
+        let spacing = self.doc.grid.spacing.max(1.0);
+        let origin = match self.doc.grid.scale_anchor {
+            ScaleAnchor::TopLeft => Point::new(110.0, 110.0),
+            ScaleAnchor::Center => Point::new(
+                self.canvas_center.x - 3.0 * spacing,
+                self.canvas_center.y - 2.0 * spacing,
+            ),
+        };
+        Point::new(
+            origin.x + ((point.x - origin.x) / spacing).round() * spacing,
+            origin.y + ((point.y - origin.y) / spacing).round() * spacing,
+        )
+    }
+
     fn custom_peg_in_use(&self, id: u64) -> bool {
         self.doc.faces.iter().any(|face| {
             if matches!(face.start.peg, PegRef::Custom { id: used } if used == id) {
@@ -1860,25 +1878,27 @@ impl App {
 
         let mut pegs = Vec::new();
         let mut refs = Vec::new();
-        for row in min_row..=max_row {
-            for col in min_col..=max_col {
-                let grid_ref = PegRef::Grid { row, col };
-                if !disabled.contains(&grid_ref) {
-                    if let Some(peg) =
-                        resolve_peg(grid, customs, canvas_center, appearance, &grid_ref)
-                    {
-                        pegs.push(peg);
-                        refs.push(grid_ref);
-                    }
-                }
-                if grid.subs_enabled {
-                    let sub_ref = PegRef::Sub { row, col };
-                    if !disabled.contains(&sub_ref) {
+        if grid.pegs_enabled {
+            for row in min_row..=max_row {
+                for col in min_col..=max_col {
+                    let grid_ref = PegRef::Grid { row, col };
+                    if !disabled.contains(&grid_ref) {
                         if let Some(peg) =
-                            resolve_peg(grid, customs, canvas_center, appearance, &sub_ref)
+                            resolve_peg(grid, customs, canvas_center, appearance, &grid_ref)
                         {
                             pegs.push(peg);
-                            refs.push(sub_ref);
+                            refs.push(grid_ref);
+                        }
+                    }
+                    if grid.subs_enabled {
+                        let sub_ref = PegRef::Sub { row, col };
+                        if !disabled.contains(&sub_ref) {
+                            if let Some(peg) =
+                                resolve_peg(grid, customs, canvas_center, appearance, &sub_ref)
+                            {
+                                pegs.push(peg);
+                                refs.push(sub_ref);
+                            }
                         }
                     }
                 }
@@ -1915,6 +1935,7 @@ impl App {
         }
         custom_hash ^= grid.sub_radius.to_bits();
         custom_hash ^= u64::from(grid.subs_enabled as u8);
+        custom_hash ^= u64::from(grid.pegs_enabled as u8) << 8;
         custom_hash ^= u64::from(grid.scale_link as u8);
         custom_hash ^= appearance.rounding.to_bits();
         custom_hash ^= match appearance.shape {
@@ -5670,7 +5691,26 @@ impl App {
         ui.vertical(|ui| {
             let before_doc = self.doc.clone();
             let before_grid = self.doc.grid;
+            section_header(ui, language.text("ライン", "Line grid"));
+            ui.checkbox(
+                &mut self.doc.grid.lines_enabled,
+                language.text("無限ラインを表示", "Show infinite grid lines"),
+            );
+            ui.add_enabled_ui(self.doc.grid.lines_enabled, |ui| {
+                ui.checkbox(
+                    &mut self.doc.grid.snap_to_lines,
+                    language.text(
+                        "任意円を交点へスナップ",
+                        "Snap custom pegs to intersections",
+                    ),
+                );
+            });
+            ui.add_space(6.0);
             section_header(ui, language.text("基本グリッド", "Grid geometry"));
+            ui.checkbox(
+                &mut self.doc.grid.pegs_enabled,
+                language.text("グリッド円を自動生成", "Generate grid pegs"),
+            );
             mock_slider_row_f64(
                 ui,
                 language.text("間隔", "Spacing"),
@@ -6625,10 +6665,10 @@ impl App {
                     {
                         moved.push((
                             *id,
-                            Point {
+                            self.snap_to_grid_lines(Point {
                                 x: origin.x + delta.x,
                                 y: origin.y + delta.y,
-                            },
+                            }),
                             radius,
                         ));
                     }
@@ -6641,13 +6681,15 @@ impl App {
                 };
                 if can_move {
                     let mut changed = false;
-                    for (id, origin) in start.iter() {
+                    for (id, _) in start.iter() {
                         if let Some(peg) = self.doc.custom_pegs.iter_mut().find(|peg| peg.id == *id)
                         {
-                            let target = Point {
-                                x: origin.x + delta.x,
-                                y: origin.y + delta.y,
-                            };
+                            let target = moved
+                                .iter()
+                                .find_map(|(moved_id, point, _)| {
+                                    (*moved_id == *id).then_some(*point)
+                                })
+                                .unwrap_or(peg.center);
                             if peg.center != target {
                                 changed = true;
                                 peg.center = target;
@@ -6838,12 +6880,13 @@ impl App {
                         }
                     }
                     Tool::CustomPeg => {
-                        if self.can_place_custom_peg(pos, self.custom_radius, &[]) {
+                        let snapped = self.snap_to_grid_lines(pos);
+                        if self.can_place_custom_peg(snapped, self.custom_radius, &[]) {
                             self.push_history();
                             let id = self.doc.next_peg_id;
                             self.doc.custom_pegs.push(CustomPeg {
                                 id,
-                                center: pos,
+                                center: snapped,
                                 radius: self.custom_radius,
                                 visible: true,
                             });
@@ -7134,6 +7177,43 @@ impl App {
         // 制作面はパネルや入力欄とは別の専用フラット色を使う。
         // グラデーションは入れず、モック同様に中央だけ一段深く見せる。
         painter.rect_filled(rect, 0.0, colors.canvas);
+        if self.doc.grid.lines_enabled {
+            let spacing = self.doc.grid.spacing.max(1.0);
+            let grid_origin = match self.doc.grid.scale_anchor {
+                ScaleAnchor::TopLeft => Point::new(110.0, 110.0),
+                ScaleAnchor::Center => Point::new(
+                    self.canvas_center.x - 3.0 * spacing,
+                    self.canvas_center.y - 2.0 * spacing,
+                ),
+            };
+            let world_min = self.to_world(origin, rect.min);
+            let world_max = self.to_world(origin, rect.max);
+            let first_col = ((world_min.x - grid_origin.x) / spacing).floor() as i32 - 1;
+            let last_col = ((world_max.x - grid_origin.x) / spacing).ceil() as i32 + 1;
+            let first_row = ((world_min.y - grid_origin.y) / spacing).floor() as i32 - 1;
+            let last_row = ((world_max.y - grid_origin.y) / spacing).ceil() as i32 + 1;
+            let grid_stroke = Stroke::new(0.55, colors.border.gamma_multiply(1.35));
+            for col in first_col..=last_col {
+                let x = grid_origin.x + f64::from(col) * spacing;
+                painter.line_segment(
+                    [
+                        self.to_screen(origin, Point::new(x, world_min.y)),
+                        self.to_screen(origin, Point::new(x, world_max.y)),
+                    ],
+                    grid_stroke,
+                );
+            }
+            for row in first_row..=last_row {
+                let y = grid_origin.y + f64::from(row) * spacing;
+                painter.line_segment(
+                    [
+                        self.to_screen(origin, Point::new(world_min.x, y)),
+                        self.to_screen(origin, Point::new(world_max.x, y)),
+                    ],
+                    grid_stroke,
+                );
+            }
+        }
 
         let selected_peg_refs: Vec<PegRef> = self
             .selection
@@ -9154,6 +9234,32 @@ mod tests {
             }
             let _ = build_faces_mesh(&polys, Pos2::new(0.0, 0.0), Color32::WHITE);
         }
+    }
+
+    #[test]
+    fn custom_pegs_snap_to_infinite_line_intersections_without_requiring_grid_pegs() {
+        let mut app = test_app();
+        app.canvas_center = Point::new(640.0, 400.0);
+        app.doc.grid.scale_anchor = ScaleAnchor::TopLeft;
+        app.doc.grid.spacing = 100.0;
+        app.doc.grid.lines_enabled = true;
+        app.doc.grid.snap_to_lines = true;
+        app.doc.grid.pegs_enabled = false;
+
+        assert_eq!(
+            app.snap_to_grid_lines(Point::new(267.0, 354.0)),
+            Point::new(310.0, 310.0)
+        );
+        let (pegs, refs) = App::engine_pegs(
+            &app.doc.grid,
+            Vec2::new(1280.0, 800.0),
+            app.canvas_center,
+            &[],
+            app.doc.peg_appearance,
+            &[],
+        );
+        assert!(pegs.is_empty());
+        assert!(refs.is_empty());
     }
 
     #[test]

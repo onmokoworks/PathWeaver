@@ -2591,6 +2591,9 @@ mod stress {
                     catch,
                     sub_radius: sub,
                     subs_enabled: true,
+                    lines_enabled: true,
+                    snap_to_lines: true,
+                    pegs_enabled: true,
                     scale_link: false,
                     scale_anchor: anchor,
                 };
