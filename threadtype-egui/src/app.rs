@@ -4532,6 +4532,86 @@ impl App {
         changed
     }
 
+    /// Remove an item from its folder. Faces are also inserted at the requested
+    /// root-layer gap, with every folder reference and face selection remapped.
+    fn move_layer_item_to_root(
+        &mut self,
+        payload: LayerDragPayload,
+        before_face: Option<usize>,
+    ) -> bool {
+        let snapshot = self.doc.clone();
+        let changed = match payload {
+            LayerDragPayload::EmptyLayer(layer_id) => {
+                let Some(layer) = self
+                    .doc
+                    .empty_layers
+                    .iter_mut()
+                    .find(|layer| layer.id == layer_id)
+                else {
+                    return false;
+                };
+                let changed = layer.folder_id.is_some();
+                layer.folder_id = None;
+                changed
+            }
+            LayerDragPayload::Face(source) if source < self.doc.faces.len() => {
+                let was_grouped = self
+                    .doc
+                    .layer_folders
+                    .iter()
+                    .any(|folder| folder.face_indices.contains(&source));
+                let len = self.doc.faces.len();
+                let target = before_face
+                    .map(|before| if source < before { before - 1 } else { before })
+                    .unwrap_or(len - 1)
+                    .min(len - 1);
+
+                let mut old_order: Vec<usize> = (0..len).collect();
+                let moved_old = old_order.remove(source);
+                old_order.insert(target, moved_old);
+                let mut old_to_new = vec![0usize; len];
+                for (new_index, old_index) in old_order.iter().copied().enumerate() {
+                    old_to_new[old_index] = new_index;
+                }
+
+                if target != source {
+                    let old_faces = self.doc.faces.clone();
+                    self.doc.faces = old_order
+                        .iter()
+                        .map(|old_index| old_faces[*old_index].clone())
+                        .collect();
+                }
+                for folder in &mut self.doc.layer_folders {
+                    folder.face_indices.retain(|index| *index != source);
+                    for index in &mut folder.face_indices {
+                        *index = old_to_new[*index];
+                    }
+                }
+                for selection in &mut self.selection {
+                    if let Selection::Face(index) = selection {
+                        *index = old_to_new[*index];
+                    }
+                }
+                if let Some(index) = self.face_editor.as_mut() {
+                    *index = old_to_new[*index];
+                }
+                was_grouped || target != source
+            }
+            LayerDragPayload::Face(_) => return false,
+        };
+        if changed {
+            self.push_history_snapshot(snapshot);
+            self.status = self
+                .language
+                .text(
+                    "レイヤーをフォルダから取り出しました",
+                    "Layer moved out of folder",
+                )
+                .to_owned();
+        }
+        changed
+    }
+
     fn render_layers_tab(&mut self, ui: &mut egui::Ui) {
         let language = self.language;
         let shift = ui.input(|i| i.modifiers.shift);
@@ -4543,6 +4623,7 @@ impl App {
         let mut begin_layer_item_edit: Option<u64> = None;
         let mut commit_layer_item_edit = false;
         let mut move_to_folder: Option<(LayerDragPayload, u64)> = None;
+        let mut move_to_root: Option<(LayerDragPayload, Option<usize>)> = None;
         let grouped_faces: std::collections::HashSet<usize> = self
             .doc
             .layer_folders
@@ -4767,6 +4848,9 @@ impl App {
                     if grouped_faces.contains(&i) {
                         continue;
                     }
+                    if let Some(payload) = layer_root_drop_zone(ui) {
+                        move_to_root = Some((payload, Some(i + 1)));
+                    }
                     let name = if self.doc.faces[i].name.is_empty() {
                         format!("{} {}", language.text("レイヤー", "Layer"), i + 1)
                     } else {
@@ -4817,6 +4901,9 @@ impl App {
                         });
                     });
                 }
+                if let Some(payload) = layer_root_drop_zone(ui) {
+                    move_to_root = Some((payload, None));
+                }
                 let root_empty_layers: Vec<_> = self
                     .doc
                     .empty_layers
@@ -4825,6 +4912,9 @@ impl App {
                     .cloned()
                     .collect();
                 for empty in root_empty_layers {
+                    if let Some(payload) = layer_root_drop_zone(ui) {
+                        move_to_root = Some((payload, None));
+                    }
                     let selected = self.selected_empty_layers.contains(&empty.id);
                     row_frame(ui, selected, |ui| {
                         panel_glyph(ui, PanelGlyph::EmptyLayer);
@@ -4878,6 +4968,9 @@ impl App {
             });
         if let Some((payload, folder_id)) = move_to_folder {
             self.move_layer_item_to_folder(payload, folder_id);
+        }
+        if let Some((payload, before_face)) = move_to_root {
+            self.move_layer_item_to_root(payload, before_face);
         }
         if let Some(id) = select_empty_layer {
             self.select_empty_layer(id, shift);
@@ -7937,6 +8030,26 @@ fn layer_drag_source(
     }
 }
 
+/// Narrow root-level insertion target between layer rows. It stays visually
+/// quiet until a layer is dragged over it, then becomes the familiar insertion
+/// line used by desktop layer panels.
+fn layer_root_drop_zone(ui: &mut egui::Ui) -> Option<LayerDragPayload> {
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 8.0), Sense::hover());
+    if response.dnd_hover_payload::<LayerDragPayload>().is_some() {
+        ui.painter().line_segment(
+            [
+                Pos2::new(rect.left() + 5.0, rect.center().y),
+                Pos2::new(rect.right() - 5.0, rect.center().y),
+            ],
+            Stroke::new(2.0, ui.visuals().selection.stroke.color),
+        );
+    }
+    response
+        .dnd_release_payload::<LayerDragPayload>()
+        .map(|payload| *payload)
+}
+
 fn align_icon_button(ui: &mut egui::Ui, axis: AlignAxis, tooltip: &str) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::new(27.0, 25.0), Sense::click());
     let color = if response.hovered() {
@@ -9168,6 +9281,46 @@ mod tests {
         app.do_undo();
         assert_eq!(app.doc.layer_folders[0].face_indices, vec![0]);
         assert!(app.doc.layer_folders[1].face_indices.is_empty());
+    }
+
+    #[test]
+    fn dropping_a_foldered_shape_into_a_root_gap_ungroups_and_reorders_it() {
+        let mut app = test_app();
+        let make_face = |name: &str| Face {
+            start: StartAnchor {
+                peg: PegRef::Grid { row: 0, col: 0 },
+                port: Port::Top,
+            },
+            elements: Vec::new(),
+            name: name.to_owned(),
+            visible: true,
+            baked: None,
+            ignored_pegs: Vec::new(),
+        };
+        app.doc.faces = vec![make_face("A"), make_face("B"), make_face("C")];
+        let source_folder = app.add_layer_folder();
+        let other_folder = app.add_layer_folder();
+        app.doc.layer_folders[0].face_indices = vec![0];
+        app.doc.layer_folders[1].face_indices = vec![1];
+        app.set_single_selection(Some(Selection::Face(0)));
+
+        assert!(app.move_layer_item_to_root(LayerDragPayload::Face(0), Some(2)));
+        assert_eq!(
+            app.doc
+                .faces
+                .iter()
+                .map(|face| face.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["B", "A", "C"]
+        );
+        assert!(app.doc.layer_folders[0].face_indices.is_empty());
+        assert_eq!(app.doc.layer_folders[1].face_indices, vec![0]);
+        assert!(app.is_selected(Selection::Face(1)));
+
+        app.do_undo();
+        assert_eq!(app.doc.layer_folders[0].id, source_folder);
+        assert_eq!(app.doc.layer_folders[1].id, other_folder);
+        assert_eq!(app.doc.layer_folders[0].face_indices, vec![0]);
     }
 
     #[test]
