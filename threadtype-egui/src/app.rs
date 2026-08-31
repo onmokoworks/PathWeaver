@@ -8036,15 +8036,20 @@ fn layer_drag_source(
 fn layer_root_drop_zone(ui: &mut egui::Ui) -> Option<LayerDragPayload> {
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 8.0), Sense::hover());
-    if response.dnd_hover_payload::<LayerDragPayload>().is_some() {
-        ui.painter().line_segment(
-            [
-                Pos2::new(rect.left() + 5.0, rect.center().y),
-                Pos2::new(rect.right() - 5.0, rect.center().y),
-            ],
-            Stroke::new(2.0, ui.visuals().selection.stroke.color),
-        );
-    }
+    let active = response.dnd_hover_payload::<LayerDragPayload>().is_some();
+    let stroke = if active {
+        Stroke::new(2.0, ui.visuals().selection.stroke.color)
+    } else {
+        Stroke::new(0.65, ui.visuals().widgets.noninteractive.bg_stroke.color)
+    };
+    let inset = if active { 5.0 } else { 9.0 };
+    ui.painter().line_segment(
+        [
+            Pos2::new(rect.left() + inset, rect.center().y),
+            Pos2::new(rect.right() - inset, rect.center().y),
+        ],
+        stroke,
+    );
     response
         .dnd_release_payload::<LayerDragPayload>()
         .map(|payload| *payload)
