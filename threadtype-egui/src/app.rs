@@ -4844,13 +4844,17 @@ impl App {
                         }
                     }
                 }
+                let mut has_root_item = false;
                 for i in (0..self.doc.faces.len()).rev() {
                     if grouped_faces.contains(&i) {
                         continue;
                     }
-                    if let Some(payload) = layer_root_drop_zone(ui) {
-                        move_to_root = Some((payload, Some(i + 1)));
+                    if has_root_item {
+                        if let Some(payload) = layer_root_drop_zone(ui) {
+                            move_to_root = Some((payload, Some(i + 1)));
+                        }
                     }
+                    has_root_item = true;
                     let name = if self.doc.faces[i].name.is_empty() {
                         format!("{} {}", language.text("レイヤー", "Layer"), i + 1)
                     } else {
@@ -4901,9 +4905,6 @@ impl App {
                         });
                     });
                 }
-                if let Some(payload) = layer_root_drop_zone(ui) {
-                    move_to_root = Some((payload, None));
-                }
                 let root_empty_layers: Vec<_> = self
                     .doc
                     .empty_layers
@@ -4912,9 +4913,12 @@ impl App {
                     .cloned()
                     .collect();
                 for empty in root_empty_layers {
-                    if let Some(payload) = layer_root_drop_zone(ui) {
-                        move_to_root = Some((payload, None));
+                    if has_root_item {
+                        if let Some(payload) = layer_root_drop_zone(ui) {
+                            move_to_root = Some((payload, None));
+                        }
                     }
+                    has_root_item = true;
                     let selected = self.selected_empty_layers.contains(&empty.id);
                     row_frame(ui, selected, |ui| {
                         panel_glyph(ui, PanelGlyph::EmptyLayer);
