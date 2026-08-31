@@ -2087,6 +2087,69 @@ impl App {
         true
     }
 
+    fn drag_sweeps_clear_of_unrelated_faces(
+        &self,
+        start: &[(u64, Point)],
+        moved: &[(u64, Point, f64)],
+    ) -> bool {
+        let moving_refs: Vec<PegRef> = moved
+            .iter()
+            .map(|(id, ..)| PegRef::Custom { id: *id })
+            .collect();
+        let resolver = |peg_ref: &PegRef| {
+            resolve_peg(
+                &self.doc.grid,
+                &self.doc.custom_pegs,
+                self.canvas_center,
+                self.doc.peg_appearance,
+                peg_ref,
+            )
+        };
+
+        for face in self
+            .doc
+            .faces
+            .iter()
+            .filter(|face| face.visible && face.baked.is_none())
+        {
+            let obstacles: Vec<(PegRef, Peg)> = self
+                .peg_refs
+                .iter()
+                .copied()
+                .zip(self.pegs.iter().copied())
+                .filter(|(peg_ref, _)| {
+                    !moving_refs.contains(peg_ref) && !face.ignored_pegs.contains(peg_ref)
+                })
+                .collect();
+            let Some(segments) = materialize_face_with_obstacles(face, &resolver, &obstacles)
+            else {
+                continue;
+            };
+            let mut path = Vec::new();
+            self.flatten_segments_for_appearance(&segments, &mut path, 0.35);
+            if path.len() < 2 {
+                continue;
+            }
+
+            for (id, target, radius) in moved {
+                let peg_ref = PegRef::Custom { id: *id };
+                if self.face_references_peg(face, &peg_ref) {
+                    continue;
+                }
+                let Some((_, origin)) = start.iter().find(|(start_id, _)| start_id == id) else {
+                    continue;
+                };
+                let clearance = *radius + self.doc.grid.catch;
+                if path.windows(2).any(|edge| {
+                    segment_segment_distance(*origin, *target, edge[0], edge[1]) < clearance
+                }) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     fn materialized_faces(&self) -> Vec<(usize, FaceRender)> {
         let resolver = |r: &PegRef| {
             resolve_peg(
@@ -6431,6 +6494,7 @@ impl App {
                     false
                 } else {
                     self.can_place_custom_pegs(&moved, &moving_ids)
+                        && self.drag_sweeps_clear_of_unrelated_faces(start, &moved)
                 };
                 if can_move {
                     let mut changed = false;
@@ -8554,6 +8618,26 @@ fn segments_intersect(a1: Point, a2: Point, b1: Point, b2: Point) -> bool {
         return true;
     }
     false
+}
+
+fn point_segment_distance(point: Point, from: Point, to: Point) -> f64 {
+    let edge = to - from;
+    let length_sq = edge.dot(edge);
+    if length_sq <= 1e-12 {
+        return point.distance(from);
+    }
+    let t = ((point - from).dot(edge) / length_sq).clamp(0.0, 1.0);
+    point.distance(from + edge * t)
+}
+
+fn segment_segment_distance(a1: Point, a2: Point, b1: Point, b2: Point) -> f64 {
+    if segments_intersect(a1, a2, b1, b2) {
+        return 0.0;
+    }
+    point_segment_distance(a1, b1, b2)
+        .min(point_segment_distance(a2, b1, b2))
+        .min(point_segment_distance(b1, a1, a2))
+        .min(point_segment_distance(b2, a1, a2))
 }
 
 fn build_faces_mesh(faces: &[Vec<Point>], origin: Pos2, color: Color32) -> Option<egui::Shape> {
