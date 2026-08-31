@@ -4430,33 +4430,13 @@ impl App {
     fn add_layer_folder(&mut self) -> u64 {
         let snapshot = self.doc.clone();
         let id = self.doc.allocate_layer_item_id();
-        let mut face_indices: Vec<usize> = self
-            .selection
-            .iter()
-            .filter_map(|selection| match selection {
-                Selection::Face(index) => Some(*index),
-                _ => None,
-            })
-            .collect();
-        face_indices.sort_unstable();
-        face_indices.dedup();
-        for folder in &mut self.doc.layer_folders {
-            folder
-                .face_indices
-                .retain(|index| !face_indices.contains(index));
-        }
-        for layer in &mut self.doc.empty_layers {
-            if self.selected_empty_layers.contains(&layer.id) {
-                layer.folder_id = Some(id);
-            }
-        }
         let number = self.doc.layer_folders.len() + 1;
         self.doc.layer_folders.push(LayerFolder {
             id,
             name: format!("{} {number}", self.language.text("フォルダ", "Folder")),
             visible: true,
             expanded: true,
-            face_indices,
+            face_indices: Vec::new(),
         });
         self.push_history_snapshot(snapshot);
         self.clear_selection();
@@ -4635,6 +4615,15 @@ impl App {
             .id_salt("layer-list")
             .show(ui, |ui| {
                 for folder in self.doc.layer_folders.clone().into_iter().rev() {
+                    let folder_has_items = !folder.face_indices.is_empty()
+                        || self
+                            .doc
+                            .empty_layers
+                            .iter()
+                            .any(|layer| layer.folder_id == Some(folder.id));
+                    if !folder_has_items {
+                        continue;
+                    }
                     let folder_selected = self.selected_layer_folders.contains(&folder.id);
                     row_frame(ui, folder_selected, |ui| {
                         if disclosure_button(ui, folder.expanded).clicked() {
@@ -4964,6 +4953,85 @@ impl App {
                                 }
                                 if response.double_clicked() {
                                     begin_layer_item_edit = Some(empty.id);
+                                }
+                            }
+                        });
+                    });
+                }
+                let empty_folders: Vec<_> = self
+                    .doc
+                    .layer_folders
+                    .iter()
+                    .filter(|folder| {
+                        folder.face_indices.is_empty()
+                            && !self
+                                .doc
+                                .empty_layers
+                                .iter()
+                                .any(|layer| layer.folder_id == Some(folder.id))
+                    })
+                    .cloned()
+                    .collect();
+                for folder in empty_folders {
+                    if has_root_item {
+                        let _ = layer_root_drop_zone(ui);
+                    }
+                    has_root_item = true;
+                    let selected = self.selected_layer_folders.contains(&folder.id);
+                    row_frame(ui, selected, |ui| {
+                        if disclosure_button(ui, folder.expanded).clicked() {
+                            toggle_folder = Some(folder.id);
+                        }
+                        panel_glyph(ui, PanelGlyph::Folder);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if eye_button(ui, folder.visible).clicked() {
+                                toggle_folder_visibility = Some(folder.id);
+                            }
+                            let width = ui.available_width();
+                            if self.layer_item_editor == Some(folder.id) {
+                                if let Some(target) = self
+                                    .doc
+                                    .layer_folders
+                                    .iter_mut()
+                                    .find(|target| target.id == folder.id)
+                                {
+                                    let response = ui.add_sized(
+                                        [width, 22.0],
+                                        egui::TextEdit::singleline(&mut target.name),
+                                    );
+                                    response.request_focus();
+                                    if response.lost_focus()
+                                        || ui.input(|input| input.key_pressed(Key::Enter))
+                                    {
+                                        commit_layer_item_edit = true;
+                                    }
+                                }
+                            } else {
+                                let response = layer_item_label(
+                                    ui,
+                                    width,
+                                    &folder.name,
+                                    language.text("空のフォルダ", "Empty folder"),
+                                    selected,
+                                );
+                                if response.dnd_hover_payload::<LayerDragPayload>().is_some() {
+                                    ui.painter().rect_stroke(
+                                        response.rect,
+                                        5.0,
+                                        Stroke::new(1.0, self.theme_colors().accent),
+                                        egui::StrokeKind::Inside,
+                                    );
+                                }
+                                if let Some(payload) =
+                                    response.dnd_release_payload::<LayerDragPayload>()
+                                {
+                                    move_to_folder = Some((*payload, folder.id));
+                                }
+                                if response.clicked() {
+                                    select_layer_folder = Some(folder.id);
+                                }
+                                if response.double_clicked() {
+                                    begin_layer_item_edit = Some(folder.id);
                                 }
                             }
                         });
@@ -9207,7 +9275,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_layers_can_be_selected_and_grouped_into_a_folder() {
+    fn adding_a_folder_does_not_implicitly_move_the_current_selection() {
         let mut app = test_app();
         let first = app.add_empty_layer();
         let second = app.add_empty_layer();
@@ -9223,7 +9291,7 @@ mod tests {
             .doc
             .empty_layers
             .iter()
-            .all(|layer| layer.folder_id == Some(folder_id)));
+            .all(|layer| layer.folder_id.is_none()));
     }
 
     #[test]
@@ -9239,7 +9307,7 @@ mod tests {
 
         app.do_undo();
         assert_eq!(app.doc.layer_folders.len(), 1);
-        assert_eq!(app.doc.empty_layers[0].folder_id, Some(folder_id));
+        assert_eq!(app.doc.empty_layers[0].folder_id, None);
 
         app.select_empty_layer(layer_id, false);
         app.delete_selected();
