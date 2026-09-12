@@ -2,7 +2,7 @@ use crate::geometry::Peg;
 use kurbo::Point;
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_DOCUMENT_VERSION: u32 = 5;
+pub const CURRENT_DOCUMENT_VERSION: u32 = 6;
 pub const CURRENT_FONT_PROJECT_VERSION: u32 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,6 +151,9 @@ pub struct EmptyLayer {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GridSettings {
     pub spacing: f64,
+    /// Grid(0,0) のワールド座標。画面サイズとは独立して保存する。
+    #[serde(default = "default_grid_origin")]
+    pub origin: Point,
     #[serde(default = "default_true")]
     pub lines_enabled: bool,
     #[serde(default = "default_true")]
@@ -202,6 +205,7 @@ impl Default for GridSettings {
     fn default() -> Self {
         GridSettings {
             spacing: 200.0,
+            origin: default_grid_origin(),
             lines_enabled: true,
             snap_to_lines: true,
             pegs_enabled: false,
@@ -213,6 +217,10 @@ impl Default for GridSettings {
             scale_anchor: ScaleAnchor::TopLeft,
         }
     }
+}
+
+fn default_grid_origin() -> Point {
+    Point::new(110.0, 110.0)
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -480,48 +488,30 @@ impl FontProject {
 pub fn resolve_peg(
     grid: &GridSettings,
     customs: &[CustomPeg],
-    canvas_center: Point,
+    _canvas_center: Point,
     appearance: PegAppearance,
     peg: &PegRef,
 ) -> Option<Peg> {
-    match (grid.scale_anchor, *peg) {
-        (ScaleAnchor::TopLeft, PegRef::Grid { row, col }) => Some(Peg {
+    match *peg {
+        PegRef::Grid { row, col } => Some(Peg {
             center: Point::new(
-                110.0 + (col as f64) * grid.spacing,
-                110.0 + (row as f64) * grid.spacing,
+                grid.origin.x + (col as f64) * grid.spacing,
+                grid.origin.y + (row as f64) * grid.spacing,
             ),
             radius: grid.radius + grid.catch,
             shape: appearance.shape,
             rounding: appearance.rounding + grid.catch,
         }),
-        (ScaleAnchor::TopLeft, PegRef::Sub { row, col }) => Some(Peg {
+        PegRef::Sub { row, col } => Some(Peg {
             center: Point::new(
-                110.0 + (col as f64 + 0.5) * grid.spacing,
-                110.0 + (row as f64 + 0.5) * grid.spacing,
+                grid.origin.x + (col as f64 + 0.5) * grid.spacing,
+                grid.origin.y + (row as f64 + 0.5) * grid.spacing,
             ),
             radius: grid.sub_radius + grid.catch,
             shape: appearance.shape,
             rounding: appearance.rounding + grid.catch,
         }),
-        (ScaleAnchor::Center, PegRef::Grid { row, col }) => Some(Peg {
-            center: Point::new(
-                canvas_center.x + ((col as f64) - 3.0) * grid.spacing,
-                canvas_center.y + ((row as f64) - 2.0) * grid.spacing,
-            ),
-            radius: grid.radius + grid.catch,
-            shape: appearance.shape,
-            rounding: appearance.rounding + grid.catch,
-        }),
-        (ScaleAnchor::Center, PegRef::Sub { row, col }) => Some(Peg {
-            center: Point::new(
-                canvas_center.x + ((col as f64 + 0.5) - 3.0) * grid.spacing,
-                canvas_center.y + ((row as f64 + 0.5) - 2.0) * grid.spacing,
-            ),
-            radius: grid.sub_radius + grid.catch,
-            shape: appearance.shape,
-            rounding: appearance.rounding + grid.catch,
-        }),
-        (_, PegRef::Custom { id }) => customs.iter().find(|peg| peg.id == id).map(|peg| Peg {
+        PegRef::Custom { id } => customs.iter().find(|peg| peg.id == id).map(|peg| Peg {
             center: peg.center,
             radius: peg.radius + grid.catch,
             shape: appearance.shape,
@@ -666,6 +656,7 @@ mod tests {
         let grid = GridSettings {
             scale_anchor: ScaleAnchor::TopLeft,
             spacing: 200.0,
+            origin: Point::new(110.0, 110.0),
             radius: 60.0,
             catch: 6.0,
             sub_radius: 24.0,
@@ -688,10 +679,31 @@ mod tests {
     }
 
     #[test]
+    fn grid_origin_is_preserved_by_document_round_trip() {
+        let mut document = Document::default();
+        document.grid.origin = Point::new(-42.5, 318.25);
+
+        let json = serde_json::to_string(&document).unwrap();
+        let restored: Document = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.grid.origin, Point::new(-42.5, 318.25));
+        let peg = resolve_peg(
+            &restored.grid,
+            &[],
+            Point::new(9999.0, 9999.0),
+            PegAppearance::default(),
+            &PegRef::Grid { row: 1, col: 2 },
+        )
+        .unwrap();
+        assert_eq!(peg.center, Point::new(357.5, 518.25));
+    }
+
+    #[test]
     fn resolve_peg_top_left_sub_position() {
         let grid = GridSettings {
             scale_anchor: ScaleAnchor::TopLeft,
             spacing: 180.0,
+            origin: Point::new(110.0, 110.0),
             radius: 40.0,
             catch: 4.0,
             sub_radius: 24.0,
@@ -718,6 +730,7 @@ mod tests {
         let grid = GridSettings {
             scale_anchor: ScaleAnchor::TopLeft,
             spacing: 200.0,
+            origin: Point::new(110.0, 110.0),
             radius: 60.0,
             catch: 6.0,
             sub_radius: 24.0,
@@ -743,6 +756,7 @@ mod tests {
         let small_grid = GridSettings {
             scale_anchor: ScaleAnchor::Center,
             spacing: 160.0,
+            origin: Point::new(canvas_center.x - 3.0 * 160.0, canvas_center.y - 2.0 * 160.0),
             radius: 48.0,
             catch: 5.0,
             sub_radius: 22.0,
@@ -755,6 +769,7 @@ mod tests {
         let large_grid = GridSettings {
             scale_anchor: ScaleAnchor::Center,
             spacing: 240.0,
+            origin: Point::new(canvas_center.x - 3.0 * 240.0, canvas_center.y - 2.0 * 240.0),
             radius: 48.0,
             catch: 5.0,
             sub_radius: 22.0,
@@ -790,6 +805,7 @@ mod tests {
         let grid = GridSettings {
             scale_anchor: ScaleAnchor::TopLeft,
             spacing: 200.0,
+            origin: Point::new(110.0, 110.0),
             radius: 60.0,
             catch: 6.0,
             sub_radius: 24.0,

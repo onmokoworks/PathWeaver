@@ -19,6 +19,7 @@ use egui_dock::{DockArea, DockState, NodeIndex, TabViewer};
 use kurbo::Point;
 use lucide_icons::Icon as LucideIcon;
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
@@ -443,6 +444,9 @@ const SC_REDO: KeyboardShortcut =
     KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Z);
 const SC_REDO2: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::Y);
 const SC_SAVE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::S);
+const SC_SAVE_AS: KeyboardShortcut =
+    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::S);
+const SC_OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
 
 #[derive(PartialEq, Clone, Copy)]
 enum Tool {
@@ -512,6 +516,8 @@ struct WorkspaceFile {
     reference_font_scale: f32,
     #[serde(default)]
     reference_font_offset: [f32; 2],
+    #[serde(default = "default_custom_radius")]
+    custom_radius: f64,
 }
 
 fn default_proof_text() -> String {
@@ -540,6 +546,10 @@ const fn default_reference_font_opacity() -> f32 {
 
 const fn default_reference_font_scale() -> f32 {
     1.0
+}
+
+const fn default_custom_radius() -> f64 {
+    40.0
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -644,6 +654,13 @@ struct ActiveFaceDrag {
     anchor: Point,
     indices: Vec<usize>,
     applied: (i32, i32),
+}
+
+/// 任意円ツールの連続配置。ドラッグ全体を一つのUndo単位にまとめる。
+struct CustomPegStroke {
+    base: Document,
+    last_pointer: Point,
+    added: usize,
 }
 
 struct ActiveDraw {
@@ -786,6 +803,34 @@ enum SavePayload {
     Workspace(WorkspaceFile),
 }
 
+#[derive(Clone, PartialEq)]
+struct ProjectSettingsSnapshot {
+    family_name: String,
+    style_name: String,
+    metrics: crate::model::FontMetricsGuides,
+    render_style: FontRenderStyle,
+    thread_width: f64,
+    glyph_metrics: Vec<(u16, i16)>,
+    onion_skin: bool,
+    onion_next: bool,
+    onion_opacity: f32,
+    onion_previous_color: Color32,
+    onion_next_color: Color32,
+    proof_text: String,
+    proof_size: f32,
+    proof_tracking: f32,
+    reference_font_opacity: f32,
+    reference_font_scale: f32,
+    reference_font_offset: Vec2,
+    custom_radius: f64,
+}
+
+#[derive(Clone)]
+enum HistoryEntry {
+    Document(Document),
+    ProjectSettings(Box<ProjectSettingsSnapshot>),
+}
+
 enum SaveEvent {
     Progress(f32),
     Finished(Result<(), String>),
@@ -796,20 +841,21 @@ struct SaveOperation {
     progress: f32,
     receiver: mpsc::Receiver<SaveEvent>,
     finished_at: Option<Instant>,
+    project_hash: Option<u64>,
 }
 
 pub struct App {
     doc: Document,
     workspace_mode: WorkspaceMode,
     shape_document: Document,
-    shape_undo: Vec<Document>,
-    shape_redo: Vec<Document>,
+    shape_undo: Vec<HistoryEntry>,
+    shape_redo: Vec<HistoryEntry>,
     font_project: FontProject,
-    glyph_undo: Vec<Vec<Document>>,
-    glyph_redo: Vec<Vec<Document>>,
+    glyph_undo: Vec<Vec<HistoryEntry>>,
+    glyph_redo: Vec<Vec<HistoryEntry>>,
     new_glyph_text: String,
-    undo: Vec<Document>,
-    redo: Vec<Document>,
+    undo: Vec<HistoryEntry>,
+    redo: Vec<HistoryEntry>,
     pegs: Vec<Peg>,
     peg_refs: Vec<PegRef>,
     pegs_key: (u64, u64, u64, u32, u32, u64),
@@ -819,6 +865,7 @@ pub struct App {
     custom_radius: f64,
     active_custom_drag: Option<ActiveDrag>,
     face_drag: Option<ActiveFaceDrag>,
+    custom_peg_stroke: Option<CustomPegStroke>,
     grab: Option<GrabState>,
     view_overlay_timer: f32,
     show_circles: bool,
@@ -832,6 +879,7 @@ pub struct App {
     /// 任意円編集中の (id)
     radius_edit_orig: Option<u64>,
     bevel_edit_orig: Option<Document>,
+    project_settings_edit_orig: Option<ProjectSettingsSnapshot>,
     face_name_snapshot: Option<Document>,
     layer_item_name_snapshot: Option<Document>,
     draw: Option<ActiveDraw>,
@@ -845,6 +893,7 @@ pub struct App {
     shape_save_path: Option<PathBuf>,
     font_save_path: Option<PathBuf>,
     workspace_save_path: Option<PathBuf>,
+    saved_project_hash: Option<u64>,
     save_operation: Option<SaveOperation>,
     /// 前のグリフのオニオンスキン。
     onion_skin: bool,
@@ -891,6 +940,7 @@ impl App {
             custom_radius: 40.0,
             active_custom_drag: None,
             face_drag: None,
+            custom_peg_stroke: None,
             grab: None,
             view_overlay_timer: 0.0,
             show_circles: true,
@@ -903,6 +953,7 @@ impl App {
             grid_edit_orig: None,
             radius_edit_orig: None,
             bevel_edit_orig: None,
+            project_settings_edit_orig: None,
             face_name_snapshot: None,
             layer_item_name_snapshot: None,
             draw: None,
@@ -916,6 +967,7 @@ impl App {
             shape_save_path: None,
             font_save_path: None,
             workspace_save_path: None,
+            saved_project_hash: None,
             save_operation: None,
             onion_skin: false,
             onion_next: false,
@@ -1221,30 +1273,44 @@ impl App {
         }
     }
 
-    /// マージ済み輪郭は円参照を持たないため、グリッド変更時に元スナップショット
-    /// から座標を再計算する。Grid(0,0) の新旧原点を使うため、Center 基準では
-    /// 参照セル (3,2) がキャンバス中央に固定されたまま間隔へ追従する。
+    /// 配置済みの任意円とマージ済み輪郭を、グリッド編集開始時のスナップショット
+    /// から再計算する。毎フレーム現在値を拡縮しないため、スライダー操作中も誤差が
+    /// 累積しない。Grid(0,0) の新旧原点を使うため、Center 基準では参照セル (3,2) が
+    /// キャンバス中央に固定されたまま間隔へ追従する。
     fn remap_baked_shapes_for_grid_change(
         document: &mut Document,
         source: &Document,
-        canvas_center: Point,
+        _canvas_center: Point,
     ) -> bool {
         let old_spacing = source.grid.spacing;
         let new_spacing = document.grid.spacing;
         if old_spacing.abs() <= f64::EPSILON || new_spacing.abs() <= f64::EPSILON {
             return false;
         }
-        let origin = |grid: &GridSettings| match grid.scale_anchor {
-            ScaleAnchor::TopLeft => Point::new(110.0, 110.0),
-            ScaleAnchor::Center => Point::new(
-                canvas_center.x - 3.0 * grid.spacing,
-                canvas_center.y - 2.0 * grid.spacing,
-            ),
-        };
-        let old_origin = origin(&source.grid);
-        let new_origin = origin(&document.grid);
+        let old_origin = source.grid.origin;
+        let new_origin = document.grid.origin;
         let scale = new_spacing / old_spacing;
         let mut changed = false;
+        for source_peg in &source.custom_pegs {
+            let Some(peg) = document
+                .custom_pegs
+                .iter_mut()
+                .find(|peg| peg.id == source_peg.id)
+            else {
+                continue;
+            };
+            let mapped = Point::new(
+                new_origin.x + (source_peg.center.x - old_origin.x) * scale,
+                new_origin.y + (source_peg.center.y - old_origin.y) * scale,
+            );
+            changed |= peg.center != mapped;
+            peg.center = mapped;
+            if document.grid.scale_link {
+                let radius = source_peg.radius * scale;
+                changed |= peg.radius != radius;
+                peg.radius = radius;
+            }
+        }
         for (face, source_face) in document.faces.iter_mut().zip(&source.faces) {
             let (Some(baked), Some(source_baked)) =
                 (face.baked.as_mut(), source_face.baked.as_ref())
@@ -1326,11 +1392,89 @@ impl App {
     /// 変更「前」の状態を undo に積む。ドラッグ編集のように mutate 済みの状態から
     /// 履歴を確定するときは、変更前を復元したスナップショットを渡すこと
     fn push_history_snapshot(&mut self, snap: Document) {
-        self.undo.push(snap);
+        self.undo.push(HistoryEntry::Document(snap));
         if self.undo.len() > 100 {
             self.undo.remove(0);
         }
         self.redo.clear();
+    }
+
+    fn project_settings_snapshot(&self) -> ProjectSettingsSnapshot {
+        ProjectSettingsSnapshot {
+            family_name: self.font_project.family_name.clone(),
+            style_name: self.font_project.style_name.clone(),
+            metrics: self.font_project.metrics,
+            render_style: self.font_project.render_style,
+            thread_width: self.font_project.thread_width,
+            glyph_metrics: self
+                .font_project
+                .glyphs
+                .iter()
+                .map(|glyph| (glyph.advance_width, glyph.left_side_bearing))
+                .collect(),
+            onion_skin: self.onion_skin,
+            onion_next: self.onion_next,
+            onion_opacity: self.onion_opacity,
+            onion_previous_color: self.onion_previous_color,
+            onion_next_color: self.onion_next_color,
+            proof_text: self.proof_text.clone(),
+            proof_size: self.proof_size,
+            proof_tracking: self.proof_tracking,
+            reference_font_opacity: self.reference_font_opacity,
+            reference_font_scale: self.reference_font_scale,
+            reference_font_offset: self.reference_font_offset,
+            custom_radius: self.custom_radius,
+        }
+    }
+
+    fn restore_project_settings(&mut self, snapshot: ProjectSettingsSnapshot) {
+        self.font_project.family_name = snapshot.family_name;
+        self.font_project.style_name = snapshot.style_name;
+        self.font_project.metrics = snapshot.metrics;
+        self.font_project.render_style = snapshot.render_style;
+        self.font_project.thread_width = snapshot.thread_width;
+        for (glyph, (advance, bearing)) in self
+            .font_project
+            .glyphs
+            .iter_mut()
+            .zip(snapshot.glyph_metrics)
+        {
+            glyph.advance_width = advance;
+            glyph.left_side_bearing = bearing;
+        }
+        self.onion_skin = snapshot.onion_skin;
+        self.onion_next = snapshot.onion_next;
+        self.onion_opacity = snapshot.onion_opacity;
+        self.onion_previous_color = snapshot.onion_previous_color;
+        self.onion_next_color = snapshot.onion_next_color;
+        self.proof_text = snapshot.proof_text;
+        self.proof_size = snapshot.proof_size;
+        self.proof_tracking = snapshot.proof_tracking;
+        self.reference_font_opacity = snapshot.reference_font_opacity;
+        self.reference_font_scale = snapshot.reference_font_scale;
+        self.reference_font_offset = snapshot.reference_font_offset;
+        self.custom_radius = snapshot.custom_radius;
+        self.proof_cache.clear();
+    }
+
+    fn track_project_settings_edit(
+        &mut self,
+        before: ProjectSettingsSnapshot,
+        pointer_primary_down: bool,
+    ) {
+        if self.project_settings_snapshot() != before && self.project_settings_edit_orig.is_none() {
+            self.project_settings_edit_orig = Some(before);
+        }
+        if !pointer_primary_down {
+            if let Some(snapshot) = self.project_settings_edit_orig.take() {
+                self.undo
+                    .push(HistoryEntry::ProjectSettings(Box::new(snapshot)));
+                if self.undo.len() > 100 {
+                    self.undo.remove(0);
+                }
+                self.redo.clear();
+            }
+        }
     }
 
     fn is_selected(&self, target: Selection) -> bool {
@@ -1467,6 +1611,10 @@ impl App {
     /// 次フレームでUndo結果を上書きしないようにする。
     fn cancel_active_manipulation(&mut self) -> bool {
         let mut canceled = false;
+        if let Some(stroke) = self.custom_peg_stroke.take() {
+            self.doc = stroke.base;
+            canceled = true;
+        }
         if let Some(grab) = self.grab.take() {
             self.doc = grab.base;
             canceled = true;
@@ -1490,22 +1638,44 @@ impl App {
 
     fn do_undo(&mut self) {
         self.cancel_active_manipulation();
-        if let Some(d) = self.undo.pop() {
-            self.redo.push(self.doc.clone());
-            self.doc = d;
-            self.draw = None;
-            self.clear_selection();
+        self.project_settings_edit_orig = None;
+        if let Some(entry) = self.undo.pop() {
+            match entry {
+                HistoryEntry::Document(document) => {
+                    self.redo.push(HistoryEntry::Document(self.doc.clone()));
+                    self.doc = document;
+                    self.draw = None;
+                    self.clear_selection();
+                }
+                HistoryEntry::ProjectSettings(snapshot) => {
+                    self.redo.push(HistoryEntry::ProjectSettings(Box::new(
+                        self.project_settings_snapshot(),
+                    )));
+                    self.restore_project_settings(*snapshot);
+                }
+            }
             self.status = "元に戻しました".to_owned();
         }
     }
 
     fn do_redo(&mut self) {
         self.cancel_active_manipulation();
-        if let Some(d) = self.redo.pop() {
-            self.undo.push(self.doc.clone());
-            self.doc = d;
-            self.draw = None;
-            self.clear_selection();
+        self.project_settings_edit_orig = None;
+        if let Some(entry) = self.redo.pop() {
+            match entry {
+                HistoryEntry::Document(document) => {
+                    self.undo.push(HistoryEntry::Document(self.doc.clone()));
+                    self.doc = document;
+                    self.draw = None;
+                    self.clear_selection();
+                }
+                HistoryEntry::ProjectSettings(snapshot) => {
+                    self.undo.push(HistoryEntry::ProjectSettings(Box::new(
+                        self.project_settings_snapshot(),
+                    )));
+                    self.restore_project_settings(*snapshot);
+                }
+            }
             self.status = "やり直しました".to_owned();
         }
     }
@@ -1715,13 +1885,7 @@ impl App {
             return point;
         }
         let spacing = self.doc.grid.spacing.max(1.0);
-        let origin = match self.doc.grid.scale_anchor {
-            ScaleAnchor::TopLeft => Point::new(110.0, 110.0),
-            ScaleAnchor::Center => Point::new(
-                self.canvas_center.x - 3.0 * spacing,
-                self.canvas_center.y - 2.0 * spacing,
-            ),
-        };
+        let origin = self.doc.grid.origin;
         Point::new(
             origin.x + ((point.x - origin.x) / spacing).round() * spacing,
             origin.y + ((point.y - origin.y) / spacing).round() * spacing,
@@ -1865,13 +2029,7 @@ impl App {
         appearance: crate::model::PegAppearance,
         disabled: &[PegRef],
     ) -> (Vec<Peg>, Vec<PegRef>) {
-        let origin = match grid.scale_anchor {
-            ScaleAnchor::TopLeft => Point::new(110.0, 110.0),
-            ScaleAnchor::Center => Point::new(
-                canvas_center.x - 3.0 * grid.spacing,
-                canvas_center.y - 2.0 * grid.spacing,
-            ),
-        };
+        let origin = grid.origin;
         let radius = grid.radius.max(grid.sub_radius) + grid.catch;
         let min_col = (((-radius) - origin.x) / grid.spacing).floor() as i32 - 1;
         let max_col = (((size.x as f64 + radius) - origin.x) / grid.spacing).ceil() as i32 + 1;
@@ -1936,6 +2094,8 @@ impl App {
             custom_hash ^= custom.radius.to_bits();
         }
         custom_hash ^= grid.sub_radius.to_bits();
+        custom_hash ^= grid.origin.x.to_bits().rotate_left(11);
+        custom_hash ^= grid.origin.y.to_bits().rotate_left(23);
         custom_hash ^= u64::from(grid.subs_enabled as u8);
         custom_hash ^= u64::from(grid.pegs_enabled as u8) << 8;
         custom_hash ^= u64::from(grid.scale_link as u8);
@@ -2076,6 +2236,40 @@ impl App {
             }
         }
         clear
+    }
+
+    fn place_custom_peg_at(&mut self, point: Point) -> bool {
+        let snapped = self.snap_to_grid_lines(point);
+        if !self.can_place_custom_peg(snapped, self.custom_radius, &[]) {
+            return false;
+        }
+        let id = self.doc.next_peg_id;
+        self.doc.custom_pegs.push(CustomPeg {
+            id,
+            center: snapped,
+            radius: self.custom_radius,
+            visible: true,
+        });
+        self.doc.next_peg_id = self.next_peg_id();
+        self.rebuild_pegs(self.canvas_size);
+        true
+    }
+
+    /// ポインタ区間を細かく補間してからグリッドへスナップし、速いドラッグでも
+    /// 途中の交点を飛ばさず円を並べる。
+    fn paint_custom_pegs_between(&mut self, from: Point, to: Point) -> usize {
+        let distance = from.distance(to);
+        let sample_step = (self.doc.grid.spacing * 0.2)
+            .min((self.custom_radius * 0.75).max(4.0))
+            .max(2.0);
+        let steps = (distance / sample_step).ceil().max(1.0) as usize;
+        let mut added = 0;
+        for index in 0..=steps {
+            let t = index as f64 / steps as f64;
+            let point = Point::new(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t);
+            added += usize::from(self.place_custom_peg_at(point));
+        }
+        added
     }
 
     /// 任意円がグリッド円・サブ円のどれかと重なっているか（他の任意円は除外）
@@ -2539,6 +2733,10 @@ impl App {
             self.status = "保存処理が進行中です".to_owned();
             return;
         }
+        let project_hash = match &payload {
+            SavePayload::Workspace(workspace) => Some(Self::workspace_content_hash(workspace)),
+            _ => None,
+        };
         let (sender, receiver) = mpsc::channel();
         let label_owned = label.to_owned();
         std::thread::spawn(move || {
@@ -2571,6 +2769,7 @@ impl App {
             progress: 0.02,
             receiver,
             finished_at: None,
+            project_hash,
         });
         self.status = format!("{label_owned}を保存しています…");
     }
@@ -2585,7 +2784,8 @@ impl App {
                     Ok(SaveEvent::Finished(result)) => {
                         operation.progress = 1.0;
                         operation.finished_at = Some(Instant::now());
-                        finished_result = Some((operation.label.clone(), result));
+                        finished_result =
+                            Some((operation.label.clone(), result, operation.project_hash));
                     }
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
@@ -2594,6 +2794,7 @@ impl App {
                             finished_result = Some((
                                 operation.label.clone(),
                                 Err("保存スレッドが予期せず終了しました".to_owned()),
+                                operation.project_hash,
                             ));
                         }
                         break;
@@ -2605,7 +2806,12 @@ impl App {
             }
             ctx.request_repaint_after(Duration::from_millis(30));
         }
-        if let Some((label, result)) = finished_result {
+        if let Some((label, result, project_hash)) = finished_result {
+            if result.is_ok() {
+                if let Some(hash) = project_hash {
+                    self.saved_project_hash = Some(hash);
+                }
+            }
             self.status = match result {
                 Ok(()) => format!("{label}を保存しました"),
                 Err(error) => format!("{label}の保存に失敗しました: {error}"),
@@ -2617,10 +2823,7 @@ impl App {
     }
 
     fn save_current_workspace(&mut self) {
-        match self.workspace_mode {
-            WorkspaceMode::Shape => self.save_json(),
-            WorkspaceMode::Font => self.save_font_project(),
-        }
+        self.save_workspace();
     }
 
     fn save_json(&mut self) {
@@ -2653,11 +2856,13 @@ impl App {
         self.draw = None;
         self.active_custom_drag = None;
         self.face_drag = None;
+        self.custom_peg_stroke = None;
         self.grab = None;
         self.drag_snapshot = None;
         self.grid_edit_orig = None;
         self.radius_edit_orig = None;
         self.bevel_edit_orig = None;
+        self.project_settings_edit_orig = None;
         self.face_name_snapshot = None;
         self.face_editor = None;
         self.clear_selection();
@@ -2855,29 +3060,85 @@ impl App {
             reference_font_opacity: self.reference_font_opacity,
             reference_font_scale: self.reference_font_scale,
             reference_font_offset: [self.reference_font_offset.x, self.reference_font_offset.y],
+            custom_radius: self.custom_radius,
         }
     }
 
-    fn save_workspace(&mut self) {
-        let path = self.workspace_save_path.clone().or_else(|| {
-            rfd::FileDialog::new()
-                .add_filter("ThreadType workspace", &["json"])
-                .set_file_name("ThreadType.workspace.json")
-                .save_file()
-        });
-        if let Some(path) = path {
-            self.workspace_save_path = Some(path.clone());
-            self.start_background_save(
-                path,
-                SavePayload::Workspace(self.workspace_snapshot()),
-                "ワークスペース",
-            );
+    fn workspace_content_hash(workspace: &WorkspaceFile) -> u64 {
+        let mut content = serde_json::to_value(workspace).unwrap_or_default();
+        if let Some(object) = content.as_object_mut() {
+            for ui_key in ["mode", "dark_theme", "show_circles", "language", "dock"] {
+                object.remove(ui_key);
+            }
         }
+        let bytes = serde_json::to_vec(&content).unwrap_or_default();
+        let mut hasher = DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn current_project_hash(&self) -> u64 {
+        Self::workspace_content_hash(&self.workspace_snapshot())
+    }
+
+    fn project_is_dirty(&self) -> bool {
+        self.saved_project_hash != Some(self.current_project_hash())
+    }
+
+    fn project_name(&self) -> String {
+        self.workspace_save_path
+            .as_ref()
+            .and_then(|path| path.file_stem())
+            .and_then(|name| name.to_str())
+            .map(|name| name.strip_suffix(".workspace").unwrap_or(name).to_owned())
+            .unwrap_or_else(|| self.language.text("名称未設定", "Untitled").to_owned())
+    }
+
+    fn save_workspace(&mut self) {
+        if let Some(path) = self.workspace_save_path.clone() {
+            self.start_workspace_save(path);
+        } else {
+            self.save_workspace_as();
+        }
+    }
+
+    fn save_workspace_as(&mut self) {
+        let suggested_name = format!("{}.threadshape", self.project_name());
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("ThreadShape project", &["threadshape"])
+            .add_filter("JSON", &["json"])
+            .set_file_name(suggested_name)
+            .save_file()
+        {
+            self.workspace_save_path = Some(path.clone());
+            self.start_workspace_save(path);
+        }
+    }
+
+    fn start_workspace_save(&mut self, path: PathBuf) {
+        self.start_background_save(
+            path,
+            SavePayload::Workspace(self.workspace_snapshot()),
+            "プロジェクト",
+        );
+    }
+
+    fn migrate_document(document: &mut Document, canvas_center: Point) {
+        if document.version < 6 {
+            document.grid.origin = match document.grid.scale_anchor {
+                ScaleAnchor::TopLeft => Point::new(110.0, 110.0),
+                ScaleAnchor::Center => Point::new(
+                    canvas_center.x - 3.0 * document.grid.spacing,
+                    canvas_center.y - 2.0 * document.grid.spacing,
+                ),
+            };
+        }
+        document.version = CURRENT_DOCUMENT_VERSION;
     }
 
     fn load_workspace(&mut self) {
         let Some(path) = rfd::FileDialog::new()
-            .add_filter("ThreadType workspace", &["json"])
+            .add_filter("ThreadShape project", &["threadshape", "json"])
             .pick_file()
         else {
             return;
@@ -2901,6 +3162,10 @@ impl App {
             {
                 workspace.font.version = CURRENT_FONT_PROJECT_VERSION;
                 workspace.font.ensure_default_glyphs();
+                Self::migrate_document(&mut workspace.shape, self.canvas_center);
+                for glyph in &mut workspace.font.glyphs {
+                    Self::migrate_document(&mut glyph.document, self.canvas_center);
+                }
                 workspace.font.active_glyph = workspace
                     .font
                     .active_glyph
@@ -2939,6 +3204,7 @@ impl App {
                     workspace.reference_font_offset[0],
                     workspace.reference_font_offset[1],
                 );
+                self.custom_radius = workspace.custom_radius.clamp(4.0, 120.0);
                 self.shape_undo.clear();
                 self.shape_redo.clear();
                 self.glyph_undo = vec![Vec::new(); self.font_project.glyphs.len()];
@@ -2952,6 +3218,7 @@ impl App {
                         .clone(),
                 };
                 self.workspace_save_path = Some(path);
+                self.saved_project_hash = Some(self.current_project_hash());
                 self.reset_transient_editor();
                 self.rebuild_pegs(self.canvas_size);
                 self.proof_cache.clear();
@@ -2983,7 +3250,7 @@ impl App {
                 {
                     project.version = CURRENT_FONT_PROJECT_VERSION;
                     for glyph in &mut project.glyphs {
-                        glyph.document.version = CURRENT_DOCUMENT_VERSION;
+                        Self::migrate_document(&mut glyph.document, self.canvas_center);
                     }
                     project.active_glyph = project.active_glyph.min(project.glyphs.len() - 1);
                     project.ensure_default_glyphs();
@@ -3047,7 +3314,7 @@ impl App {
             {
                 Ok(mut doc) if doc.version <= CURRENT_DOCUMENT_VERSION => {
                     self.push_history();
-                    doc.version = CURRENT_DOCUMENT_VERSION;
+                    Self::migrate_document(&mut doc, self.canvas_center);
                     self.doc = doc;
                     self.doc.next_peg_id = self.next_peg_id();
                     self.draw = None;
@@ -3302,6 +3569,7 @@ impl App {
     fn render_glyphs_tab(&mut self, ui: &mut egui::Ui) {
         let colors = self.theme_colors();
         let language = self.language;
+        let settings_before = self.project_settings_snapshot();
         if self.workspace_mode == WorkspaceMode::Shape {
             ui.label(
                 egui::RichText::new(language.text("フォント制作", "Font workspace"))
@@ -3453,16 +3721,22 @@ impl App {
                 0.25..=2.0,
             );
             ui.horizontal(|ui| {
-                ui.add(
+                let x_response = ui.add(
                     egui::DragValue::new(&mut self.reference_font_offset.x)
                         .speed(0.5)
                         .prefix("X "),
                 );
-                ui.add(
+                if x_response.changed() && ui.input(|input| input.modifiers.ctrl) {
+                    self.reference_font_offset.x = self.reference_font_offset.x.trunc();
+                }
+                let y_response = ui.add(
                     egui::DragValue::new(&mut self.reference_font_offset.y)
                         .speed(0.5)
                         .prefix("Y "),
                 );
+                if y_response.changed() && ui.input(|input| input.modifiers.ctrl) {
+                    self.reference_font_offset.y = self.reference_font_offset.y.trunc();
+                }
                 if ui
                     .button(language.text("位置をリセット", "Reset position"))
                     .clicked()
@@ -3627,6 +3901,10 @@ impl App {
             .small()
             .color(colors.text2),
         );
+        self.track_project_settings_edit(
+            settings_before,
+            ui.input(|input| input.pointer.primary_down()),
+        );
     }
 
     fn render_proof_tab(&mut self, ui: &mut egui::Ui) {
@@ -3652,6 +3930,7 @@ impl App {
             });
             return;
         }
+        let settings_before = self.project_settings_snapshot();
         let thread_on = matches!(
             self.font_project.render_style,
             FontRenderStyle::Thread | FontRenderStyle::FillAndThread
@@ -3738,12 +4017,15 @@ impl App {
                             .size(9.0)
                             .color(colors.text3),
                     );
-                    ui.add_sized(
+                    let width_response = ui.add_sized(
                         [58.0, 27.0],
                         egui::DragValue::new(&mut self.font_project.thread_width)
                             .range(0.5..=24.0)
                             .speed(0.2),
                     );
+                    if width_response.changed() && ui.input(|input| input.modifiers.ctrl) {
+                        self.font_project.thread_width = self.font_project.thread_width.trunc();
+                    }
                 });
             }
         });
@@ -3889,6 +4171,10 @@ impl App {
                 .small()
                 .color(colors.text2),
         );
+        self.track_project_settings_edit(
+            settings_before,
+            ui.input(|input| input.pointer.primary_down()),
+        );
     }
 
     /// フローティングのツールパレット。上端の掴みバーをドラッグで自由に移動でき、
@@ -3967,8 +4253,8 @@ impl App {
                                 (
                                     Tool::CustomPeg,
                                     language.text(
-                                        "任意円 (C)\nクリックで円を配置（緑=配置可 / 赤=不可）",
-                                        "Custom peg (C)\nClick to place; green is valid and red overlaps",
+                                        "任意円 (C)\nクリックで1個、押したままドラッグでグリッド上へ連続配置",
+                                        "Custom peg (C)\nClick once or hold and drag to paint pegs on the grid",
                                     ),
                                 ),
                             ] {
@@ -3984,31 +4270,91 @@ impl App {
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         let language = self.language;
+        let settings_before = self.project_settings_snapshot();
         let shadcn = egui_shadcn::Theme::new(if self.dark_theme {
             egui_shadcn::ColorPalette::shadcn_dark(egui_shadcn::ShadcnBaseColor::Zinc)
         } else {
             egui_shadcn::ColorPalette::shadcn_light(egui_shadcn::ShadcnBaseColor::Zinc)
         });
         ui.horizontal_centered(|ui| {
-            let (mark_rect, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
-            ui.painter()
-                .rect_filled(mark_rect, 5.0, self.theme_colors().accent);
-            ui.painter().text(
-                mark_rect.center(),
-                egui::Align2::CENTER_CENTER,
-                "T",
-                FontId::proportional(12.0),
-                Color32::WHITE,
+            let project_title = format!(
+                "{}{}",
+                self.project_name(),
+                if self.project_is_dirty() { " *" } else { "" }
             );
-            ui.label(egui::RichText::new("ThreadType").strong());
-            ui.label(egui::RichText::new("/").weak());
-            ui.label(
-                egui::RichText::new(match self.workspace_mode {
-                    WorkspaceMode::Shape => language.text("無題のシェイプ", "Untitled shape"),
-                    WorkspaceMode::Font => &self.font_project.family_name,
-                })
-                .weak(),
-            );
+            ui.label(egui::RichText::new(project_title).strong());
+            ui.separator();
+            ui.menu_button(language.text("ファイル", "File"), |ui| {
+                if ui
+                    .button(language.text("開く…    Ctrl+O", "Open…    Ctrl+O"))
+                    .clicked()
+                {
+                    self.load_workspace();
+                    ui.close();
+                }
+                ui.separator();
+                if ui
+                    .button(language.text("保存    Ctrl+S", "Save    Ctrl+S"))
+                    .clicked()
+                {
+                    self.save_workspace();
+                    ui.close();
+                }
+                if ui
+                    .button(language.text(
+                        "名前を付けて保存…    Ctrl+Shift+S",
+                        "Save As…    Ctrl+Shift+S",
+                    ))
+                    .clicked()
+                {
+                    self.save_workspace_as();
+                    ui.close();
+                }
+                ui.separator();
+                if ui
+                    .button(language.text("SVGを書き出す…", "Export SVG…"))
+                    .clicked()
+                {
+                    self.export_svg();
+                    ui.close();
+                }
+                if self.workspace_mode == WorkspaceMode::Font
+                    && ui
+                        .button(language.text("TTFを書き出す…", "Export TTF…"))
+                        .clicked()
+                {
+                    self.export_font_ttf();
+                    ui.close();
+                }
+            });
+            ui.menu_button(language.text("編集", "Edit"), |ui| {
+                if ui
+                    .add_enabled(
+                        !self.undo.is_empty() || self.draw.is_some(),
+                        egui::Button::new(language.text("元に戻す    Ctrl+Z", "Undo    Ctrl+Z")),
+                    )
+                    .clicked()
+                {
+                    if self.draw.is_some() {
+                        self.undo_last_catch();
+                    } else {
+                        self.do_undo();
+                    }
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(
+                        !self.redo.is_empty(),
+                        egui::Button::new(
+                            language.text("やり直す    Ctrl+Shift+Z", "Redo    Ctrl+Shift+Z"),
+                        ),
+                    )
+                    .clicked()
+                {
+                    self.do_redo();
+                    ui.close();
+                }
+            });
             // 狭い画面では左から自然に並べ、横幅に余裕があるときだけ
             // ワークスペース切替をウィンドウ中央へ寄せる。
             let mode_group_width = 126.0;
@@ -4097,10 +4443,7 @@ impl App {
                     .corner_radius(6),
                 );
                 if save_response.clicked() {
-                    match self.workspace_mode {
-                        WorkspaceMode::Shape => self.save_json(),
-                        WorkspaceMode::Font => self.save_font_project(),
-                    }
+                    self.save_workspace();
                 }
                 let language_response = language_menu_button(
                     ui,
@@ -4201,75 +4544,6 @@ impl App {
                 {
                     self.show_circles = !self.show_circles;
                 }
-                let file_response = header_menu_icon_button(
-                    ui,
-                    HeaderMenuGlyph::File,
-                    language.text("ファイル", "File"),
-                );
-                egui::Popup::menu(&file_response).show(|ui| {
-                    if ui
-                        .add_enabled(
-                            !self.undo.is_empty() || self.draw.is_some(),
-                            egui::Button::new(language.text("元に戻す  ⌘Z", "Undo  ⌘Z")),
-                        )
-                        .clicked()
-                    {
-                        if self.draw.is_some() {
-                            self.undo_last_catch();
-                        } else {
-                            self.do_undo();
-                        }
-                        ui.close();
-                    }
-                    if ui
-                        .add_enabled(
-                            !self.redo.is_empty(),
-                            egui::Button::new(language.text("やり直す  ⇧⌘Z", "Redo  ⇧⌘Z")),
-                        )
-                        .clicked()
-                    {
-                        self.do_redo();
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui.button(language.text("開く…", "Open…")).clicked() {
-                        match self.workspace_mode {
-                            WorkspaceMode::Shape => self.load_json(),
-                            WorkspaceMode::Font => self.load_font_project(),
-                        }
-                        ui.close();
-                    }
-                    if ui
-                        .button(language.text("SVGを書き出す…", "Export SVG…"))
-                        .clicked()
-                    {
-                        self.export_svg();
-                        ui.close();
-                    }
-                    if self.workspace_mode == WorkspaceMode::Font
-                        && ui
-                            .button(language.text("TTFを書き出す…", "Export TTF…"))
-                            .clicked()
-                    {
-                        self.export_font_ttf();
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui
-                        .button(language.text("ワークスペースを保存…", "Save workspace…"))
-                        .clicked()
-                    {
-                        self.save_workspace();
-                        ui.close();
-                    }
-                    if ui
-                        .button(language.text("ワークスペースを開く…", "Open workspace…"))
-                        .clicked()
-                    {
-                        self.load_workspace();
-                        ui.close();
-                    }
-                });
                 if let Some(operation) = &self.save_operation {
                     ui.add_sized(
                         [150.0, 18.0],
@@ -4282,6 +4556,10 @@ impl App {
                 }
             });
         });
+        self.track_project_settings_edit(
+            settings_before,
+            ui.input(|input| input.pointer.primary_down()),
+        );
     }
 
     fn displayed_status(&self) -> String {
@@ -5499,6 +5777,8 @@ impl App {
             if (x_resp.lost_focus()
                 || y_resp.lost_focus()
                 || r_resp.lost_focus()
+                || x_resp.drag_stopped()
+                || y_resp.drag_stopped()
                 || r_resp.drag_stopped())
                 && self.radius_edit_orig.is_some()
             {
@@ -5678,7 +5958,7 @@ impl App {
                         b.bevel = bevel;
                     }
                 }
-                if resp.drag_stopped() {
+                if resp.drag_stopped() || resp.lost_focus() {
                     if let Some(snap) = self.bevel_edit_orig.take() {
                         self.push_history_snapshot(snap);
                     }
@@ -5721,6 +6001,13 @@ impl App {
                 1,
                 "",
             );
+            ui.label(
+                egui::RichText::new(language.text("グリッド位置", "Grid position"))
+                    .small()
+                    .color(colors.text2),
+            );
+            scrub_value(ui, "X", &mut self.doc.grid.origin.x, 0.5, -5000.0..=5000.0);
+            scrub_value(ui, "Y", &mut self.doc.grid.origin.y, 0.5, -5000.0..=5000.0);
             mock_slider_row_f64(
                 ui,
                 language.text("引っかかり範囲", "Snap range"),
@@ -5816,6 +6103,7 @@ impl App {
             );
             ui.add_enabled_ui(self.doc.grid.scale_link, |ui| {
                 ui.label(language.text("拡縮の基準", "Scale anchor"));
+                let previous_anchor = self.doc.grid.scale_anchor;
                 ui.horizontal(|ui| {
                     ui.radio_value(
                         &mut self.doc.grid.scale_anchor,
@@ -5828,10 +6116,32 @@ impl App {
                         language.text("中央", "Center"),
                     );
                 });
+                if self.doc.grid.scale_anchor != previous_anchor {
+                    self.doc.grid.origin = match self.doc.grid.scale_anchor {
+                        ScaleAnchor::TopLeft => Point::new(110.0, 110.0),
+                        ScaleAnchor::Center => Point::new(
+                            self.canvas_center.x - 3.0 * self.doc.grid.spacing,
+                            self.canvas_center.y - 2.0 * self.doc.grid.spacing,
+                        ),
+                    };
+                }
             });
             if self.doc.grid != before_grid && self.draw.is_some() {
                 self.draw = None;
                 self.status = "グリッド変更のため描画中の線をキャンセルしました".to_owned();
+            }
+            if self.doc.grid.scale_anchor == ScaleAnchor::Center
+                && before_grid.spacing != 0.0
+                && self.doc.grid.spacing != before_grid.spacing
+            {
+                let pivot = Point::new(
+                    before_grid.origin.x + 3.0 * before_grid.spacing,
+                    before_grid.origin.y + 2.0 * before_grid.spacing,
+                );
+                self.doc.grid.origin = Point::new(
+                    pivot.x - 3.0 * self.doc.grid.spacing,
+                    pivot.y - 2.0 * self.doc.grid.spacing,
+                );
             }
             if self.doc.grid.scale_link
                 && before_grid.spacing != 0.0
@@ -5848,15 +6158,17 @@ impl App {
                 self.grid_edit_orig = Some(before_doc);
             }
             if let Some(source) = self.grid_edit_orig.clone() {
-                if Self::remap_baked_shapes_for_grid_change(
+                let followed = Self::remap_baked_shapes_for_grid_change(
                     &mut self.doc,
                     &source,
                     self.canvas_center,
-                ) {
+                );
+                self.rebuild_pegs(self.canvas_size);
+                if followed {
                     self.status = language
                         .text(
-                            "結合シェイプもグリッド間隔に追従しました",
-                            "Merged shapes followed the grid spacing",
+                            "配置した円と結合シェイプもグリッドに追従しました",
+                            "Placed circles and merged shapes followed the grid",
                         )
                         .to_owned();
                 }
@@ -6495,7 +6807,10 @@ impl App {
             self.draw = None;
             self.status = "描画モードを切り替えたため描画中の線をキャンセルしました".to_owned();
         }
-        if self.tool != Tool::Select && self.tool != Tool::DirectSelect {
+        if self.tool != Tool::Select
+            && self.tool != Tool::DirectSelect
+            && self.tool != Tool::CustomPeg
+        {
             self.cancel_active_manipulation();
         }
 
@@ -6544,6 +6859,19 @@ impl App {
 
         if !grabbing && response.drag_started() {
             if let Some(pos) = hover {
+                if self.tool == Tool::CustomPeg && !is_space_drag {
+                    let base = self.doc.clone();
+                    let added = usize::from(self.place_custom_peg_at(pos));
+                    self.custom_peg_stroke = Some(CustomPegStroke {
+                        base,
+                        last_pointer: pos,
+                        added,
+                    });
+                    if added > 0 {
+                        self.status = "任意円を連続配置中…".to_owned();
+                        self.clear_selection();
+                    }
+                }
                 if self.tool == Tool::Select && self.peg_at_cursor(pos).is_none() && !is_space_drag
                 {
                     // 面のスナップ移動を開始
@@ -6625,6 +6953,31 @@ impl App {
                             _ => {}
                         }
                     }
+                }
+            }
+        }
+
+        if self.tool == Tool::CustomPeg && response.dragged() {
+            if let (Some(pos), Some(last)) = (
+                hover,
+                self.custom_peg_stroke
+                    .as_ref()
+                    .map(|stroke| stroke.last_pointer),
+            ) {
+                let added = self.paint_custom_pegs_between(last, pos);
+                if let Some(stroke) = self.custom_peg_stroke.as_mut() {
+                    stroke.last_pointer = pos;
+                    stroke.added += added;
+                }
+            }
+        }
+
+        if response.drag_stopped() {
+            if let Some(stroke) = self.custom_peg_stroke.take() {
+                if stroke.added > 0 {
+                    self.push_history_snapshot(stroke.base);
+                    self.status = format!("任意円を{}個配置しました", stroke.added);
+                    self.clear_selection();
                 }
             }
         }
@@ -6882,20 +7235,11 @@ impl App {
                         }
                     }
                     Tool::CustomPeg => {
-                        let snapped = self.snap_to_grid_lines(pos);
-                        if self.can_place_custom_peg(snapped, self.custom_radius, &[]) {
-                            self.push_history();
-                            let id = self.doc.next_peg_id;
-                            self.doc.custom_pegs.push(CustomPeg {
-                                id,
-                                center: snapped,
-                                radius: self.custom_radius,
-                                visible: true,
-                            });
-                            self.doc.next_peg_id = self.next_peg_id();
+                        let before = self.doc.clone();
+                        if self.place_custom_peg_at(pos) {
+                            self.push_history_snapshot(before);
                             self.status = "任意円を配置しました".to_owned();
                             self.clear_selection();
-                            self.rebuild_pegs(self.canvas_size);
                         } else {
                             self.status = "この位置には配置できません（重なり）".to_owned();
                         };
@@ -7181,13 +7525,7 @@ impl App {
         painter.rect_filled(rect, 0.0, colors.canvas);
         if self.doc.grid.lines_enabled {
             let spacing = self.doc.grid.spacing.max(1.0);
-            let grid_origin = match self.doc.grid.scale_anchor {
-                ScaleAnchor::TopLeft => Point::new(110.0, 110.0),
-                ScaleAnchor::Center => Point::new(
-                    self.canvas_center.x - 3.0 * spacing,
-                    self.canvas_center.y - 2.0 * spacing,
-                ),
-            };
+            let grid_origin = self.doc.grid.origin;
             let world_min = self.to_world(origin, rect.min);
             let world_max = self.to_world(origin, rect.max);
             let first_col = ((world_min.x - grid_origin.x) / spacing).floor() as i32 - 1;
@@ -7756,8 +8094,14 @@ impl eframe::App for App {
         }
         let redo = ctx.input_mut(|i| i.consume_shortcut(&SC_REDO) || i.consume_shortcut(&SC_REDO2));
         let undo = ctx.input_mut(|i| i.consume_shortcut(&SC_UNDO));
+        let open = ctx.input_mut(|i| i.consume_shortcut(&SC_OPEN));
+        let save_as = ctx.input_mut(|i| i.consume_shortcut(&SC_SAVE_AS));
         let save = ctx.input_mut(|i| i.consume_shortcut(&SC_SAVE));
-        if save {
+        if open {
+            self.load_workspace();
+        } else if save_as {
+            self.save_workspace_as();
+        } else if save {
             self.save_current_workspace();
         } else if redo {
             self.do_redo();
@@ -7802,6 +8146,11 @@ impl eframe::App for App {
             }
         }
         self.apply_theme(ctx);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
+            "{}{} — ThreadShape",
+            self.project_name(),
+            if self.project_is_dirty() { " *" } else { "" }
+        )));
 
         egui::TopBottomPanel::top("toolbar")
             .exact_height(40.0)
@@ -7908,12 +8257,16 @@ impl TabViewer for AppTabViewer<'_> {
     fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
         let language = self.app.language;
         match tab {
-            DockTab::Project => match self.app.workspace_mode {
-                WorkspaceMode::Shape => language
-                    .text("シェイプドキュメント", "Shape document")
-                    .into(),
-                WorkspaceMode::Font => language.text("フォントプロジェクト", "Font project").into(),
-            },
+            DockTab::Project => format!(
+                "{}{}",
+                self.app.project_name(),
+                if self.app.project_is_dirty() {
+                    " *"
+                } else {
+                    ""
+                }
+            )
+            .into(),
             DockTab::Canvas => language.text("キャンバス", "Canvas").into(),
             DockTab::Proof => language.text("試し組み", "Proof").into(),
             DockTab::Glyphs => language.text("フォント", "Font").into(),
@@ -8317,7 +8670,6 @@ fn language_menu_button(ui: &mut egui::Ui, language: UiLanguage, tooltip: &str) 
 
 #[derive(Clone, Copy)]
 enum HeaderMenuGlyph {
-    File,
     Panels,
 }
 
@@ -8343,24 +8695,6 @@ fn header_menu_icon_button(
     let center = rect.center();
     let painter = ui.painter();
     match glyph {
-        HeaderMenuGlyph::File => {
-            let page = Rect::from_center_size(center, Vec2::new(10.0, 13.0));
-            painter.rect_stroke(page, 1.5, stroke, egui::StrokeKind::Inside);
-            painter.line_segment(
-                [
-                    Pos2::new(page.left() + 2.5, page.top() + 4.5),
-                    Pos2::new(page.right() - 2.5, page.top() + 4.5),
-                ],
-                stroke,
-            );
-            painter.line_segment(
-                [
-                    Pos2::new(page.left() + 2.5, page.top() + 7.5),
-                    Pos2::new(page.right() - 2.5, page.top() + 7.5),
-                ],
-                stroke,
-            );
-        }
         HeaderMenuGlyph::Panels => {
             let shell = Rect::from_center_size(center, Vec2::new(13.0, 11.0));
             painter.rect_stroke(shell, 1.5, stroke, egui::StrokeKind::Inside);
@@ -8501,24 +8835,31 @@ fn scrub_value(
     speed: f64,
     range: std::ops::RangeInclusive<f64>,
 ) -> egui::Response {
-    ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new(label)
-                .small()
-                .color(ui.visuals().weak_text_color()),
-        );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.add_sized(
-                [76.0, 24.0],
-                egui::DragValue::new(value)
-                    .speed(speed)
-                    .range(range)
-                    .fixed_decimals(1),
-            )
+    let old_value = *value;
+    let mut response = ui
+        .horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(label)
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_sized(
+                    [76.0, 24.0],
+                    egui::DragValue::new(value)
+                        .speed(speed)
+                        .range(range)
+                        .fixed_decimals(1),
+                )
+            })
+            .inner
         })
-        .inner
-    })
-    .inner
+        .inner;
+    if *value != old_value && ui.input(|input| input.modifiers.ctrl) {
+        *value = value.trunc();
+        response.mark_changed();
+    }
+    response
 }
 
 /// モックの1pxレール＋9pxノブをそのまま描く数値スライダー。
@@ -8619,6 +8960,9 @@ fn mock_slider_f64(
             rail_response.union(field_response)
         })
         .inner;
+    if *value != old_value && ui.input(|input| input.modifiers.ctrl) {
+        *value = value.trunc();
+    }
     if *value != old_value {
         response.mark_changed();
     }
@@ -9650,6 +9994,49 @@ mod tests {
     }
 
     #[test]
+    fn project_settings_slider_change_is_undoable_as_one_edit() {
+        let mut app = test_app();
+        let before = app.project_settings_snapshot();
+        app.font_project.thread_width = 9.5;
+        app.track_project_settings_edit(before, false);
+
+        assert_eq!(app.undo.len(), 1);
+        app.do_undo();
+        assert_eq!(app.font_project.thread_width, 3.0);
+        app.do_redo();
+        assert_eq!(app.font_project.thread_width, 9.5);
+    }
+
+    #[test]
+    fn custom_peg_brush_fills_intermediate_grid_intersections() {
+        let mut app = test_app();
+        app.canvas_size = Vec2::new(800.0, 600.0);
+        app.canvas_center = Point::new(400.0, 300.0);
+        app.doc.grid.spacing = 100.0;
+        app.doc.grid.pegs_enabled = false;
+        app.custom_radius = 10.0;
+        app.rebuild_pegs(app.canvas_size);
+
+        let added =
+            app.paint_custom_pegs_between(Point::new(110.0, 110.0), Point::new(410.0, 110.0));
+
+        assert_eq!(added, 4);
+        assert_eq!(app.doc.custom_pegs.len(), 4);
+        assert_eq!(app.doc.custom_pegs[0].center, Point::new(110.0, 110.0));
+        assert_eq!(app.doc.custom_pegs[3].center, Point::new(410.0, 110.0));
+    }
+
+    #[test]
+    fn dirty_marker_tracks_project_content() {
+        let mut app = test_app();
+        app.saved_project_hash = Some(app.current_project_hash());
+        assert!(!app.project_is_dirty());
+
+        app.doc.grid.radius += 1.0;
+        assert!(app.project_is_dirty());
+    }
+
+    #[test]
     fn onion_skin_uses_previous_glyph_document() {
         let mut app = test_app();
         app.switch_workspace_mode(WorkspaceMode::Font);
@@ -9802,6 +10189,7 @@ mod tests {
             custom_radius: 40.0,
             active_custom_drag: None,
             face_drag: None,
+            custom_peg_stroke: None,
             grab: None,
             view_overlay_timer: 0.0,
             show_circles: true,
@@ -9811,6 +10199,7 @@ mod tests {
             grid_edit_orig: None,
             radius_edit_orig: None,
             bevel_edit_orig: None,
+            project_settings_edit_orig: None,
             draw: None,
             selection: Vec::new(),
             selected_empty_layers: std::collections::HashSet::new(),
@@ -9827,6 +10216,7 @@ mod tests {
             shape_save_path: None,
             font_save_path: None,
             workspace_save_path: None,
+            saved_project_hash: None,
             save_operation: None,
             onion_skin: false,
             onion_next: false,
@@ -10076,11 +10466,119 @@ mod tests {
     }
 
     #[test]
+    fn grid_origin_change_moves_generated_pegs_and_baked_shapes_together() {
+        let mut app = test_app();
+        app.doc.grid.spacing = 100.0;
+        app.doc.grid.origin = Point::new(110.0, 110.0);
+        app.doc.faces.push(Face {
+            start: StartAnchor {
+                peg: PegRef::Grid { row: 0, col: 0 },
+                port: Port::Top,
+            },
+            elements: Vec::new(),
+            name: String::new(),
+            visible: true,
+            baked: Some(crate::model::BakedShape {
+                rings: vec![vec![
+                    Point::new(110.0, 110.0),
+                    Point::new(210.0, 110.0),
+                    Point::new(110.0, 210.0),
+                ]],
+                bevel: 0.0,
+            }),
+            ignored_pegs: Vec::new(),
+        });
+        let source = app.doc.clone();
+        app.doc.grid.origin = Point::new(185.0, 65.0);
+
+        assert!(App::remap_baked_shapes_for_grid_change(
+            &mut app.doc,
+            &source,
+            app.canvas_center,
+        ));
+        let ring = &app.doc.faces[0].baked.as_ref().unwrap().rings[0];
+        assert_eq!(ring[0], Point::new(185.0, 65.0));
+        assert_eq!(ring[1], Point::new(285.0, 65.0));
+        assert_eq!(ring[2], Point::new(185.0, 165.0));
+
+        let peg = resolve_peg(
+            &app.doc.grid,
+            &app.doc.custom_pegs,
+            Point::new(12_000.0, 8_000.0),
+            app.doc.peg_appearance,
+            &PegRef::Grid { row: 1, col: 1 },
+        )
+        .unwrap();
+        assert_eq!(peg.center, Point::new(285.0, 165.0));
+    }
+
+    #[test]
+    fn placed_custom_pegs_follow_grid_spacing_from_the_edit_snapshot() {
+        let mut app = test_app();
+        app.doc.grid.spacing = 100.0;
+        app.doc.grid.origin = Point::new(10.0, 20.0);
+        app.doc.grid.scale_link = false;
+        app.doc.custom_pegs.push(CustomPeg {
+            id: 7,
+            center: Point::new(210.0, 120.0),
+            radius: 12.0,
+            visible: true,
+        });
+        let source = app.doc.clone();
+
+        app.doc.grid.spacing = 150.0;
+        assert!(App::remap_baked_shapes_for_grid_change(
+            &mut app.doc,
+            &source,
+            app.canvas_center,
+        ));
+        assert_eq!(app.doc.custom_pegs[0].center, Point::new(310.0, 170.0));
+        assert_eq!(app.doc.custom_pegs[0].radius, 12.0);
+
+        app.doc.grid.spacing = 175.0;
+        App::remap_baked_shapes_for_grid_change(&mut app.doc, &source, app.canvas_center);
+        assert_eq!(app.doc.custom_pegs[0].center, Point::new(360.0, 195.0));
+        assert_eq!(app.doc.custom_pegs[0].radius, 12.0);
+    }
+
+    #[test]
+    fn linked_custom_peg_radius_and_references_follow_the_grid() {
+        let mut app = test_app();
+        app.doc.grid.spacing = 100.0;
+        app.doc.grid.origin = Point::new(10.0, 20.0);
+        app.doc.grid.scale_link = true;
+        app.doc.grid.catch = 0.0;
+        app.doc.custom_pegs.push(CustomPeg {
+            id: 9,
+            center: Point::new(110.0, 220.0),
+            radius: 12.0,
+            visible: true,
+        });
+        let source = app.doc.clone();
+        app.doc.grid.spacing = 150.0;
+
+        App::remap_baked_shapes_for_grid_change(&mut app.doc, &source, app.canvas_center);
+        assert_eq!(app.doc.custom_pegs[0].center, Point::new(160.0, 320.0));
+        assert_eq!(app.doc.custom_pegs[0].radius, 18.0);
+        let resolved = resolve_peg(
+            &app.doc.grid,
+            &app.doc.custom_pegs,
+            app.canvas_center,
+            app.doc.peg_appearance,
+            &PegRef::Custom { id: 9 },
+        )
+        .unwrap();
+        assert_eq!(resolved.center, Point::new(160.0, 320.0));
+        assert_eq!(resolved.radius, 18.0);
+    }
+
+    #[test]
     fn baked_faces_keep_the_reference_cell_fixed_for_center_scaling() {
         let mut app = test_app();
         app.doc.grid.spacing = 200.0;
         app.doc.grid.scale_anchor = ScaleAnchor::Center;
         let center = app.canvas_center;
+        app.doc.grid.origin = Point::new(center.x - 600.0, center.y - 400.0);
         app.doc.faces.push(Face {
             start: StartAnchor {
                 peg: PegRef::Grid { row: 0, col: 0 },
@@ -10101,6 +10599,7 @@ mod tests {
         });
         let source = app.doc.clone();
         app.doc.grid.spacing = 300.0;
+        app.doc.grid.origin = Point::new(center.x - 900.0, center.y - 600.0);
 
         App::remap_baked_shapes_for_grid_change(&mut app.doc, &source, center);
         let ring = &app.doc.faces[0].baked.as_ref().unwrap().rings[0];

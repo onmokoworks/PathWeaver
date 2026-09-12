@@ -2587,6 +2587,7 @@ mod stress {
             for anchor in [ScaleAnchor::TopLeft, ScaleAnchor::Center] {
                 let grid = GridSettings {
                     spacing,
+                    origin: Point::new(110.0, 110.0),
                     radius,
                     catch,
                     sub_radius: sub,
