@@ -12,9 +12,9 @@ case "${1:-}" in
     exec cargo test
     ;;
   --debug)
-    exec cargo run
+    exec cargo run --bin threadtype
     ;;
   *)
-    exec cargo run --release
+    exec cargo run --release --bin threadtype
     ;;
 esac

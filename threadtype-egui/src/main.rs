@@ -5,6 +5,7 @@ mod export;
 mod font_export;
 mod geometry;
 mod model;
+mod shared_ui;
 
 fn main() -> eframe::Result<()> {
     // パニックを記録してクラッシュ原因を特定できるようにする

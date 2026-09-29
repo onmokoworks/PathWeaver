@@ -2,7 +2,12 @@
 name = "threadtype"
 version = "0.1.0"
 edition = "2021"
+default-run = "pathweaver"
 description = "円形ペグ・フォント制作ツール（タウトストリング方式）"
+
+[[bin]]
+name = "pathweaver"
+path = "src/path_tool/main.rs"
 
 [dependencies]
 eframe = "=0.33.3"
@@ -16,6 +21,7 @@ serde_json = "1"
 rfd = "=0.16.0"
 ab_glyph = "0.2"
 geo = "0.29"
+i_overlay = "=1.9.4"
 ttf-parser = "0.25.1"
 lucide-icons = "0.555.0"
 
