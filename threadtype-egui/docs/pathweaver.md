@@ -156,3 +156,18 @@ Aで角を選ぶと内角の二等分線上に小さな二重丸を表示しま�
 参考：[Adobeの四角ツール](https://helpx.adobe.com/illustrator/using/tool-techniques/rectangle-tool.html)、[塗りと線](https://helpx.adobe.com/uk/illustrator/desktop/paint-and-fill/learn-painting-basics/about-fills-and-strokes.html)、[グリッド](https://helpx.adobe.com/illustrator/desktop/measure-and-align/grids-and-guides/align-graphic-objects-with-grids.html)、[ガイド](https://helpx.adobe.com/illustrator/desktop/measure-and-align/grids-and-guides/align-graphic-objects-with-guides.html)。公式資料を基準にした実装で、Illustrator実機の今回の比較は行っていません。
 
 76件のテストに、四角・楕円のアンカー数とShift/Alt、閉じ目の分割・接線編集・全角の角丸、塗りと線の領域の違い、色を保つアウトライン化、グリッドとガイドの吸着・保存、定規からのガイド作成とUndo、旧外観の移行を含みます。四角・楕円の線のみ／塗りと線の描画も画像で確認しています。
+
+## パス全体の範囲選択（V）
+
+Vで空白からドラッグすると、選択範囲に触れた表示中のパスをまとめて選びます。
+塗り・線の実形状と範囲の交差を調べるので、外接矩形だけが重なる空白や穴は選択しません。
+Aの範囲選択は従来どおりアンカー単位です。
+
+Shift＋クリックでパスを追加・解除、Shift＋範囲選択で追加します。
+レイヤー名のShift＋クリックでも複数選択できます。Cmd+A（Windows/LinuxはCtrl+A）で表示中の全パスを選択します。
+空白クリックで解除、範囲ドラッグ中のEscで開始前の選択へ戻ります。選択だけでは保存データやUndo履歴を変更しません。
+
+選択したパスの上をドラッグすると、位置関係を保って一緒に移動します。
+共通の変形枠で拡大縮小・回転でき、Delete/Backspaceは選択パスをまとめて削除します。
+移動・変形・削除は一回のUndoで戻せます。複数選択の枠は選択時に水平へ戻り、回転操作中はパスと一緒に回転します。
+外観など個別プロパティの編集対象は最後に選んだパスです。
