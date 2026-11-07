@@ -1120,7 +1120,7 @@ impl Workspace {
         cx.notify();
     }
     fn toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let files = div()
+        div()
             .flex()
             .items_center()
             .gap_1()
@@ -1139,6 +1139,15 @@ impl Workspace {
             .child(self.button("開く", false, cx, |s, w, cx| s.open(w, cx)))
             .child(self.button("保存", false, cx, |s, _, cx| s.save(false, cx)))
             .child(self.button("SVG書き出し", false, cx, |s, _, cx| s.export(cx)))
+            .child(self.button("サンプル", false, cx, |s, w, cx| {
+                s.confirm_discard(w, cx, |s, _, cx| {
+                    s.session = Session::default();
+                    s.session.doc = Document::example();
+                    s.session.selected = vec![s.session.doc.strokes[0].id];
+                    s.fit_art();
+                    s.refresh(cx);
+                })
+            }))
             .child(div().w(px(16.)))
             .child(self.button("元に戻す", false, cx, |s, _, cx| {
                 s.session.undo();
@@ -1168,16 +1177,20 @@ impl Workspace {
             .child(self.button("ノード", self.nodes_open, cx, |s, _, _| {
                 s.nodes_open = !s.nodes_open
             }))
-            .into_any_element();
+            .into_any_element()
+    }
+    fn tool_palette(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut tools = div()
-            .h(px(36.))
+            .w(px(40.))
+            .h_full()
             .flex_shrink_0()
             .flex()
+            .flex_col()
             .items_center()
             .gap_1()
-            .px_2()
+            .py_2()
             .bg(rgb(ui_color(Role::Surface)))
-            .border_b_1()
+            .border_r_1()
             .border_color(rgb(ui_color(Role::Border)));
         for (tool, icon, label) in [
             (Tool::Select, "select", "選択 V"),
@@ -1239,36 +1252,7 @@ impl Workspace {
                     })),
             );
         }
-        tools = tools
-            .child(
-                div()
-                    .ml_2()
-                    .text_color(rgb(ui_color(Role::Muted)))
-                    .child(match self.tool {
-                        Tool::Select => "選択",
-                        Tool::Direct => "制御点",
-                        Tool::Convert => "アンカー",
-                        Tool::Pen => "ペン",
-                        Tool::Width => "幅",
-                    }),
-            )
-            .child(div().flex_1())
-            .child(self.button("サンプル", false, cx, |s, w, cx| {
-                s.confirm_discard(w, cx, |s, _, cx| {
-                    s.session = Session::default();
-                    s.session.doc = Document::example();
-                    s.session.selected = vec![s.session.doc.strokes[0].id];
-                    s.fit_art();
-                    s.refresh(cx);
-                })
-            }));
-        div()
-            .flex()
-            .flex_col()
-            .flex_shrink_0()
-            .child(files)
-            .child(tools)
-            .into_any_element()
+        tools.into_any_element()
     }
 
     fn paths_panel(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1595,6 +1579,7 @@ impl Render for Workspace {
             .flex()
             .flex_1()
             .min_h_0()
+            .child(self.tool_palette(cx))
             .child(canvas)
             .child(self.inspector(cx));
         let mut root = div()
