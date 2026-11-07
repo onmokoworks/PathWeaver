@@ -42,6 +42,10 @@ impl Default for Width {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WidthKey {
+    /// A newly inserted handle follows the existing profile until first edited.
+    /// Older documents omit this field and keep their explicit interpolation knots.
+    #[serde(default)]
+    pub interpolated: bool,
     pub id: u64,
     pub segment: u64,
     pub t: f64,
@@ -144,6 +148,9 @@ impl Stroke {
             n.outgoing = vector(n.outgoing);
         }
         for target in self.width_targets() {
+            if matches!(target, WidthTarget::Key(id) if self.widths.iter().any(|k| k.id == id && k.interpolated)) {
+                continue;
+            }
             if let Some((i, t)) = self.attachment(target) {
                 let old = *self.width(target).as_ref().unwrap();
                 let tangent = self.tangent(i, t);
@@ -201,21 +208,34 @@ impl Stroke {
         }
     }
     pub fn width_mut(&mut self, target: WidthTarget) -> Option<&mut Width> {
+        // Resolve a sampled handle before making it an explicit knot. This also
+        // accounts for other width edits performed since the handle was inserted.
+        if let WidthTarget::Key(id) = target {
+            let index = self.widths.iter().position(|k| k.id == id)?;
+            if self.widths[index].interpolated {
+                let width = self.width(target)?;
+                self.widths[index].width = width;
+                self.widths[index].interpolated = false;
+            }
+        }
         match target {
             WidthTarget::Start => Some(&mut self.start_width),
             WidthTarget::End => Some(&mut self.end_width),
-            WidthTarget::Key(id) => self
-                .widths
-                .iter_mut()
-                .find(|k| k.id == id)
-                .map(|k| &mut k.width),
+            WidthTarget::Key(id) => self.widths.iter_mut().find(|k| k.id == id).map(|k| &mut k.width),
         }
     }
     pub fn width(&self, target: WidthTarget) -> Option<Width> {
         match target {
             WidthTarget::Start => Some(self.start_width),
             WidthTarget::End => Some(self.end_width),
-            WidthTarget::Key(id) => self.widths.iter().find(|k| k.id == id).map(|k| k.width),
+            WidthTarget::Key(id) => {
+                let key = self.widths.iter().find(|k| k.id == id)?;
+                if key.interpolated {
+                    super::outline::width_at(self, self.segment_index(key.segment)?, key.t)
+                } else {
+                    Some(key.width)
+                }
+            }
         }
     }
     pub fn segment_count(&self) -> usize {
@@ -235,6 +255,60 @@ impl Stroke {
             k.width.left = value * 0.5;
             k.width.right = value * 0.5;
         }
+    }
+    /// The displayed stroke width is the widest part of the editable profile.
+    /// Using the maximum (rather than the start) also supports tapered zero tips.
+    pub fn line_width(&self) -> f64 {
+        if self.contours.is_some() {
+            return self.edge_width;
+        }
+        let end = if self.closed { self.start_width } else { self.end_width };
+        std::iter::once(self.start_width)
+            .chain(std::iter::once(end))
+            .chain(self.widths.iter().filter(|k| !k.interpolated).map(|k| k.width))
+            .map(|w| w.left + w.right)
+            .fold(0., f64::max)
+    }
+    /// Resize without flattening the profile, moving its centerline, or losing
+    /// left/right asymmetry. Only an entirely zero profile needs initialization.
+    pub fn resize_line_width(&mut self, value: f64) -> Result<(), String> {
+        if !value.is_finite() || !(0.0..=1000.0).contains(&value) {
+            return Err("線幅は0〜1000の範囲で入力してください".into());
+        }
+        if self.contours.is_some() {
+            self.edge_width = value;
+            return Ok(());
+        }
+        let current = self.line_width();
+        if current <= f64::EPSILON {
+            self.set_line_width(value);
+            return Ok(());
+        }
+        let factor = value / current;
+        let key_widths: Vec<_> = self.widths.iter().map(|k| {
+            self.width(WidthTarget::Key(k.id)).unwrap_or(k.width)
+        }).collect();
+        // Validate before mutation: an inactive end on a closed path can be
+        // wider than the visible profile and must not be silently clipped.
+        if std::iter::once(self.start_width)
+            .chain(std::iter::once(self.end_width))
+            .chain(key_widths.iter().copied())
+            .any(|w| (w.left * factor).max(w.right * factor) > 1000.)
+        {
+            return Err("幅点が上限1000を超えるため、線幅を小さくしてください".into());
+        }
+        self.edge_width = value;
+        for (key, width) in self.widths.iter_mut().zip(key_widths) {
+            key.width = width;
+        }
+        for w in std::iter::once(&mut self.start_width)
+            .chain(std::iter::once(&mut self.end_width))
+            .chain(self.widths.iter_mut().map(|k| &mut k.width))
+        {
+            w.left *= factor;
+            w.right *= factor;
+        }
+        Ok(())
     }
     pub fn segment_index(&self, id: u64) -> Option<usize> {
         self.nodes
@@ -621,6 +695,7 @@ impl Document {
         };
         for (i, t, left, right) in [(0, 0.48, 48., 48.), (1, 0.48, 66., 35.)] {
             s.widths.push(WidthKey {
+                interpolated: false,
                 id: d.id(),
                 segment: s.nodes[i].id,
                 t,

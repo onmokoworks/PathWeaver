@@ -409,6 +409,7 @@ mod tests {
         ] {
             let mut s = fixture(kind);
             s.widths.push(WidthKey {
+                interpolated: false,
                 id: 5,
                 segment: 2,
                 t: 0.8,

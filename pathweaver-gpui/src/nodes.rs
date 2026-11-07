@@ -35,13 +35,84 @@ const KINDS: [Kind; 23] = [
     Kind::Math,
     Kind::Measure,
 ];
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Socket {
     Shape(usize),
     Number(Parameter),
 }
 fn height(n: &Node) -> f32 {
     74. + (n.inputs.len() + n.parameters().len()).saturating_sub(1) as f32 * 24.
+}
+fn node_rect(n: &Node) -> Rect {
+    Rect::new(
+        n.position[0] as f64,
+        n.position[1] as f64,
+        (n.position[0] + WIDTH) as f64,
+        (n.position[1] + height(n)) as f64,
+    )
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum NodeHit {
+    Body(u64),
+    Input(u64, Socket),
+    Output(u64),
+}
+// Visit each visible node as one unit: its body obscures every node below it.
+fn node_hit(g: &Graph, p: KPoint, zoom: f32) -> Option<NodeHit> {
+    let tolerance = 10. / zoom as f64;
+    for n in g.nodes.iter().rev() {
+        if n.kind != Kind::Output && output(n).distance(p) < tolerance {
+            return Some(NodeHit::Output(n.id));
+        }
+        for (socket, at, _) in sockets(n) {
+            if at.distance(p) < tolerance {
+                return Some(NodeHit::Input(n.id, socket));
+            }
+        }
+        if node_rect(n).contains(p) {
+            return Some(NodeHit::Body(n.id));
+        }
+    }
+    None
+}
+fn fitted_view(g: &Graph, width: f32, height: f32) -> Option<View> {
+    if g.nodes.is_empty() || width <= 1. || height <= 1. {
+        return None;
+    }
+    let bounds = g.nodes.iter().map(node_rect).reduce(|a, b| a.union(b))?;
+    let padding = 24_f32.min(width * 0.1).min(height * 0.1);
+    let zoom = ((width - padding * 2.) / bounds.width().max(1.) as f32)
+        .min((height - padding * 2.) / bounds.height().max(1.) as f32)
+        .min(1.2);
+    Some(View {
+        zoom,
+        pan: [
+            width * 0.5 - bounds.center().x as f32 * zoom,
+            height * 0.5 - bounds.center().y as f32 * zoom,
+        ],
+    })
+}
+fn socket_label(n: &Node, socket: Socket, label: &str) -> String {
+    match socket {
+        Socket::Number(p) if n.bindings.iter().any(|(key, _)| *key == p) => {
+            format!("{label}  接続中")
+        }
+        Socket::Number(p) => format!("{}  {:.2}", label, n.number(p)),
+        Socket::Shape(_) => label.into(),
+    }
+}
+// A deselection click must not turn into a drag of the remaining selection.
+fn select_node(ids: &mut Vec<u64>, id: u64, extend: bool) -> bool {
+    if extend && ids.contains(&id) {
+        ids.retain(|selected| *selected != id);
+        return false;
+    }
+    if !extend && !ids.contains(&id) {
+        ids.clear();
+    }
+    ids.retain(|selected| *selected != id);
+    ids.push(id);
+    true
 }
 fn color(k: Kind) -> u32 {
     match k {
@@ -117,37 +188,44 @@ pub fn lazy_connect(g: &mut Graph, from: u64, to: u64) -> Result<(), String> {
         g.connect(from, to, port)
     }
 }
+fn duplicate_selection(g: &mut Graph, ids: &[u64]) -> Result<Vec<u64>, String> {
+    let originals: Vec<_> = ids
+        .iter()
+        .filter_map(|id| g.node(*id))
+        .filter(|n| !matches!(n.kind, Kind::Input | Kind::Output))
+        .cloned()
+        .collect();
+    let mut copy_graph = g.clone();
+    let mut map = std::collections::HashMap::new();
+    for n in &originals {
+        let id = copy_graph.add(n.kind, [n.position[0] + 30., n.position[1] + 30.])?;
+        map.insert(n.id, id);
+    }
+    for mut copy in originals {
+        copy.id = map[&copy.id];
+        copy.position[0] += 30.;
+        copy.position[1] += 30.;
+        for source in copy.inputs.iter_mut().flatten() {
+            *source = *map.get(source).unwrap_or(source);
+        }
+        for (_, source) in &mut copy.bindings {
+            *source = *map.get(source).unwrap_or(source);
+        }
+        let id = copy.id;
+        *copy_graph.node_mut(id).unwrap() = copy;
+    }
+    *g = copy_graph;
+    Ok(ids.iter().filter_map(|id| map.get(id).copied()).collect())
+}
 impl Workspace {
     pub fn fit_nodes(&mut self) {
-        if let Some(g) = self.session.graph() {
-            let b = self.node_bounds.get();
-            let minx = g
-                .nodes
-                .iter()
-                .map(|n| n.position[0])
-                .fold(f32::INFINITY, f32::min);
-            let miny = g
-                .nodes
-                .iter()
-                .map(|n| n.position[1])
-                .fold(f32::INFINITY, f32::min);
-            let maxx = g
-                .nodes
-                .iter()
-                .map(|n| n.position[0] + WIDTH)
-                .fold(0., f32::max);
-            let maxy = g
-                .nodes
-                .iter()
-                .map(|n| n.position[1] + height(n))
-                .fold(0., f32::max);
-            let zoom = ((f32::from(b.size.width).max(700.) - 80.) / (maxx - minx).max(1.))
-                .min((f32::from(b.size.height).max(200.) - 50.) / (maxy - miny).max(1.))
-                .clamp(0.2, 1.2);
-            self.node_view = View {
-                zoom,
-                pan: [40. - minx * zoom, 25. - miny * zoom],
-            };
+        let b = self.node_bounds.get();
+        if let Some(view) = self
+            .session
+            .graph()
+            .and_then(|g| fitted_view(g, f32::from(b.size.width), f32::from(b.size.height)))
+        {
+            self.node_view = view;
         }
     }
     fn node_at(&self, p: KPoint) -> Option<u64> {
@@ -194,18 +272,25 @@ impl Workspace {
             })
     }
     fn socket_at(&self, p: KPoint) -> Option<(u64, Socket)> {
-        let tolerance = 10. / self.node_view.zoom as f64;
-        for n in self.session.graph()?.nodes.iter().rev() {
-            for (s, at, _) in sockets(n) {
-                if at.distance(p) < tolerance {
-                    return Some((n.id, s));
-                }
-            }
+        match node_hit(self.session.graph()?, p, self.node_view.zoom) {
+            Some(NodeHit::Input(id, socket)) => Some((id, socket)),
+            _ => None,
         }
-        None
+    }
+    fn output_at(&self, p: KPoint) -> Option<u64> {
+        match node_hit(self.session.graph()?, p, self.node_view.zoom) {
+            Some(NodeHit::Output(id)) => Some(id),
+            _ => None,
+        }
     }
     pub fn node_down(&mut self, e: &MouseDownEvent, w: &mut Window, cx: &mut Context<Self>) {
         if self.editing.is_some() {
+            self.commit_edit(w, cx);
+            if self.editing.is_some() {
+                return;
+            }
+        }
+        if self.handle_drag_down(e, cx) {
             return;
         }
         self.focus.focus(w);
@@ -252,22 +337,15 @@ impl Workspace {
             self.drag = Drag::None;
             return;
         }
-        if let Some(g) = self.session.graph() {
-            for n in g.nodes.iter().rev() {
-                if n.kind != Kind::Output
-                    && output(n).distance(p) < 10. / self.node_view.zoom as f64
-                {
-                    let from = n.id;
-                    self.session.begin();
-                    self.drag = Drag::Connect {
-                        from,
-                        at: e.position,
-                        lazy: false,
-                    };
-                    cx.notify();
-                    return;
-                }
-            }
+        if let Some(from) = self.output_at(p) {
+            self.session.begin();
+            self.drag = Drag::Connect {
+                from,
+                at: e.position,
+                lazy: false,
+            };
+            cx.notify();
+            return;
         }
         if let Some((id, socket)) = self.socket_at(p) {
             let source = self
@@ -291,6 +369,14 @@ impl Workspace {
                     lazy: false,
                 };
                 self.refresh(cx);
+            } else {
+                self.session.begin();
+                self.drag = Drag::ConnectInput {
+                    to: id,
+                    socket,
+                    at: e.position,
+                };
+                cx.notify();
             }
             return;
         }
@@ -308,19 +394,14 @@ impl Workspace {
                 self.refresh(cx);
                 return;
             }
-            if e.modifiers.shift {
-                if self.node_selection.contains(&id) {
-                    self.node_selection.retain(|n| *n != id);
-                } else {
-                    self.node_selection.push(id);
-                }
-            } else if !self.node_selection.contains(&id) {
-                self.node_selection = vec![id];
+            if !select_node(&mut self.node_selection, id, e.modifiers.shift) {
+                cx.notify();
+                return;
             }
             if e.click_count == 2 {
                 let n = self.session.graph().unwrap().node(id).unwrap();
                 let label = n.label.clone();
-                self.start_edit(Editing::NodeName, label, w, cx);
+                self.start_node_edit(Editing::NodeName, id, label, w, cx);
                 return;
             }
             self.session.begin();
@@ -366,6 +447,13 @@ impl Workspace {
                     lazy,
                 }
             }
+            Drag::ConnectInput { to, socket, .. } => {
+                self.drag = Drag::ConnectInput {
+                    to,
+                    socket,
+                    at: e.position,
+                };
+            }
             Drag::Cut { start, .. } => {
                 self.drag = Drag::Cut {
                     start,
@@ -399,6 +487,24 @@ impl Workspace {
                             self.session.cancel();
                             self.status = e;
                         }
+                    }
+                } else {
+                    self.session.cancel();
+                }
+            }
+            Drag::ConnectInput { to, socket, .. } => {
+                let source = self
+                    .node_bounds
+                    .get()
+                    .contains(&e.position)
+                    .then(|| self.output_at(p))
+                    .flatten();
+                if let Some(from) = source {
+                    if let Some(g) = self.session.graph_mut()
+                        && let Err(error) = connect(g, from, to, socket)
+                    {
+                        self.session.cancel();
+                        self.status = error;
                     }
                 } else {
                     self.session.cancel();
@@ -479,6 +585,7 @@ impl Workspace {
             "n" => self.inspector = !self.inspector,
             "home" | "f" => self.fit_nodes(),
             "g" => {
+                self.node_move_modal = true;
                 self.session.begin();
                 self.drag = Drag::Nodes {
                     last: self.node_view.world(self.cursor, self.node_bounds.get()),
@@ -523,7 +630,7 @@ impl Workspace {
                     .last()
                     .and_then(|id| self.session.graph()?.node(*id))
                 {
-                    self.start_edit(Editing::NodeName, n.label.clone(), w, cx);
+                    self.start_node_edit(Editing::NodeName, n.id, n.label.clone(), w, cx);
                 }
             }
             _ => {}
@@ -534,44 +641,9 @@ impl Workspace {
         let ids = self.node_selection.clone();
         self.session.begin();
         if let Some(g) = self.session.graph_mut() {
-            let originals: Vec<_> = g
-                .nodes
-                .iter()
-                .filter(|n| ids.contains(&n.id) && !matches!(n.kind, Kind::Input | Kind::Output))
-                .cloned()
-                .collect();
-            let before = g.clone();
-            let mut map = std::collections::HashMap::new();
-            let mut failed = false;
-            for n in &originals {
-                match g.add(n.kind, [n.position[0] + 30., n.position[1] + 30.]) {
-                    Ok(id) => {
-                        map.insert(n.id, id);
-                    }
-                    Err(_) => {
-                        failed = true;
-                        break;
-                    }
-                }
-            }
-            if failed {
-                *g = before;
-            } else {
-                for n in originals {
-                    let id = map[&n.id];
-                    let mut copy = n;
-                    copy.id = id;
-                    copy.position[0] += 30.;
-                    copy.position[1] += 30.;
-                    for source in copy.inputs.iter_mut().flatten() {
-                        *source = *map.get(source).unwrap_or(source);
-                    }
-                    for (_, source) in &mut copy.bindings {
-                        *source = *map.get(source).unwrap_or(source);
-                    }
-                    *g.node_mut(id).unwrap() = copy;
-                }
-                self.node_selection = map.values().copied().collect();
+            match duplicate_selection(g, &ids) {
+                Ok(ids) => self.node_selection = ids,
+                Err(error) => self.status = error,
             }
         }
         self.session.commit();
@@ -701,7 +773,7 @@ impl Workspace {
     pub fn paint_nodes(&self, b: Bounds<Pixels>, w: &mut Window, cx: &mut App) {
         w.with_content_mask(Some(ContentMask { bounds: b }), |w| {
             rect(w, b, ui_color(Role::NodeCanvas), 0, 0., 0.);
-            let step = 24. * self.node_view.zoom;
+            let step = (24. * self.node_view.zoom).max(12.);
             let offsetx = self.node_view.pan[0].rem_euclid(step);
             let offsety = self.node_view.pan[1].rem_euclid(step);
             for x in 0..(f32::from(b.size.width) / step) as i32 + 1 {
@@ -777,40 +849,45 @@ impl Workspace {
                     0.,
                     3.,
                 );
-                let title = if n.label.is_empty() {
-                    n.kind.label().to_string()
-                } else {
-                    n.label.clone()
-                };
-                let title = title.chars().take(14).collect::<String>();
-                text(
-                    w,
-                    cx,
-                    origin + point(px(9. * z), px(3. * z)),
-                    title,
-                    ui_color(Role::Text),
-                    (12. * z).max(8.),
-                );
-                if !n.label.is_empty() {
-                    text(
-                        w,
-                        cx,
-                        origin + point(px(9. * z), px(28. * z)),
-                        n.kind.label(),
-                        ui_color(Role::Muted),
-                        (9. * z).max(7.),
-                    );
-                }
-                if n.bypass {
-                    text(
-                        w,
-                        cx,
-                        origin + point(px(130. * z), px(28. * z)),
-                        "無効",
-                        ui_color(Role::Muted),
-                        (10. * z).max(7.),
-                    );
-                }
+                // Hide details before text becomes unreadable rather than painting
+                // minimum-size labels over neighbouring nodes when zoomed out.
+                w.with_content_mask(Some(ContentMask { bounds }), |w| {
+                    if z >= 0.65 {
+                        let title = if n.label.is_empty() {
+                            n.kind.label().to_string()
+                        } else {
+                            n.label.clone()
+                        };
+                        text(
+                            w,
+                            cx,
+                            origin + point(px(9. * z), px(3. * z)),
+                            title,
+                            ui_color(Role::Text),
+                            12. * z,
+                        );
+                    }
+                    if z >= 0.85 && !n.label.is_empty() {
+                        text(
+                            w,
+                            cx,
+                            origin + point(px(9. * z), px(28. * z)),
+                            n.kind.label(),
+                            ui_color(Role::Muted),
+                            9. * z,
+                        );
+                    }
+                    if z >= 0.85 && n.bypass {
+                        text(
+                            w,
+                            cx,
+                            origin + point(px(130. * z), px(28. * z)),
+                            "無効",
+                            ui_color(Role::Muted),
+                            10. * z,
+                        );
+                    }
+                });
                 for (socket, pos, label) in sockets(n) {
                     let at = self.node_view.screen(pos, b);
                     let numeric = matches!(socket, Socket::Number(_));
@@ -824,18 +901,18 @@ impl Workspace {
                             ui_color(Role::ShapeSocket)
                         },
                     );
-                    let label = match socket {
-                        Socket::Number(p) => format!("{}  {:.2}", label, n.number(p)),
-                        _ => label.into(),
-                    };
-                    text(
-                        w,
-                        cx,
-                        at + point(px(10. * z), px(-8. * z)),
-                        label,
-                        ui_color(Role::Text),
-                        (11. * z).max(7.),
-                    );
+                    if z >= 0.85 {
+                        w.with_content_mask(Some(ContentMask { bounds }), |w| {
+                            text(
+                                w,
+                                cx,
+                                at + point(px(10. * z), px(-8. * z)),
+                                socket_label(n, socket, label),
+                                ui_color(Role::Text),
+                                11. * z,
+                            );
+                        });
+                    }
                 }
                 if n.kind != Kind::Output {
                     dot(
@@ -857,6 +934,20 @@ impl Workspace {
                             w,
                             self.node_view.screen(output(n), b),
                             at,
+                            ui_color(Role::Accent),
+                            2.,
+                        );
+                    }
+                }
+                Drag::ConnectInput { to, socket, at } => {
+                    if let Some((_, pos, _)) = g
+                        .node(to)
+                        .and_then(|n| sockets(n).into_iter().find(|(s, _, _)| *s == socket))
+                    {
+                        wire(
+                            w,
+                            at,
+                            self.node_view.screen(pos, b),
                             ui_color(Role::Accent),
                             2.,
                         );
@@ -905,7 +996,8 @@ impl Workspace {
                         .text_color(rgb(ui_color(Role::Muted)))
                         .child(n.kind.label()),
                 )
-                .child(self.button(
+                .child(self.button_with_id(
+                    ("node-name", id),
                     if label.is_empty() {
                         "名前を付ける".into()
                     } else {
@@ -913,7 +1005,7 @@ impl Workspace {
                     },
                     false,
                     cx,
-                    move |s, w, cx| s.start_edit(Editing::NodeName, label.clone(), w, cx),
+                    move |s, w, cx| s.start_node_edit(Editing::NodeName, id, label.clone(), w, cx),
                 ));
             if !matches!(n.kind, Kind::Input | Kind::Output) {
                 col = col.child(self.button(
@@ -957,8 +1049,9 @@ impl Workspace {
                     cx,
                     move |s, w, cx| {
                         s.node_region = true;
-                        s.start_edit(
+                        s.start_node_edit(
                             Editing::Color,
+                            id,
                             format!("{:02X}{:02X}{:02X}", c[0], c[1], c[2]),
                             w,
                             cx,
@@ -1217,7 +1310,8 @@ impl Workspace {
         for (i, p) in self.session.doc.appearance_presets.iter().enumerate() {
             let preset = p.clone();
             col = col
-                .child(self.button(
+                .child(self.button_with_id(
+                    ("preset", i),
                     format!("{} / {}", p.category, p.name),
                     false,
                     cx,
@@ -1387,7 +1481,11 @@ impl Workspace {
                     .hover(|s| s.bg(rgb(ui_color(Role::Accent))))
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(|s, _, _, _| s.drag = Drag::Resize),
+                        cx.listener(|s, e: &MouseDownEvent, _, cx| {
+                            if !s.handle_drag_down(e, cx) {
+                                s.drag = Drag::Resize;
+                            }
+                        }),
                     ),
             )
             .child(bar)
@@ -1441,7 +1539,84 @@ fn wire_crosses(
 }
 #[cfg(test)]
 mod tests {
-    use super::{Graph, Kind, Parameter, lazy_connect, point, px, wire_crosses};
+    use super::{
+        Graph, KPoint, Kind, NodeHit, Parameter, Socket, connect, duplicate_selection, fitted_view,
+        lazy_connect, node_hit, node_rect, output, point, px, select_node, socket_label,
+        wire_crosses,
+    };
+    #[test]
+    fn front_node_blocks_hidden_sockets() {
+        let mut g = Graph::default();
+        let hidden_output = output(g.node(1).unwrap());
+        g.node_mut(2).unwrap().position = [180., 110.];
+        assert_eq!(node_hit(&g, hidden_output, 1.), Some(NodeHit::Body(2)));
+        // Once the body no longer covers it, the very same output is usable.
+        g.node_mut(2).unwrap().position = [520., 90.];
+        assert_eq!(node_hit(&g, hidden_output, 1.), Some(NodeHit::Output(1)));
+        let back = g.add(Kind::Rough, [80., 100.]).unwrap();
+        g.nodes.swap(1, 2); // Output is now the frontmost body.
+        g.node_mut(2).unwrap().position = [40., 120.];
+        assert_eq!(
+            node_hit(&g, KPoint::new(80., 154.), 1.),
+            Some(NodeHit::Body(2))
+        );
+        assert_eq!(g.node(back).unwrap().inputs[0], None);
+    }
+    #[test]
+    fn deselection_does_not_start_a_move_and_click_sets_active() {
+        let mut selected = vec![10, 20];
+        assert!(!select_node(&mut selected, 10, true));
+        assert_eq!(selected, vec![20]);
+        assert!(select_node(&mut selected, 10, true));
+        assert_eq!(selected, vec![20, 10]);
+        assert!(select_node(&mut selected, 20, false));
+        assert_eq!(selected, vec![10, 20]);
+    }
+    #[test]
+    fn fit_uses_actual_small_viewport_and_negative_positions() {
+        let mut g = Graph::rough();
+        for n in &mut g.nodes {
+            n.position[0] -= 1000.;
+            n.position[1] -= 500.;
+        }
+        for (width, height) in [(160., 100.), (700., 240.), (40., 25.)] {
+            let view = fitted_view(&g, width, height).unwrap();
+            for n in &g.nodes {
+                let r = node_rect(n);
+                assert!(view.pan[0] + r.x0 as f32 * view.zoom >= -0.001);
+                assert!(view.pan[1] + r.y0 as f32 * view.zoom >= -0.001);
+                assert!(view.pan[0] + r.x1 as f32 * view.zoom <= width + 0.001);
+                assert!(view.pan[1] + r.y1 as f32 * view.zoom <= height + 0.001);
+            }
+        }
+        assert!(fitted_view(&g, 0., 0.).is_none());
+    }
+    #[test]
+    fn input_started_connection_uses_same_type_and_cycle_rules() {
+        let mut g = Graph::rough();
+        let value = g.add(Kind::Value, [0., 0.]).unwrap();
+        connect(&mut g, value, 3, Socket::Number(Parameter::Amount)).unwrap();
+        let label = socket_label(g.node(3).unwrap(), Socket::Number(Parameter::Amount), "量");
+        assert_eq!(label, "量  接続中");
+        let before = g.clone();
+        assert!(connect(&mut g, value, 3, Socket::Shape(0)).is_err());
+        assert!(connect(&mut g, 3, 3, Socket::Shape(0)).is_err());
+        assert_eq!(g, before);
+    }
+
+    #[test]
+    fn duplication_keeps_active_order_and_internal_connections() {
+        let mut g = Graph::rough();
+        let next = g.add(Kind::Offset, [500., 90.]).unwrap();
+        g.connect(3, next, 0).unwrap();
+        let copies = duplicate_selection(&mut g, &[next, 3]).unwrap();
+        assert_eq!(copies.len(), 2);
+        assert_eq!(g.node(copies[0]).unwrap().kind, Kind::Offset);
+        assert_eq!(g.node(copies[1]).unwrap().kind, Kind::Rough);
+        assert_eq!(g.node(copies[0]).unwrap().inputs[0], Some(copies[1]));
+        assert_eq!(g.node(copies[1]).unwrap().inputs[0], Some(1));
+        assert_eq!(g.node(next).unwrap().inputs[0], Some(3));
+    }
     #[test]
     fn lazy_connection_respects_socket_types_and_cycles() {
         let mut g = Graph::rough();

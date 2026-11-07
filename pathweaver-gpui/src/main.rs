@@ -3,6 +3,7 @@ mod assets;
 mod controls;
 mod drawing;
 mod input;
+mod interaction;
 mod nodes;
 mod path_edit;
 mod session;
@@ -34,7 +35,7 @@ fn main() {
                 let weak = view.downgrade();
                 window.on_window_should_close(cx, move |window, cx| {
                     weak.update(cx, |s, cx| {
-                        if !s.session.dirty() {
+                        if !s.session.dirty() && s.editing.is_none() {
                             true
                         } else {
                             s.confirm_discard(window, cx, |_, w, _| w.remove_window());

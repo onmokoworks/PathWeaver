@@ -74,6 +74,7 @@ impl Workspace {
                         return;
                     }
                 }
+                s.finish_interaction(true, cx);
                 f(s, w, cx);
                 cx.notify();
             }))
@@ -85,7 +86,7 @@ impl Workspace {
             Editing::AnchorY => (self.session.anchor_position()?.y, -1e6, 1e6, 1.),
             Editing::Width => {
                 let p = self.session.active()?;
-                (p.start_width.left + p.start_width.right, 0.1, 1000., 0.2)
+                (p.line_width(), 0.1, 1000., 0.2)
             }
             Editing::GridSpacing => (self.session.doc.grid_spacing, 1., 10000., 1.),
             Editing::Rotation => (0., -360000., 360000., 1.),
@@ -130,7 +131,7 @@ impl Workspace {
             Editing::Width => {
                 for s in &mut self.session.doc.strokes {
                     if self.session.selected.contains(&s.id) {
-                        s.set_line_width(value);
+                        s.resize_line_width(value)?;
                     }
                 }
             }
@@ -247,6 +248,10 @@ impl Workspace {
                             if s.editing.is_some() {
                                 return;
                             }
+                        }
+                        if s.handle_drag_down(e, cx) {
+                            cx.stop_propagation();
+                            return;
                         }
                         s.focus.focus(w);
                         s.session.begin();

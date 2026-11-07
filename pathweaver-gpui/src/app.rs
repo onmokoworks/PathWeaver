@@ -9,7 +9,7 @@ use kurbo::{Affine, Point as KPoint, Rect};
 use pathweaver_core::{
     appearance::{Graph, Parameter},
     editing::Anchor,
-    model::{Document, Join, WidthKey, WidthTarget},
+    model::{Document, Join, WidthTarget},
     outline, snapping,
 };
 use std::{cell::Cell, rc::Rc};
@@ -78,6 +78,11 @@ pub enum Drag {
         at: Point<Pixels>,
         lazy: bool,
     },
+    ConnectInput {
+        to: u64,
+        socket: crate::nodes::Socket,
+        at: Point<Pixels>,
+    },
     Cut {
         start: Point<Pixels>,
         current: Point<Pixels>,
@@ -99,6 +104,70 @@ pub enum Editing {
     Rotation,
     Scale,
 }
+/// The document objects an edit began on. Pointer position and later selection
+/// changes must never redirect an already-open field to another object.
+#[derive(Clone)]
+pub struct EditTarget {
+    path: Option<u64>,
+    node: Option<u64>,
+    selected: Vec<u64>,
+    anchors: Vec<Anchor>,
+}
+impl EditTarget {
+    fn capture(session: &Session, node: Option<u64>) -> Self {
+        Self {
+            path: session.active().map(|s| s.id),
+            node,
+            selected: session.selected.clone(),
+            anchors: session.anchors.clone(),
+        }
+    }
+    fn path_mut<'a>(
+        &self,
+        doc: &'a mut Document,
+    ) -> Result<&'a mut pathweaver_core::model::Stroke, String> {
+        doc.strokes
+            .iter_mut()
+            .find(|s| Some(s.id) == self.path)
+            .ok_or_else(|| "編集を開始したパスがありません。取消して選び直してください".into())
+    }
+    fn node_mut<'a>(
+        &self,
+        doc: &'a mut Document,
+    ) -> Result<&'a mut pathweaver_core::appearance::Node, String> {
+        let id = self.node.ok_or("編集を開始したノードがありません")?;
+        self.path_mut(doc)?
+            .appearance
+            .as_mut()
+            .and_then(|g| g.node_mut(id))
+            .ok_or_else(|| "編集を開始したノードがありません。取消して選び直してください".into())
+    }
+    fn apply_color(&self, doc: &mut Document, color: [u8; 3]) -> Result<(), String> {
+        if self.node.is_some() {
+            self.node_mut(doc)?.color = color;
+        } else {
+            self.path_mut(doc)?.edge = Some(color);
+        }
+        Ok(())
+    }
+    fn matches_numeric(&self, session: &Session, nodes: &[u64], kind: &Editing) -> bool {
+        match kind {
+            Editing::GridSpacing => true,
+            Editing::Parameter(_) => {
+                self.path == session.active().map(|s| s.id) && self.node == nodes.last().copied()
+            }
+            Editing::AnchorX | Editing::AnchorY => {
+                self.selected == session.selected && self.anchors == session.anchors
+            }
+            _ => self.selected == session.selected,
+        }
+    }
+}
+#[derive(Clone, Copy)]
+enum ButtonEditPolicy {
+    Commit,
+    Explicit,
+}
 pub struct Workspace {
     pub session: Session,
     pub dialog_open: bool,
@@ -107,6 +176,7 @@ pub struct Workspace {
     node_owner: Option<u64>,
     pub tool: Tool,
     pub drag: Drag,
+    pub node_move_modal: bool,
     pub art_view: View,
     pub node_view: View,
     pub art_bounds: Rc<Cell<Bounds<Pixels>>>,
@@ -124,6 +194,7 @@ pub struct Workspace {
     pub category: String,
     pub input: Entity<TextInput>,
     pub editing: Option<Editing>,
+    pub edit_target: Option<EditTarget>,
     pub status: String,
     pub pen_path: Option<u64>,
     pub cursor: Point<Pixels>,
@@ -140,6 +211,13 @@ impl Workspace {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         focus.focus(window);
+        cx.observe_window_activation(window, |s, w, cx| {
+            if !w.is_window_active() && !matches!(s.drag, Drag::None) {
+                s.finish_interaction(false, cx);
+                s.refresh(cx);
+            }
+        })
+        .detach();
         Self {
             session: Session::default(),
             dialog_open: false,
@@ -148,6 +226,7 @@ impl Workspace {
             node_owner: None,
             tool: Tool::Pen,
             drag: Drag::None,
+            node_move_modal: false,
             art_view: View::default(),
             node_view: View {
                 pan: [30., 30.],
@@ -168,6 +247,7 @@ impl Workspace {
             category: String::new(),
             input: cx.new(TextInput::new),
             editing: None,
+            edit_target: None,
             status: "P：ペン   V：範囲選択   A：制御点   W：幅   ⌘S：保存".into(),
             pen_path: None,
             cursor: point(px(0.), px(0.)),
@@ -213,6 +293,12 @@ impl Workspace {
         cx: &mut Context<Self>,
         next: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) {
+        if self.editing.is_some() {
+            self.commit_edit(window, cx);
+            if self.editing.is_some() {
+                return;
+            }
+        }
         if !self.session.dirty() {
             next(self, window, cx);
             return;
@@ -253,6 +339,7 @@ impl Workspace {
             })
     }
     fn save(&mut self, save_as: bool, cx: &mut Context<Self>) {
+        self.finish_interaction(true, cx);
         if !save_as && let Some(path) = self.session.path.clone() {
             self.status = match self.session.save(&path) {
                 Ok(()) => "保存しました".into(),
@@ -284,7 +371,35 @@ impl Workspace {
         .detach();
     }
     fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_interaction(true, cx);
         self.confirm_discard(window, cx, |s, _, cx| s.pick_document(cx));
+    }
+    fn reset_document_interaction(&mut self) {
+        // Called only after a successful document replacement.
+        self.drag = Drag::None;
+        self.node_move_modal = false;
+        self.pen_path = None;
+        self.editing = None;
+        self.edit_target = None;
+        self.numeric_before = None;
+        self.numeric_error = false;
+        self.numeric_snap = false;
+        self.snap_frames.clear();
+        self.snap_guide = None;
+        self.node_selection.clear();
+        self.node_owner = None;
+        self.node_view = View {
+            pan: [30., 30.],
+            zoom: 0.9,
+        };
+        self.set_name.clear();
+        self.category.clear();
+        self.search.clear();
+        self.add_open = false;
+        self.library_open = false;
+        self.merge_open = false;
+        self.outlines.clear();
+        self.rendered_strokes.clear();
     }
     fn pick_document(&mut self, cx: &mut Context<Self>) {
         let answer = cx.prompt_for_paths(PathPromptOptions {
@@ -301,8 +416,7 @@ impl Workspace {
                         if let Some(p) = paths.first() {
                             match s.session.load(p) {
                                 Ok(()) => {
-                                    s.pen_path = None;
-                                    s.node_selection.clear();
+                                    s.reset_document_interaction();
                                     s.status = "ファイルを開きました".into();
                                     s.fit_art();
                                 }
@@ -368,6 +482,7 @@ impl Workspace {
             };
         }
     }
+    #[track_caller]
     pub fn button(
         &self,
         label: impl Into<SharedString>,
@@ -376,9 +491,46 @@ impl Workspace {
         f: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> AnyElement {
         let label = label.into();
-        let completes_edit = label.as_ref() == "適用" || label.as_ref() == "取消";
+        let caller = std::panic::Location::caller();
+        // Scope stock controls to their call site. Object-name buttons supply
+        // their own persistent ID via button_with_id instead.
+        let id: SharedString = format!(
+            "{}:{}:{}:{label}",
+            caller.file(),
+            caller.line(),
+            caller.column()
+        )
+        .into();
+        self.button_with_id(id, label, active, cx, f)
+    }
+    pub fn button_with_id(
+        &self,
+        id: impl Into<ElementId>,
+        label: impl Into<SharedString>,
+        active: bool,
+        cx: &mut Context<Self>,
+        f: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
+        self.edit_button(
+            id.into(),
+            label.into(),
+            active,
+            ButtonEditPolicy::Commit,
+            cx,
+            f,
+        )
+    }
+    fn edit_button(
+        &self,
+        id: ElementId,
+        label: SharedString,
+        active: bool,
+        policy: ButtonEditPolicy,
+        cx: &mut Context<Self>,
+        f: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
         div()
-            .id(label.clone())
+            .id(id)
             .px_2()
             .py_1()
             .rounded(px(4.))
@@ -403,12 +555,13 @@ impl Workspace {
             })))
             .child(label)
             .on_click(cx.listener(move |s, _, w, cx| {
-                if s.editing.is_some() && !completes_edit {
+                if s.editing.is_some() && matches!(policy, ButtonEditPolicy::Commit) {
                     s.commit_edit(w, cx);
                     if s.editing.is_some() {
                         return;
                     }
                 }
+                s.finish_interaction(true, cx);
                 f(s, w, cx);
                 cx.notify();
             }))
@@ -421,14 +574,54 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let node = if matches!(kind, Editing::NodeName | Editing::Parameter(_)) {
+            self.node_selection.last().copied()
+        } else {
+            None
+        };
+        self.start_target_edit(kind, node, value, window, cx);
+    }
+    pub fn start_node_edit(
+        &mut self,
+        kind: Editing,
+        node: u64,
+        value: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.start_target_edit(kind, Some(node), value, window, cx);
+    }
+    fn start_target_edit(
+        &mut self,
+        kind: Editing,
+        node: Option<u64>,
+        value: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.edit_initial = self.numeric_meta(&kind).map(|v| v.0).unwrap_or(0.);
         self.numeric_error = false;
+        self.edit_target = Some(EditTarget::capture(&self.session, node));
         self.editing = Some(kind);
         self.input.update(cx, |i, cx| i.set(value, window, cx));
+        // A canvas double-click starts this field during mouse-down dispatch.
+        // Its ancestor can still apply tracked focus later in that same event.
+        // Restore the field's focus only after the current dispatch has finished.
+        cx.defer_in(window, |s, window, cx| {
+            if s.editing.is_some() {
+                s.input.read(cx).focus_handle(cx).focus(window);
+            }
+        });
         cx.notify();
     }
     pub fn commit_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(kind) = self.editing.clone() else {
+            return;
+        };
+        let Some(target) = self.edit_target.clone() else {
+            self.status = "編集対象がありません。取消して選び直してください".into();
+            self.numeric_error = true;
+            cx.notify();
             return;
         };
         let text = self.input.read(cx).content.to_string();
@@ -443,6 +636,11 @@ impl Workspace {
                 | Editing::Parameter(_)
                 | Editing::Rotation
                 | Editing::Scale => {
+                    if !target.matches_numeric(&self.session, &self.node_selection, &kind) {
+                        return Err(
+                            "入力中に編集対象が変わりました。取消して選び直してください".into()
+                        );
+                    }
                     let value = crate::controls::expression(&text, self.edit_initial)?;
                     self.apply_numeric(&kind, value)?;
                 }
@@ -451,10 +649,13 @@ impl Workspace {
                     if text.chars().count() > 80 {
                         return Err("名前は80文字以内です".into());
                     }
-                    self.set_name = text.clone();
-                    if let Some(g) = self.session.graph_mut() {
-                        g.name = text;
-                    }
+                    target
+                        .path_mut(&mut self.session.doc)?
+                        .appearance
+                        .as_mut()
+                        .ok_or("編集を開始したノードグラフがありません")?
+                        .name = text.clone();
+                    self.set_name = text;
                 }
                 Editing::Category => {
                     if text.chars().count() > 40 {
@@ -466,18 +667,13 @@ impl Workspace {
                     if text.trim().is_empty() || text.chars().count() > 80 {
                         return Err("名前は1〜80文字です".into());
                     }
-                    if let Some(s) = self.session.active_mut() {
-                        s.name = text;
-                    }
+                    target.path_mut(&mut self.session.doc)?.name = text;
                 }
                 Editing::NodeName => {
                     if text.chars().count() > 80 {
                         return Err("名前は80文字以内です".into());
                     }
-                    let id = self.node_selection.last().copied();
-                    if let Some(n) = id.and_then(|id| self.session.graph_mut()?.node_mut(id)) {
-                        n.label = text;
-                    }
+                    target.node_mut(&mut self.session.doc)?.label = text;
                 }
                 Editing::Color => {
                     let hex = text.trim().trim_start_matches('#');
@@ -487,14 +683,7 @@ impl Workspace {
                     let v = u32::from_str_radix(hex, 16)
                         .map_err(|_| "色は #RRGGBB で入力してください")?;
                     let rgb = [(v >> 16) as u8, (v >> 8) as u8, v as u8];
-                    if self.node_region {
-                        let id = self.node_selection.last().copied();
-                        if let Some(n) = id.and_then(|id| self.session.graph_mut()?.node_mut(id)) {
-                            n.color = rgb;
-                        }
-                    } else if let Some(s) = self.session.active_mut() {
-                        s.edge = Some(rgb);
-                    }
+                    target.apply_color(&mut self.session.doc, rgb)?;
                 }
             }
             self.session.doc.validate()?;
@@ -511,6 +700,7 @@ impl Workspace {
         self.session.commit();
         self.numeric_error = false;
         self.editing = None;
+        self.edit_target = None;
         self.focus.focus(window);
         self.refresh(cx);
     }
@@ -522,11 +712,27 @@ impl Workspace {
             .p_2()
             .bg(rgb(ui_color(Role::Soft)))
             .child(div().flex_1().min_w_0().child(self.input.clone()))
-            .child(self.button("適用", true, cx, |s, w, cx| s.commit_edit(w, cx)))
-            .child(self.button("取消", false, cx, |s, w, _| {
-                s.editing = None;
-                s.focus.focus(w);
-            }))
+            .child(self.edit_button(
+                "edit-apply".into(),
+                "適用".into(),
+                true,
+                ButtonEditPolicy::Explicit,
+                cx,
+                |s, w, cx| s.commit_edit(w, cx),
+            ))
+            .child(self.edit_button(
+                "edit-cancel".into(),
+                "取消".into(),
+                false,
+                ButtonEditPolicy::Explicit,
+                cx,
+                |s, w, _| {
+                    s.editing = None;
+                    s.edit_target = None;
+                    s.numeric_error = false;
+                    s.focus.focus(w);
+                },
+            ))
             .into_any_element()
     }
     pub fn hit_art(&self, p: KPoint) -> Option<u64> {
@@ -555,6 +761,9 @@ impl Workspace {
             if self.editing.is_some() {
                 return;
             }
+        }
+        if self.handle_drag_down(e, cx) {
+            return;
         }
         self.focus.focus(w);
         self.node_region = false;
@@ -653,16 +862,9 @@ impl Workspace {
                 && let Some((i, t, distance)) = outline::nearest(s, p)
                 && distance < 20. / self.art_view.zoom as f64
             {
-                let segment = s.nodes[i].id;
-                let width = s.start_width;
                 self.session.begin();
                 let id = self.session.doc.id();
-                self.session.active_mut().unwrap().widths.push(WidthKey {
-                    id,
-                    segment,
-                    t,
-                    width,
-                });
+                outline::insert_width_key(self.session.active_mut().unwrap(), id, i, t);
                 self.session.commit();
                 self.refresh(cx);
                 return;
@@ -852,6 +1054,9 @@ impl Workspace {
         }
     }
     pub fn mouse_up(&mut self, e: &MouseUpEvent, w: &mut Window, cx: &mut Context<Self>) {
+        if self.node_move_modal || self.drag.release_button() != Some(e.button) {
+            return;
+        }
         if let Drag::Numeric {
             key,
             initial,
@@ -932,16 +1137,26 @@ impl Workspace {
                     }
                 }
             }
-            Drag::Connect { .. } | Drag::NodeBox { .. } | Drag::Cut { .. } => self.node_up(e),
+            Drag::Connect { .. }
+            | Drag::ConnectInput { .. }
+            | Drag::NodeBox { .. }
+            | Drag::Cut { .. } => {
+                self.node_up(e);
+                // node_up has resolved or cancelled the proposal. Commit the result,
+                // rather than treating it as an abandoned wire in finish_interaction.
+                self.drag = Drag::None;
+            }
             _ => {}
         }
-        self.session.commit();
-        self.drag = Drag::None;
-        self.snap_guide = None;
-        self.snap_frames.clear();
+        self.finish_interaction(true, cx);
         self.refresh(cx);
     }
     pub fn scroll(&mut self, e: &ScrollWheelEvent, nodes: bool, cx: &mut Context<Self>) {
+        // A held-button gesture owns its coordinate system until release.
+        // Keyboard node movement can pan/zoom, rebasing its cursor below.
+        if !matches!(self.drag, Drag::None) && !self.node_move_modal {
+            return;
+        }
         let b = if nodes {
             self.node_bounds.get()
         } else {
@@ -952,12 +1167,17 @@ impl Workspace {
         } else {
             &mut self.art_view
         };
+        let before = view.world(self.cursor, b);
         let delta = e.delta.pixel_delta(px(20.));
         if e.modifiers.platform || e.modifiers.control || !e.delta.precise() {
             view.zoom_at(e.position, b, (f32::from(delta.y) * 0.008).exp());
         } else {
             view.pan[0] += f32::from(delta.x);
             view.pan[1] += f32::from(delta.y);
+        }
+        if nodes && self.node_move_modal {
+            let after = view.world(self.cursor, b);
+            self.drag.rebase_nodes(after - before);
         }
         cx.notify();
     }
@@ -999,36 +1219,42 @@ impl Workspace {
                 self.commit_edit(w, cx);
             } else if k.key == "escape" {
                 self.editing = None;
+                self.edit_target = None;
                 self.focus.focus(w);
                 cx.notify();
             }
             return;
         }
         if k.key == "escape" {
-            self.session.cancel();
-            self.numeric_before = None;
-            self.numeric_snap = false;
-            self.drag = Drag::None;
-            self.snap_guide = None;
+            self.finish_interaction(false, cx);
             self.pen_path = None;
             self.add_open = false;
+            self.library_open = false;
             self.merge_open = false;
             self.refresh(cx);
             return;
+        }
+        if self.node_move_modal && k.key == "enter" {
+            self.finish_interaction(true, cx);
+            self.refresh(cx);
+            return;
+        }
+        if cmd && k.key == "z" {
+            self.history_step(k.modifiers.shift, cx);
+            return;
+        }
+        if !matches!(self.drag, Drag::None) {
+            if cmd && matches!(k.key.as_str(), "s" | "o" | "q" | "w") {
+                self.finish_interaction(true, cx);
+            } else {
+                return;
+            }
         }
         if cmd {
             match k.key.as_str() {
                 "s" => self.save(k.modifiers.shift, cx),
                 "o" => self.open(w, cx),
                 "e" => self.export(cx),
-                "z" => {
-                    if k.modifiers.shift {
-                        self.session.redo();
-                    } else {
-                        self.session.undo();
-                    }
-                    self.refresh(cx);
-                }
                 "a" => {
                     if !self.node_region && matches!(self.tool, Tool::Direct | Tool::Convert) {
                         self.session.anchors.clear();
@@ -1144,18 +1370,17 @@ impl Workspace {
                     s.session = Session::default();
                     s.session.doc = Document::example();
                     s.session.selected = vec![s.session.doc.strokes[0].id];
+                    s.reset_document_interaction();
                     s.fit_art();
                     s.refresh(cx);
                 })
             }))
             .child(div().w(px(16.)))
             .child(self.button("元に戻す", false, cx, |s, _, cx| {
-                s.session.undo();
-                s.refresh(cx);
+                s.history_step(false, cx);
             }))
             .child(self.button("やり直す", false, cx, |s, _, cx| {
-                s.session.redo();
-                s.refresh(cx);
+                s.history_step(true, cx);
             }))
             .child(div().flex_1())
             .child(self.button(
@@ -1244,6 +1469,7 @@ impl Workspace {
                                 return;
                             }
                         }
+                        s.finish_interaction(true, cx);
                         s.tool = tool;
                         s.pen_path = None;
                         s.node_region = false;
@@ -1286,7 +1512,8 @@ impl Workspace {
                             s.refresh(cx);
                         },
                     ))
-                    .child(div().flex_1().min_w_0().child(self.button(
+                    .child(div().flex_1().min_w_0().child(self.button_with_id(
+                        ("path", id),
                         path.name.clone(),
                         self.session.selected.contains(&id),
                         cx,
@@ -1419,11 +1646,15 @@ impl Workspace {
             let name = path.name.clone();
             let color = path.edge.unwrap_or([224; 3]);
             col = col
-                .child(self.button(name.clone(), false, cx, move |s, w, cx| {
-                    s.start_edit(Editing::PathName, name.clone(), w, cx)
-                }))
+                .child(self.button_with_id(
+                    ("path-name", path.id),
+                    name.clone(),
+                    false,
+                    cx,
+                    move |s, w, cx| s.start_edit(Editing::PathName, name.clone(), w, cx),
+                ))
                 .child(format!("{} パスを選択", self.session.selected.len()))
-                .child(self.numeric_field("線幅", Editing::Width, cx))
+                .child(self.numeric_field("最大幅", Editing::Width, cx))
                 .child(self.button(
                     format!("線色  #{:02X}{:02X}{:02X}", color[0], color[1], color[2]),
                     false,
@@ -1499,7 +1730,7 @@ impl Workspace {
                     s.session.duplicate();
                     s.refresh(cx);
                 }))
-                .child(self.button("削除", false, cx, |s, _, cx| {
+                .child(self.button("パスを削除", false, cx, |s, _, cx| {
                     s.session.remove();
                     s.refresh(cx);
                 }))
@@ -1598,10 +1829,21 @@ impl Render for Workspace {
                     s.numeric_snap = false;
                 }
             }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|s, _, _, cx| {
+                    if s.node_move_modal {
+                        s.finish_interaction(false, cx);
+                    }
+                }),
+            )
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up(MouseButton::Middle, cx.listener(Self::mouse_up))
             .on_mouse_up(MouseButton::Right, cx.listener(Self::mouse_up))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
+            .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::mouse_up))
+            .on_mouse_up_out(MouseButton::Right, cx.listener(Self::mouse_up))
             .child(self.toolbar(cx));
         root = root.child(main);
         if self.nodes_open {
@@ -1702,5 +1944,110 @@ mod tests {
             KPoint::new(12., 12.),
             r
         ));
+    }
+}
+
+#[cfg(test)]
+mod edit_target_tests {
+    use super::{EditTarget, Editing};
+    use crate::session::Session;
+    use kurbo::Point;
+    use pathweaver_core::appearance::{Graph, Kind};
+
+    fn paths_with_graph() -> (Session, u64, u64, u64) {
+        let mut session = Session::default();
+        let first = session.new_path(Point::new(0., 0.));
+        let mut graph = Graph::default();
+        let node = graph.add(Kind::Fill, [200., 100.]).unwrap();
+        session.active_mut().unwrap().appearance = Some(graph);
+        let second = session.new_path(Point::new(100., 0.));
+        session.selected = vec![first];
+        (session, first, second, node)
+    }
+
+    #[test]
+    fn node_color_stays_on_the_original_node_after_selection_changes() {
+        let (mut session, first, second, node) = paths_with_graph();
+        let target = EditTarget::capture(&session, Some(node));
+        let untouched_edge = session.active().unwrap().edge;
+        session.selected = vec![second];
+        let other_edge = session.active().unwrap().edge;
+        target.apply_color(&mut session.doc, [12, 34, 56]).unwrap();
+        let original = session.doc.strokes.iter().find(|s| s.id == first).unwrap();
+        assert_eq!(
+            original
+                .appearance
+                .as_ref()
+                .unwrap()
+                .node(node)
+                .unwrap()
+                .color,
+            [12, 34, 56]
+        );
+        assert_eq!(original.edge, untouched_edge);
+        assert_eq!(session.active().unwrap().edge, other_edge);
+    }
+
+    #[test]
+    fn path_color_never_becomes_a_node_color() {
+        let (mut session, first, second, node) = paths_with_graph();
+        let target = EditTarget::capture(&session, None);
+        let node_color = session.graph().unwrap().node(node).unwrap().color;
+        session.selected = vec![second];
+        target.apply_color(&mut session.doc, [90, 80, 70]).unwrap();
+        let original = session.doc.strokes.iter().find(|s| s.id == first).unwrap();
+        assert_eq!(original.edge, Some([90, 80, 70]));
+        assert_eq!(
+            original
+                .appearance
+                .as_ref()
+                .unwrap()
+                .node(node)
+                .unwrap()
+                .color,
+            node_color
+        );
+    }
+
+    #[test]
+    fn rename_uses_the_clicked_node_even_when_another_node_is_active() {
+        let (mut session, _, _, clicked) = paths_with_graph();
+        let active = session
+            .graph_mut()
+            .unwrap()
+            .add(Kind::Shadow, [400., 100.])
+            .unwrap();
+        let target = EditTarget::capture(&session, Some(clicked));
+        let active_name = session.graph().unwrap().node(active).unwrap().label.clone();
+        target.node_mut(&mut session.doc).unwrap().label = "クリックした対象".into();
+        assert_eq!(
+            session.graph().unwrap().node(clicked).unwrap().label,
+            "クリックした対象"
+        );
+        assert_eq!(
+            session.graph().unwrap().node(active).unwrap().label,
+            active_name
+        );
+    }
+
+    #[test]
+    fn removed_target_is_rejected_without_modifying_another_path() {
+        let (mut session, first, second, node) = paths_with_graph();
+        let target = EditTarget::capture(&session, Some(node));
+        session.doc.strokes.retain(|s| s.id != first);
+        session.selected = vec![second];
+        let before = session.doc.clone();
+        assert!(target.apply_color(&mut session.doc, [1, 2, 3]).is_err());
+        assert_eq!(session.doc, before);
+    }
+
+    #[test]
+    fn numeric_edit_rejects_a_changed_selection_instead_of_redirecting() {
+        let (mut session, _, second, node) = paths_with_graph();
+        let target = EditTarget::capture(&session, Some(node));
+        assert!(target.matches_numeric(&session, &[node], &Editing::Width));
+        session.selected = vec![second];
+        assert!(!target.matches_numeric(&session, &[node], &Editing::Width));
+        assert!(target.matches_numeric(&session, &[], &Editing::GridSpacing));
     }
 }

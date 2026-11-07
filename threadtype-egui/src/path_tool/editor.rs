@@ -1830,6 +1830,7 @@ impl Editor {
                     (s.nodes.last().unwrap().id, 0., s.end_width)
                 };
                 s.widths.push(WidthKey {
+                    interpolated: false,
                     id: key_id,
                     segment,
                     t,
@@ -2046,6 +2047,7 @@ impl Editor {
         let id = self.doc.id();
         let s = self.stroke_mut().unwrap();
         s.widths.push(WidthKey {
+            interpolated: false,
             id,
             segment: s.nodes[i].id,
             t,

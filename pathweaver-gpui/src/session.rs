@@ -84,6 +84,8 @@ impl Session {
         self.reconcile();
     }
     pub fn redo(&mut self) {
+        // A new gesture invalidates the old redo branch before restoring history.
+        self.commit();
         if let Some(d) = self.redo.pop() {
             self.undo.push(std::mem::replace(&mut self.doc, d));
         }
@@ -415,6 +417,23 @@ mod tests {
                 .amount,
             3.
         );
+    }
+    #[test]
+    fn redo_does_not_leave_a_pending_snapshot_from_another_history_branch() {
+        let mut s = Session::default();
+        s.edit(|s| {
+            s.new_path(Point::ZERO);
+        });
+        s.edit(|s| s.transform(Affine::translate((10., 0.))));
+        s.undo();
+        s.begin();
+        s.transform(Affine::translate((30., 0.)));
+        s.redo();
+        assert_eq!(s.active().unwrap().nodes[0].p.x, 30.);
+        s.cancel();
+        assert_eq!(s.active().unwrap().nodes[0].p.x, 30.);
+        s.undo();
+        assert_eq!(s.active().unwrap().nodes[0].p.x, 0.);
     }
     #[test]
     fn saved_document_roundtrips_and_failed_load_keeps_work() {

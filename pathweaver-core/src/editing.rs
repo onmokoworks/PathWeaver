@@ -184,6 +184,7 @@ fn keep_keys(s: &mut Stroke) {
 }
 fn width_key(d: &mut Document, segment: u64, t: f64, width: Width) -> WidthKey {
     WidthKey {
+        interpolated: false,
         id: d.id(),
         segment,
         t,

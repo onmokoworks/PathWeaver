@@ -119,7 +119,7 @@ impl Profile {
                 },
             ),
         ];
-        for k in &stroke.widths {
+        for k in stroke.widths.iter().filter(|k| !k.interpolated) {
             if let Some(i) = stroke.segment_index(k.segment) {
                 let d = at_distance(samples, i, k.t);
                 if d > 0.01 && d < end - 0.01 {
@@ -136,10 +136,12 @@ impl Profile {
         }
     }
     pub fn width(&self, d: f64) -> Width {
+        let left = interpolate(&self.left, d);
+        let right = interpolate(&self.right, d);
         Width {
-            left: interpolate(&self.left, d),
-            right: interpolate(&self.right, d),
-            linked: true,
+            left,
+            right,
+            linked: (left - right).abs() <= 1e-8,
             angle: interpolate(&self.angle, d),
         }
     }
@@ -670,6 +672,29 @@ pub fn nearest(stroke: &Stroke, p: Point) -> Option<(usize, f64, f64)> {
     } else {
         None
     }
+}
+
+/// Evaluate the same arc-length profile used to render the stroke.
+pub fn width_at(s: &Stroke, segment: usize, t: f64) -> Option<Width> {
+    if segment >= s.segment_count() || !t.is_finite() || !(0.0..=1.0).contains(&t) {
+        return None;
+    }
+    let points = samples(s);
+    Some(Profile::new(s, &points).width(at_distance(&points, segment, t)))
+}
+
+/// Insert a handle without changing any interpolation knots. Promoting the
+/// handle in Stroke::width_mut happens only when the user actually edits it.
+pub fn insert_width_key(s: &mut Stroke, id: u64, segment: usize, t: f64) -> bool {
+    let Some(width) = width_at(s, segment, t) else { return false; };
+    s.widths.push(super::model::WidthKey {
+        id,
+        segment: s.nodes[segment].id,
+        t,
+        width,
+        interpolated: true,
+    });
+    true
 }
 
 pub fn width_location(s: &Stroke, target: WidthTarget) -> Option<(Point, Vec2)> {
@@ -1291,6 +1316,7 @@ mod tests {
         let s = &mut d.strokes[0];
         let p = s.eval(0, 0.5);
         s.widths.push(WidthKey {
+            interpolated: false,
             id,
             segment: s.nodes[0].id,
             t: 0.5,
@@ -1305,6 +1331,122 @@ mod tests {
         let w = Profile::new(s, &pts).width(at_distance(&pts, 0, 0.5));
         assert!((w.left - 60.).abs() < 1e-8 && (w.right - 5.).abs() < 1e-8);
         assert_eq!(s.eval(0, 0.5), p);
+    }
+    #[test]
+    fn inserting_width_handles_preserves_entire_interpolated_profile() {
+        let mut d = Document::example();
+        let a = d.id();
+        let b = d.id();
+        let s = &mut d.strokes[0];
+        s.start_width.angle = 10.;
+        s.widths[0].width.angle = -35.;
+        let before = s.clone();
+        assert!(insert_width_key(s, a, 0, 0.21));
+        assert!(insert_width_key(s, b, 1, 0.67));
+        for segment in 0..s.segment_count() {
+            for j in 0..101 {
+                let t = j as f64 / 100.;
+                assert_eq!(width_at(s, segment, t), width_at(&before, segment, t));
+            }
+        }
+        let points = samples(s);
+        let old = Profile::new(&before, &points);
+        let new = Profile::new(s, &points);
+        for point in &points {
+            assert_eq!(old.width(point.distance), new.width(point.distance));
+        }
+        d.validate().unwrap();
+        let restored: Document = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert_eq!(restored, d);
+        assert_eq!(svg(&restored).unwrap(), svg(&d).unwrap());
+    }
+    #[test]
+    fn sampled_width_handles_follow_edits_until_promoted() {
+        let mut d = Document::example();
+        let a = d.id();
+        let b = d.id();
+        let s = &mut d.strokes[0];
+        insert_width_key(s, a, 0, 0.2);
+        insert_width_key(s, b, 0, 0.7);
+        s.start_width.left = 2.;
+        let current = width_at(s, 0, 0.2).unwrap();
+        assert_eq!(s.width(WidthTarget::Key(a)), Some(current));
+        let w = s.width_mut(WidthTarget::Key(a)).unwrap();
+        assert_eq!(*w, current);
+        w.left += 10.;
+        assert!(!s.widths.iter().find(|k| k.id == a).unwrap().interpolated);
+        assert!(s.widths.iter().find(|k| k.id == b).unwrap().interpolated);
+        assert_eq!(s.width(WidthTarget::Key(b)), width_at(s, 0, 0.7));
+        let changed = s.clone();
+        let moved = s.transformed(kurbo::Affine::translate((20., 30.)), true);
+        assert!(moved.widths.iter().find(|k| k.id == b).unwrap().interpolated);
+        for j in 0..101 {
+            let t = j as f64 / 100.;
+            let a = width_at(&changed, 0, t).unwrap();
+            let b = width_at(&moved, 0, t).unwrap();
+            assert!((a.left - b.left).abs() < 1e-8);
+            assert!((a.right - b.right).abs() < 1e-8);
+        }
+        d.validate().unwrap();
+    }
+    #[test]
+    fn resizing_width_preserves_asymmetry_tapers_and_sampled_handles() {
+        let mut d = Document::example();
+        let id = d.id();
+        let s = &mut d.strokes[0];
+        s.start_width.left = 0.;
+        s.start_width.right = 0.;
+        s.widths[0].width.angle = 20.;
+        insert_width_key(s, id, 0, 0.27);
+        let before = s.clone();
+        let maximum = s.line_width();
+        assert!(maximum > 0.);
+        s.resize_line_width(maximum * 2.).unwrap();
+        assert!((s.line_width() - maximum * 2.).abs() < 1e-8);
+        assert_eq!(s.start_width.left, 0.);
+        assert_eq!(s.start_width.right, 0.);
+        for segment in 0..s.segment_count() {
+            for j in 0..101 {
+                let t = j as f64 / 100.;
+                let a = width_at(&before, segment, t).unwrap();
+                let b = width_at(s, segment, t).unwrap();
+                assert!((a.left * 2. - b.left).abs() < 1e-8);
+                assert!((a.right * 2. - b.right).abs() < 1e-8);
+                assert_eq!(a.angle, b.angle);
+            }
+        }
+        assert!(s.widths.iter().find(|k| k.id == id).unwrap().interpolated);
+        assert_eq!(before.nodes, s.nodes);
+        d.validate().unwrap();
+    }
+    #[test]
+    fn resizing_zero_width_and_invalid_values_is_safe() {
+        let mut d = line();
+        let s = &mut d.strokes[0];
+        s.set_line_width(0.);
+        s.resize_line_width(50.).unwrap();
+        assert_eq!(s.start_width.left, 25.);
+        assert_eq!(s.end_width.right, 25.);
+        let before = s.clone();
+        for v in [f64::NAN, f64::INFINITY, -1., 1001.] {
+            assert!(s.resize_line_width(v).is_err());
+            assert_eq!(*s, before);
+        }
+        s.resize_line_width(1000.).unwrap();
+        d.validate().unwrap();
+    }
+    #[test]
+    fn old_width_keys_remain_explicit_without_new_field() {
+        let d = Document::example();
+        let mut data = serde_json::to_value(&d).unwrap();
+        for stroke in data["strokes"].as_array_mut().unwrap() {
+            for key in stroke["widths"].as_array_mut().unwrap() {
+                key.as_object_mut().unwrap().remove("interpolated");
+            }
+        }
+        let restored: Document = serde_json::from_value(data).unwrap();
+        assert_eq!(restored, d);
+        assert_eq!(svg(&restored).unwrap(), svg(&d).unwrap());
     }
     #[test]
     fn project_roundtrip_and_validation() {
