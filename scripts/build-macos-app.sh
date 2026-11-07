@@ -6,24 +6,34 @@ if [[ "$(uname -s)" != Darwin ]]; then echo 'This script requires macOS.' >&2; e
 profile=release
 build_flags=(--release)
 frontend=pathweaver-gpui
-bundle=PathWeaver-GPUI
-identifier=com.onmokoworks.pathweaver.gpui
-for arg in "$@"; do
-    case "$arg" in
-        --debug) profile=debug; build_flags=() ;;
-        --legacy) frontend=threadtype-egui; bundle=PathWeaver; identifier=com.onmokoworks.pathweaver ;;
-        *) echo "Usage: $0 [--debug] [--legacy]" >&2; exit 2 ;;
+bundle=PathWeaver
+identifier=com.onmokoworks.pathweaver
+app_dir="$PWD/dist"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --debug) profile=debug; build_flags=(); shift ;;
+        --legacy) frontend=threadtype-egui; bundle=PathWeaver-Legacy; identifier=com.onmokoworks.pathweaver.legacy; shift ;;
+        --output-dir)
+            if [[ $# -lt 2 || -z "$2" ]]; then echo '--output-dir requires a directory.' >&2; exit 2; fi
+            app_dir="$2"; shift 2 ;;
+        *) echo "Usage: $0 [--debug] [--legacy] [--output-dir directory]" >&2; exit 2 ;;
     esac
 done
+mkdir -p "$app_dir"
+app_dir="$(cd "$app_dir" && pwd -P)"
 if ! command -v cargo >/dev/null 2>&1; then echo 'Install Rust from https://rustup.rs first.' >&2; exit 1; fi
-app="$PWD/dist/$bundle.app"
+app="$app_dir/$bundle.app"
 # Do not replace a binary while a user is editing in that application.
-if ps -axo command= | grep -F -x "$app/Contents/MacOS/pathweaver" >/dev/null; then
-    echo "Save your work and close $app before rebuilding it." >&2
-    exit 1
-fi
+ensure_closed() {
+    if ps -axo command= | grep -F -x "$app/Contents/MacOS/pathweaver" >/dev/null; then
+        echo "Save your work and close $app before rebuilding it." >&2
+        exit 1
+    fi
+}
+ensure_closed
 export CARGO_TARGET_DIR="$PWD/$frontend/target"
 cargo build --manifest-path "$frontend/Cargo.toml" --locked --bin pathweaver ${build_flags[@]+"${build_flags[@]}"}
+ensure_closed
 mkdir -p "$app/Contents/MacOS"
 cp "$CARGO_TARGET_DIR/$profile/pathweaver" "$app/Contents/MacOS/pathweaver"
 cat > "$app/Contents/Info.plist" <<PLIST

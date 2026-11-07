@@ -22,8 +22,10 @@ Xcode（Metalツールチェーンを含む）と [Rust stable](https://rustup.r
 
 ```bash
 ./scripts/build-macos-app.sh --debug
-open dist/PathWeaver-GPUI.app
+open dist/PathWeaver.app
 ```
+
+Macアプリは同じ `PathWeaver.app` を継続更新します。機能別のアプリ名やBundle IDは増やしません。配布先を固定する場合は `./scripts/build-macos-app.sh --debug --output-dir /path/to/folder` を使うと、そのフォルダーの `PathWeaver.app` を更新します。起動中なら作業を保存して閉じてから再実行してください。従来egui版を明示的にビルドする `--legacy` だけは `PathWeaver-Legacy.app` として区別します。
 
 `--debug` を省くと最適化版、`--legacy` を追加するとegui版を作ります。
 ビルドしたMacのCPU向けのローカルアプリで、署名はアドホック署名です。
