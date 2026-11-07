@@ -2,7 +2,7 @@ use crate::app::{Drag, Editing, Tool, Workspace};
 use gpui::{prelude::*, *};
 use kurbo::Point as KPoint;
 use pathweaver_core::{
-    editing::{self, Anchor, AnchorKind},
+    editing::{self, Anchor, AnchorKind, MergeTarget},
     outline, snapping,
 };
 
@@ -11,7 +11,7 @@ pub enum Operation {
     Kind(AnchorKind),
     Separate,
     Join,
-    Merge,
+    Merge(MergeTarget),
     Straighten,
     Union,
     Delete,
@@ -207,17 +207,19 @@ impl Workspace {
                         self.session.select_anchor(at, true);
                     }
                 }
-                Operation::Join | Operation::Merge => {
+                Operation::Join => {
                     if anchors.len() != 2 {
-                        return Err("Shift＋クリックで点を2つ選択してください".into());
+                        return Err("Shift＋クリックで端点を2つ選択してください".into());
                     }
-                    let at = if matches!(op, Operation::Join) {
-                        editing::join(&mut self.session.doc, anchors[0], anchors[1])?
-                    } else {
-                        editing::merge(&mut self.session.doc, anchors[0], anchors[1])?
-                    };
+                    let at = editing::join(&mut self.session.doc, anchors[0], anchors[1])?;
                     self.session.anchors.clear();
                     self.session.select_anchor(at, false);
+                }
+                Operation::Merge(target) => {
+                    let at = editing::merge_selected(&mut self.session.doc, &anchors, target)?;
+                    self.session.anchors.clear();
+                    self.session.select_anchor(at, false);
+                    self.merge_open = false;
                 }
                 Operation::Straighten => {
                     let at = self
@@ -249,7 +251,7 @@ impl Workspace {
                 Operation::Union => {
                     "輪郭を合体しました。効果を焼き込み、最初に選択したパスの単色になります"
                 }
-                Operation::Join | Operation::Merge => {
+                Operation::Join | Operation::Merge(_) => {
                     "編集しました。別パスの場合は最初に選択したパスの色と効果を引き継ぎます"
                 }
                 _ => "パスを編集しました（⌘Z で元に戻す）",
@@ -266,6 +268,24 @@ impl Workspace {
                 "制御点  ·  {} 点を選択",
                 self.session.anchors.len()
             )));
+            if self.merge_open {
+                col = col.child(div().text_color(rgb(0xf0a85b)).child("点のマージ先"));
+                for (label, target) in [
+                    ("中心へ", MergeTarget::Center),
+                    ("最初に選択した点へ", MergeTarget::First),
+                    ("最後に選択した点へ", MergeTarget::Last),
+                ] {
+                    col = col.child(self.button(label, false, cx, move |s, _, cx| {
+                        s.path_operation(Operation::Merge(target), cx)
+                    }));
+                }
+                col = col.child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(rgb(0xaaaaaa))
+                        .child("中心＝選択点の平均座標。最初／最後は点を選んだ順番です。"),
+                );
+            }
             if let Some(p) = self.session.anchor_position() {
                 for (kind, label, value) in
                     [(Editing::AnchorX, "X", p.x), (Editing::AnchorY, "Y", p.y)]
@@ -294,12 +314,16 @@ impl Workspace {
                 for (label, op) in [
                     ("点で分離", Operation::Separate),
                     ("端点を連結", Operation::Join),
-                    ("2点をマージ", Operation::Merge),
                 ] {
                     col = col.child(
                         self.button(label, false, cx, move |s, _, cx| s.path_operation(op, cx)),
                     );
                 }
+                col =
+                    col.child(self.button("点をマージ M", self.merge_open, cx, |s, w, _| {
+                        s.merge_open = !s.merge_open;
+                        s.focus.focus(w);
+                    }));
             }
             if self.session.segment.is_some() || !self.session.anchors.is_empty() {
                 col = col.child(self.button("次の線分を直線化", false, cx, |s, _, cx| {

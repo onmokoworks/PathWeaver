@@ -351,62 +351,138 @@ fn join_impl(d: &mut Document, a: Anchor, b: Anchor) -> Result<Anchor, String> {
 pub fn join(doc: &mut Document, a: Anchor, b: Anchor) -> Result<Anchor, String> {
     transaction(doc, |d| join_impl(d, a, b))
 }
-fn merge_adjacent(d: &mut Document, stroke: u64, a: u64, b: u64) -> Result<Anchor, String> {
-    let (si, ai) = index(d, Anchor { stroke, node: a })?;
-    let (_, bi) = index(d, Anchor { stroke, node: b })?;
-    let s = &mut d.strokes[si];
-    let count = s.nodes.len();
-    if count <= if s.closed { 3 } else { 2 } {
-        return Err("これ以上点を減らせません".into());
-    }
-    let (i, j) = if (ai + 1) % count == bi && (s.closed || ai + 1 < count) {
-        (ai, bi)
-    } else if (bi + 1) % count == ai && (s.closed || bi + 1 < count) {
-        (bi, ai)
-    } else {
-        return Err("隣り合う点、または別パスの端点を選択してください".into());
-    };
-    let a = s.nodes[i].clone();
-    let b = s.nodes[j].clone();
-    let p = a.p.lerp(b.p, 0.5);
-    let mut merged = a.clone();
-    merged.p = p;
-    merged.incoming = a.p + a.incoming - p;
-    merged.outgoing = b.p + b.outgoing - p;
-    merged.exact_outgoing = b.exact_outgoing;
-    merged.smooth = false;
-    // No hidden curve should appear where an external handle was collapsed.
-    if a.incoming.hypot() < 1e-9 {
-        merged.incoming = Vec2::ZERO;
-    }
-    if b.outgoing.hypot() < 1e-9 {
-        merged.outgoing = Vec2::ZERO;
-    }
-    s.widths.retain(|k| k.segment != a.id);
-    for k in &mut s.widths {
-        if k.segment == b.id {
-            k.segment = a.id;
-        }
-    }
-    s.corners.retain(|c| c.node != a.id && c.node != b.id);
-    if j == 0 {
-        s.nodes[0] = merged;
-        s.nodes.remove(i);
-    } else {
-        s.nodes[i] = merged;
-        s.nodes.remove(j);
-    }
-    keep_keys(s);
-    Ok(Anchor { stroke, node: a.id })
+/// Destination is based on selection order, independently of path traversal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MergeTarget {
+    Center,
+    First,
+    Last,
 }
-pub fn merge(doc: &mut Document, a: Anchor, b: Anchor) -> Result<Anchor, String> {
+
+/// Collapse one connected run of anchors, or weld two open-path endpoints.
+/// Disconnected interior selections would require a branching path graph.
+pub fn merge_selected(
+    doc: &mut Document,
+    anchors: &[Anchor],
+    target: MergeTarget,
+) -> Result<Anchor, String> {
     transaction(doc, |d| {
-        if a.stroke != b.stroke {
-            join_impl(d, a, b)?;
-            return merge_adjacent(d, a.stroke, a.node, b.node);
+        let mut selected = Vec::new();
+        for at in anchors {
+            index(d, *at)?;
+            if !selected.contains(at) {
+                selected.push(*at);
+            }
         }
-        merge_adjacent(d, a.stroke, a.node, b.node)
+        if selected.len() < 2 {
+            return Err("まとめる点を2つ以上選択してください".into());
+        }
+        let positions = selected
+            .iter()
+            .map(|at| {
+                let (si, ni) = index(d, *at).unwrap();
+                d.strokes[si].nodes[ni].p
+            })
+            .collect::<Vec<_>>();
+        let p = match target {
+            MergeTarget::First => positions[0],
+            MergeTarget::Last => *positions.last().unwrap(),
+            MergeTarget::Center => (positions
+                .iter()
+                .fold(Vec2::ZERO, |sum, p| sum + p.to_vec2())
+                / positions.len() as f64)
+                .to_point(),
+        };
+        let retained = if target == MergeTarget::Last {
+            selected.last().unwrap().node
+        } else {
+            selected[0].node
+        };
+        let stroke = selected[0].stroke;
+        if selected.iter().any(|at| at.stroke != stroke) {
+            if selected.len() != 2 {
+                return Err("別パス間では開いたパスの端点を2つ選択してください".into());
+            }
+            join_impl(d, selected[0], selected[1])?;
+        }
+        let si = d.strokes.iter().position(|s| s.id == stroke).unwrap();
+        let s = &mut d.strokes[si];
+        let ids: Vec<_> = selected.iter().map(|at| at.node).collect();
+        let count = s.nodes.len();
+        let all = ids.len() == count;
+        let chosen = |i: usize| ids.contains(&s.nodes[i].id);
+        // Welding an open path's two ends closes its remaining centerline.
+        if !s.closed && !all && chosen(0) && chosen(count - 1) {
+            s.closed = true;
+        }
+        let starts: Vec<_> = (0..count)
+            .filter(|&i| {
+                chosen(i)
+                    && (if i == 0 {
+                        !s.closed || !chosen(count - 1)
+                    } else {
+                        !chosen(i - 1)
+                    })
+            })
+            .collect();
+        if !all && starts.len() != 1 {
+            return Err("同じパスでは連続した点を選択してください（離れた途中の点は分岐になるため未対応です）".into());
+        }
+        let head = if all { 0 } else { starts[0] };
+        let mut tail = head;
+        for _ in 1..ids.len() {
+            tail = (tail + 1) % count;
+        }
+        let a = s.nodes[head].clone();
+        let b = s.nodes[tail].clone();
+        let mut merged = a.clone();
+        merged.id = retained;
+        merged.p = p;
+        merged.incoming = if all || a.incoming.hypot() < 1e-9 {
+            Vec2::ZERO
+        } else {
+            a.p + a.incoming - p
+        };
+        merged.outgoing = if all || b.outgoing.hypot() < 1e-9 {
+            Vec2::ZERO
+        } else {
+            b.p + b.outgoing - p
+        };
+        merged.exact_outgoing = b.exact_outgoing;
+        merged.smooth = false;
+        // Only the last selected node's outgoing segment survives the collapse.
+        s.widths
+            .retain(|k| !ids.contains(&k.segment) || (!all && k.segment == b.id));
+        for key in &mut s.widths {
+            if key.segment == b.id {
+                key.segment = retained;
+            }
+        }
+        s.corners.retain(|c| !ids.contains(&c.node));
+        let insertion = (0..count).find(|&i| ids.contains(&s.nodes[i].id)).unwrap();
+        let mut nodes = Vec::with_capacity(count - ids.len() + 1);
+        for (i, n) in s.nodes.iter().enumerate() {
+            if i == insertion {
+                nodes.push(merged.clone());
+            }
+            if !ids.contains(&n.id) {
+                nodes.push(n.clone());
+            }
+        }
+        s.nodes = nodes;
+        if all {
+            s.closed = false;
+        }
+        keep_keys(s);
+        Ok(Anchor {
+            stroke,
+            node: retained,
+        })
     })
+}
+/// Compatibility helper for merging a pair at its center.
+pub fn merge(doc: &mut Document, a: Anchor, b: Anchor) -> Result<Anchor, String> {
+    merge_selected(doc, &[a, b], MergeTarget::Center)
 }
 pub fn delete_anchors(doc: &mut Document, anchors: &[Anchor]) -> Result<(), String> {
     transaction(doc, |d| {
@@ -645,5 +721,140 @@ mod tests {
         assert!(d.strokes[0].contours.as_ref().unwrap().len() >= 2);
         d.validate().unwrap();
         assert!(!outline::paint(&d.strokes[0]).unwrap().contours.is_empty());
+    }
+    fn many_points() -> Document {
+        let mut d = Document::default();
+        let mut s = Stroke::new(d.id(), "merge".into());
+        for (x, y) in [
+            (0., 0.),
+            (20., 10.),
+            (80., 60.),
+            (110., -10.),
+            (200., 0.),
+            (250., 40.),
+        ] {
+            s.nodes.push(Node {
+                id: d.id(),
+                p: Point::new(x, y),
+                incoming: Vec2::new(-6., 2.),
+                outgoing: Vec2::new(9., -4.),
+                smooth: false,
+                exact_incoming: false,
+                exact_outgoing: false,
+            });
+        }
+        let seg = s.nodes[3].id;
+        s.widths.push(width_key(&mut d, seg, 0.4, Width::default()));
+        d.strokes.push(s);
+        d
+    }
+    #[test]
+    fn merge_destinations_use_original_positions_and_selection_order() {
+        for target in [MergeTarget::Center, MergeTarget::First, MergeTarget::Last] {
+            let mut d = many_points();
+            let before = d.strokes[0].clone();
+            let selection = [at(&d, 0, 3), at(&d, 0, 1), at(&d, 0, 2)];
+            let expected = match target {
+                MergeTarget::Center => Point::new(70., 20.),
+                MergeTarget::First => before.nodes[3].p,
+                MergeTarget::Last => before.nodes[2].p,
+            };
+            let merged = merge_selected(&mut d, &selection, target).unwrap();
+            let s = &d.strokes[0];
+            let n = &s.nodes[1];
+            assert_eq!(n.p, expected);
+            assert_eq!(
+                n.id,
+                if target == MergeTarget::Last {
+                    selection[2].node
+                } else {
+                    selection[0].node
+                }
+            );
+            assert_eq!(n.id, merged.node);
+            assert_eq!(s.nodes.len(), 4);
+            assert_eq!(
+                n.p + n.incoming,
+                before.nodes[1].p + before.nodes[1].incoming
+            );
+            assert_eq!(
+                n.p + n.outgoing,
+                before.nodes[3].p + before.nodes[3].outgoing
+            );
+            assert_eq!(s.widths[0].segment, n.id);
+            d.validate().unwrap();
+        }
+    }
+    #[test]
+    fn merge_closed_seam_and_open_endpoints_preserve_traversal() {
+        for closed in [false, true] {
+            let mut d = many_points();
+            d.strokes[0].closed = closed;
+            let original = d.strokes[0].clone();
+            let selection = [at(&d, 0, 5), at(&d, 0, 0)];
+            let merged = merge_selected(&mut d, &selection, MergeTarget::Last).unwrap();
+            let s = &d.strokes[0];
+            assert!(s.closed);
+            assert_eq!(s.nodes[0].id, merged.node);
+            assert_eq!(s.nodes[0].p, original.nodes[0].p);
+            assert_eq!(s.nodes[1].id, original.nodes[1].id);
+            assert_eq!(s.nodes[4].id, original.nodes[4].id);
+            assert_eq!(
+                s.nodes[0].p + s.nodes[0].incoming,
+                original.nodes[5].p + original.nodes[5].incoming
+            );
+            d.validate().unwrap();
+        }
+    }
+    #[test]
+    fn merge_cross_path_destinations_survive_reversing_endpoints() {
+        for ai in [0, 2] {
+            for bi in [0, 2] {
+                for target in [MergeTarget::First, MergeTarget::Last] {
+                    let mut d = fixture();
+                    let selection = [at(&d, 0, ai), at(&d, 1, bi)];
+                    let expected = if target == MergeTarget::First {
+                        d.strokes[0].nodes[ai].p
+                    } else {
+                        d.strokes[1].nodes[bi].p
+                    };
+                    let result = merge_selected(&mut d, &selection, target).unwrap();
+                    assert_eq!(d.strokes.len(), 1);
+                    assert_eq!(
+                        d.strokes[0]
+                            .nodes
+                            .iter()
+                            .find(|n| n.id == result.node)
+                            .unwrap()
+                            .p,
+                        expected
+                    );
+                    d.validate().unwrap();
+                }
+            }
+        }
+    }
+    #[test]
+    fn merge_rejects_disconnected_interior_selection_atomically() {
+        let mut d = many_points();
+        let original = d.clone();
+        let selection = [at(&d, 0, 1), at(&d, 0, 3)];
+        assert!(merge_selected(&mut d, &selection, MergeTarget::Center).is_err());
+        assert_eq!(d, original);
+        assert!(merge_selected(&mut d, &[selection[0], selection[0]], MergeTarget::First).is_err());
+        assert_eq!(d, original);
+    }
+    #[test]
+    fn all_selected_points_collapse_to_one_valid_anchor() {
+        for closed in [false, true] {
+            let mut d = many_points();
+            d.strokes[0].closed = closed;
+            let selection: Vec<_> = (0..6).map(|n| at(&d, 0, n)).collect();
+            merge_selected(&mut d, &selection, MergeTarget::Center).unwrap();
+            assert_eq!(d.strokes[0].nodes.len(), 1);
+            assert!(!d.strokes[0].closed);
+            assert!(d.strokes[0].widths.is_empty());
+            d.validate().unwrap();
+        }
     }
 }

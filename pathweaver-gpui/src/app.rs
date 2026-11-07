@@ -109,6 +109,7 @@ pub struct Workspace {
     pub status: String,
     pub pen_path: Option<u64>,
     pub cursor: Point<Pixels>,
+    pub merge_open: bool,
     pub snap_frames: Vec<snapping::Frame>,
     pub snap_guide: Option<snapping::Guide>,
 }
@@ -147,6 +148,7 @@ impl Workspace {
             status: "P：ペン   V：範囲選択   A：制御点   W：幅   ⌘S：保存".into(),
             pen_path: None,
             cursor: point(px(0.), px(0.)),
+            merge_open: false,
             snap_frames: vec![],
             snap_guide: None,
         }
@@ -910,6 +912,7 @@ impl Workspace {
             self.snap_guide = None;
             self.pen_path = None;
             self.add_open = false;
+            self.merge_open = false;
             self.refresh(cx);
             return;
         }
@@ -990,6 +993,9 @@ impl Workspace {
                 self.pen_path = None;
             }
             "w" => self.tool = Tool::Width,
+            "m" if matches!(self.tool, Tool::Direct | Tool::Convert) => {
+                self.merge_open = !self.merge_open;
+            }
             "enter" => {
                 self.pen_path = None;
                 self.session.commit();
@@ -1150,7 +1156,11 @@ impl Workspace {
     }
     fn properties(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut col = div()
-            .id("properties")
+            .id(if self.merge_open {
+                "merge-properties"
+            } else {
+                "properties"
+            })
             .w(px(225.))
             .flex_shrink_0()
             .h_full()

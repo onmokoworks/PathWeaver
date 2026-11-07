@@ -49,7 +49,8 @@ GPUI版とegui版は別のbundle IDなので、従来版の作業を保ったま
 - 「角」「スムーズ」「独立」でハンドルを切り替えます。
 - 「点で分離」は開いたパスの途中を2本に分割し、閉じたパスならその点で開きます。可変幅・効果グラフを引き継ぎます。
 - 「端点を連結」はShiftで選んだ2端点を直線でつなぎます。同じパスの両端なら閉じます。
-- 「2点をマージ」は隣り合う2点、または別パスの2端点を中点にまとめます。外側のハンドルを保持します。
+- **M** または「点をマージ」で、右側に「中心へ」「最初に選択した点へ」「最後に選択した点へ」を表示します。中心は選択点の平均座標です。最初／最後はShift＋クリックなどで点を選んだ順番を使います（範囲選択はパス一覧順・パス上の点順）。
+- 同じパスの連続した複数点、または別パスの2端点を1点にまとめ、外側のハンドルを保持します。同じ開いたパスの両端をマージすると閉じます。全点を選ぶと1点になり、線は表示されなくなります（Undo可）。離れた途中の点を1つにまとめる分岐構造には未対応です。
 - 別パスを連結／マージすると、最初に選んだパスの色・効果グラフを使います。
 - 「輪郭を合体」は複数パスの表示輪郭を和集合にします。効果を焼き込み、最初に選択したパスの塗り色（なければ線色）の単色にします。元の芯・幅点を編集するにはUndoしてください。
 
@@ -104,6 +105,6 @@ Windowsでは `run-pathweaver.ps1`、Linuxでは `./run-pathweaver.sh` が従来
 
 ## 参考とライセンス
 
-操作の参考：[Blenderノード](https://docs.blender.org/manual/en/latest/interface/controls/nodes/index.html)、[Node Wrangler](https://docs.blender.org/manual/en/latest/addons/node_wrangler.html)。
+操作の参考：[Blenderの頂点マージ](https://docs.blender.org/manual/en/5.2/modeling/meshes/editing/mesh/merge.html)、[Blenderノード](https://docs.blender.org/manual/en/latest/interface/controls/nodes/index.html)、[Node Wrangler](https://docs.blender.org/manual/en/latest/addons/node_wrangler.html)。
 パス編集の設計参考：[Pave](https://baku89.github.io/pave/)（位置・接線・法線とパスの組み合わせ）。JSライブラリの組み込みではなく、文字・造形に必要な操作をRustの共通コアへ実装しています。
 文字入力の実装はGPUI公式サンプルを基にしています。詳細は [THIRD_PARTY_NOTICES.md](pathweaver-gpui/THIRD_PARTY_NOTICES.md) を参照してください。
