@@ -374,6 +374,10 @@ pub struct Document {
     #[serde(default)]
     pub snap_guides: bool,
     #[serde(default)]
+    pub snap_tangent: bool,
+    #[serde(default)]
+    pub snap_normal: bool,
+    #[serde(default)]
     pub guides: Vec<Guide>,
     pub format: String,
     pub version: u32,
@@ -393,6 +397,8 @@ impl Default for Document {
             grid_spacing: default_grid(),
             snap_grid: false,
             snap_guides: true,
+            snap_tangent: false,
+            snap_normal: false,
             guides: vec![],
             format: "pathweaver".into(),
             version: 3,

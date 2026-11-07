@@ -213,12 +213,20 @@ impl Workspace {
                 .iter()
                 .filter(|s| s.visible && self.session.selected.contains(&s.id))
             {
-                if matches!(self.tool, Tool::Direct | Tool::Pen) {
+                if matches!(self.tool, Tool::Direct | Tool::Convert | Tool::Pen) {
                     let points: Vec<_> = outline::samples(s)
                         .iter()
                         .map(|p| self.art_view.screen(p.p, b))
                         .collect();
                     line(window, &points, 0x78a8db, 1.);
+                    if let Some(at) = self.session.segment.filter(|at| at.stroke == s.id)
+                        && let Some(i) = s.segment_index(at.node)
+                    {
+                        let points: Vec<_> = (0..=40)
+                            .map(|n| self.art_view.screen(s.eval(i, n as f64 / 40.), b))
+                            .collect();
+                        line(window, &points, 0xf0a85b, 2.5);
+                    }
                     for n in &s.nodes {
                         let p = self.art_view.screen(n.p, b);
                         for v in [n.incoming, n.outgoing] {
@@ -231,7 +239,18 @@ impl Workspace {
                         rect(
                             window,
                             Bounds::new(p - point(px(3.5), px(3.5)), size(px(7.), px(7.))),
-                            0xe1e1e1,
+                            if self
+                                .session
+                                .anchors
+                                .contains(&pathweaver_core::editing::Anchor {
+                                    stroke: s.id,
+                                    node: n.id,
+                                })
+                            {
+                                0xf0a85b
+                            } else {
+                                0xe1e1e1
+                            },
                             0x242424,
                             1.,
                             1.,
@@ -276,6 +295,31 @@ impl Workspace {
                     rgb(0x78a8db),
                     Default::default(),
                 ));
+            }
+            if let Some(g) = self.snap_guide {
+                let reach = 2000. / self.art_view.zoom as f64;
+                line(
+                    window,
+                    &[
+                        self.art_view.screen(g.origin - g.direction * reach, b),
+                        self.art_view.screen(g.origin + g.direction * reach, b),
+                    ],
+                    0x7bcbb8,
+                    1.,
+                );
+                let label = match g.kind {
+                    pathweaver_core::snapping::Kind::Tangent => "接線",
+                    pathweaver_core::snapping::Kind::Normal => "法線",
+                    pathweaver_core::snapping::Kind::Guide => "ガイド",
+                };
+                text(
+                    window,
+                    cx,
+                    self.cursor + point(px(14.), px(14.)),
+                    label,
+                    0x7bcbb8,
+                    12.,
+                );
             }
             // The ruler occupies its own gutter, including sideways y-axis numerals.
             rect(

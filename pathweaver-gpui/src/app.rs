@@ -7,8 +7,9 @@ use gpui::{prelude::*, *};
 use kurbo::{Affine, Point as KPoint, Rect};
 use pathweaver_core::{
     appearance::{Graph, Parameter},
+    editing::Anchor,
     model::{Document, Join, WidthKey, WidthTarget},
-    outline,
+    outline, snapping,
 };
 use std::{cell::Cell, rc::Rc};
 
@@ -16,6 +17,7 @@ use std::{cell::Cell, rc::Rc};
 pub enum Tool {
     Select,
     Direct,
+    Convert,
     Pen,
     Width,
 }
@@ -66,6 +68,8 @@ pub enum Drag {
 }
 #[derive(Clone)]
 pub enum Editing {
+    AnchorX,
+    AnchorY,
     PathName,
     NodeName,
     Parameter(Parameter),
@@ -105,6 +109,8 @@ pub struct Workspace {
     pub status: String,
     pub pen_path: Option<u64>,
     pub cursor: Point<Pixels>,
+    pub snap_frames: Vec<snapping::Frame>,
+    pub snap_guide: Option<snapping::Guide>,
 }
 impl Workspace {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -141,9 +147,12 @@ impl Workspace {
             status: "P：ペン   V：範囲選択   A：制御点   W：幅   ⌘S：保存".into(),
             pen_path: None,
             cursor: point(px(0.), px(0.)),
+            snap_frames: vec![],
+            snap_guide: None,
         }
     }
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.session.reconcile();
         let previous = std::mem::take(&mut self.outlines);
         for stroke in self.session.doc.strokes.iter().filter(|s| s.visible) {
             let unchanged = self
@@ -380,6 +389,22 @@ impl Workspace {
         self.session.begin();
         let result = (|| -> Result<(), String> {
             match kind {
+                Editing::AnchorX | Editing::AnchorY => {
+                    let v = text
+                        .parse::<f64>()
+                        .map_err(|_| "座標を数値で入力してください")?;
+                    if !v.is_finite() || v.abs() > 1e6 {
+                        return Err("座標は ±1,000,000 の範囲です".into());
+                    }
+                    if let Some(p) = self.session.anchor_position() {
+                        let delta = if matches!(kind, Editing::AnchorX) {
+                            kurbo::Vec2::new(v - p.x, 0.)
+                        } else {
+                            kurbo::Vec2::new(0., v - p.y)
+                        };
+                        self.session.move_anchors(delta);
+                    }
+                }
                 Editing::Search => self.search = text,
                 Editing::SetName => {
                     if text.chars().count() > 80 {
@@ -548,13 +573,33 @@ impl Workspace {
                     .active()
                     .is_some_and(|s| s.id == id && !s.closed)
             });
-            let mut snapped = p;
-            if self.session.doc.snap_grid {
-                let g = self.session.doc.grid_spacing;
-                snapped = KPoint::new((p.x / g).round() * g, (p.y / g).round() * g);
-            }
+            self.capture_frames(if same {
+                self.session.active().and_then(|s| {
+                    s.nodes.last().map(|n| Anchor {
+                        stroke: s.id,
+                        node: n.id,
+                    })
+                })
+            } else {
+                None
+            });
+            let snapped = self.snap_point(p, e.modifiers.control);
             if same {
                 let s = self.session.active().unwrap();
+                if s.nodes
+                    .last()
+                    .is_some_and(|n| n.p.distance(p) < 8. / self.art_view.zoom as f64)
+                {
+                    let n = self.session.active_mut().unwrap().nodes.last_mut().unwrap();
+                    n.outgoing = kurbo::Vec2::ZERO;
+                    n.exact_outgoing = false;
+                    n.smooth = false;
+                    self.status =
+                        "次の点はクリックで直線、ドラッグで曲線。前の曲線は保持します".into();
+                    self.session.commit();
+                    self.refresh(cx);
+                    return;
+                }
                 if s.nodes.len() > 2 && s.nodes[0].p.distance(p) < 8. / self.art_view.zoom as f64 {
                     self.session.active_mut().unwrap().closed = true;
                     self.pen_path = None;
@@ -570,25 +615,15 @@ impl Workspace {
                 self.pen_path = Some(id);
                 self.session.active().unwrap().nodes[0].id
             };
+            let stroke = self.session.active().unwrap().id;
+            self.session.select_anchor(Anchor { stroke, node }, false);
+            self.capture_frames(Some(Anchor { stroke, node }));
             self.drag = Drag::Pen { node };
             self.refresh(cx);
             return;
         }
-        if self.tool == Tool::Direct
-            && let Some(s) = self.session.active()
-        {
-            for n in &s.nodes {
-                for (v, h) in [(n.p, 0), (n.p + n.incoming, -1), (n.p + n.outgoing, 1)] {
-                    if v.distance(p) < 7. / self.art_view.zoom as f64 {
-                        self.drag = Drag::Anchor {
-                            node: n.id,
-                            handle: h,
-                        };
-                        self.session.begin();
-                        return;
-                    }
-                }
-            }
+        if matches!(self.tool, Tool::Direct | Tool::Convert) && self.direct_down(p, e, cx) {
+            return;
         }
         if self.tool == Tool::Width
             && let Some(s) = self.session.active()
@@ -649,7 +684,12 @@ impl Workspace {
             self.node_region = self.nodes_open && e.position.y >= self.art_bounds.get().bottom();
             return;
         }
-        let p = self.art_view.world(e.position, self.art_bounds.get());
+        let raw = self.art_view.world(e.position, self.art_bounds.get());
+        let p = if matches!(self.drag, Drag::Anchor { .. } | Drag::Pen { .. }) {
+            self.snap_point(raw, e.modifiers.control)
+        } else {
+            raw
+        };
         let mut changed = false;
         match self.drag.clone() {
             Drag::None => {}
@@ -677,26 +717,41 @@ impl Workspace {
                 changed = true;
             }
             Drag::Anchor { node, handle } => {
-                if let Some(n) = self
+                if handle == 0 {
+                    if let Some(old) = self
+                        .session
+                        .active()
+                        .and_then(|s| s.nodes.iter().find(|n| n.id == node))
+                        .map(|n| n.p)
+                    {
+                        self.session.move_anchors(p - old);
+                    }
+                } else if let Some(n) = self
                     .session
                     .active_mut()
                     .and_then(|s| s.nodes.iter_mut().find(|n| n.id == node))
                 {
-                    if handle == 0 {
-                        n.p = p;
-                    } else {
+                    {
                         let v = p - n.p;
                         if handle < 0 {
                             n.incoming = v;
                             n.exact_incoming = false;
-                            if n.smooth && !e.modifiers.alt {
+                            if e.modifiers.alt {
+                                n.smooth = false;
+                            }
+                            if n.smooth {
                                 n.outgoing = -v;
+                                n.exact_outgoing = false;
                             }
                         } else {
                             n.outgoing = v;
                             n.exact_outgoing = false;
-                            if n.smooth && !e.modifiers.alt {
+                            if e.modifiers.alt {
+                                n.smooth = false;
+                            }
+                            if n.smooth {
                                 n.incoming = -v;
+                                n.exact_incoming = false;
                             }
                         }
                     }
@@ -712,6 +767,8 @@ impl Workspace {
                     let v = p - n.p;
                     n.outgoing = v;
                     n.incoming = -v;
+                    n.exact_outgoing = false;
+                    n.exact_incoming = false;
                     n.smooth = v.hypot() > 1.;
                 }
                 changed = true;
@@ -764,17 +821,41 @@ impl Workspace {
                     self.session.selected.clear();
                 }
                 let r = Rect::from_points(start, current);
-                for (id, o) in &self.outlines {
-                    let touches = inside(r.center(), &o.contours)
-                        || o.contours.iter().any(|c| {
-                            c.iter().any(|p| r.contains(*p))
-                                || c.iter()
-                                    .zip(c.iter().cycle().skip(1))
-                                    .take(c.len())
-                                    .any(|(a, b)| segment_hits_rect(*a, *b, r))
-                        });
-                    if touches && !self.session.selected.contains(id) {
-                        self.session.selected.push(*id);
+                if matches!(self.tool, Tool::Direct | Tool::Convert) {
+                    if !add {
+                        self.session.anchors.clear();
+                    }
+                    let hits: Vec<_> = self
+                        .session
+                        .doc
+                        .strokes
+                        .iter()
+                        .filter(|s| s.visible && s.contours.is_none())
+                        .flat_map(|s| {
+                            s.nodes.iter().filter(|n| r.contains(n.p)).map(|n| Anchor {
+                                stroke: s.id,
+                                node: n.id,
+                            })
+                        })
+                        .collect();
+                    for at in hits {
+                        if !self.session.anchors.contains(&at) {
+                            self.session.select_anchor(at, true);
+                        }
+                    }
+                } else {
+                    for (id, o) in &self.outlines {
+                        let touches = inside(r.center(), &o.contours)
+                            || o.contours.iter().any(|c| {
+                                c.iter().any(|p| r.contains(*p))
+                                    || c.iter()
+                                        .zip(c.iter().cycle().skip(1))
+                                        .take(c.len())
+                                        .any(|(a, b)| segment_hits_rect(*a, *b, r))
+                            });
+                        if touches && !self.session.selected.contains(id) {
+                            self.session.selected.push(*id);
+                        }
                     }
                 }
             }
@@ -783,6 +864,8 @@ impl Workspace {
         }
         self.session.commit();
         self.drag = Drag::None;
+        self.snap_guide = None;
+        self.snap_frames.clear();
         self.refresh(cx);
     }
     pub fn scroll(&mut self, e: &ScrollWheelEvent, nodes: bool, cx: &mut Context<Self>) {
@@ -824,6 +907,7 @@ impl Workspace {
         if k.key == "escape" {
             self.session.cancel();
             self.drag = Drag::None;
+            self.snap_guide = None;
             self.pen_path = None;
             self.add_open = false;
             self.refresh(cx);
@@ -843,7 +927,25 @@ impl Workspace {
                     self.refresh(cx);
                 }
                 "a" => {
-                    if self.node_region {
+                    if !self.node_region && matches!(self.tool, Tool::Direct | Tool::Convert) {
+                        self.session.anchors.clear();
+                        let hits: Vec<_> = self
+                            .session
+                            .doc
+                            .strokes
+                            .iter()
+                            .filter(|s| s.visible && s.contours.is_none())
+                            .flat_map(|s| {
+                                s.nodes.iter().map(|n| Anchor {
+                                    stroke: s.id,
+                                    node: n.id,
+                                })
+                            })
+                            .collect();
+                        for at in hits {
+                            self.session.select_anchor(at, true);
+                        }
+                    } else if self.node_region {
                         self.node_selection = self
                             .session
                             .graph()
@@ -882,6 +984,7 @@ impl Workspace {
                 self.pen_path = None;
             }
             "a" => self.tool = Tool::Direct,
+            "c" if k.modifiers.shift => self.tool = Tool::Convert,
             "p" => {
                 self.tool = Tool::Pen;
                 self.pen_path = None;
@@ -892,8 +995,12 @@ impl Workspace {
                 self.session.commit();
             }
             "backspace" | "delete" | "x" => {
-                self.session.remove();
-                self.refresh(cx);
+                if matches!(self.tool, Tool::Direct | Tool::Convert) {
+                    self.path_operation(crate::path_edit::Operation::Delete, cx);
+                } else {
+                    self.session.remove();
+                    self.refresh(cx);
+                }
             }
             "home" | "f" => self.fit_art(),
             "0" => self.art_view.zoom_at(
@@ -1001,6 +1108,7 @@ impl Workspace {
                     [
                         (Tool::Select, "選択 V"),
                         (Tool::Direct, "制御点 A"),
+                        (Tool::Convert, "アンカー ⇧C"),
                         (Tool::Pen, "ペン P"),
                         (Tool::Width, "幅 W"),
                     ]
@@ -1016,6 +1124,7 @@ impl Workspace {
                 ),
             )
             .child(list)
+            .child(div().p_2().child(self.snap_properties(cx)))
             .child(
                 div()
                     .p_2()
@@ -1054,6 +1163,7 @@ impl Workspace {
             .flex_col()
             .gap_2()
             .child(div().text_color(rgb(0xaaaaaa)).child("パスの設定"));
+        col = col.child(self.anchor_properties(cx));
         if let Some(path) = self.session.active() {
             let name = path.name.clone();
             let width = path.start_width.left + path.start_width.right;

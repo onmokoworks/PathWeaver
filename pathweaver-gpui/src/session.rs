@@ -1,6 +1,7 @@
 use kurbo::{Affine, Point, Rect, Vec2};
 use pathweaver_core::{
     appearance::Graph,
+    editing::Anchor,
     model::{Document, Node, Stroke},
     outline,
 };
@@ -9,6 +10,8 @@ use std::path::{Path, PathBuf};
 pub struct Session {
     pub doc: Document,
     pub selected: Vec<u64>,
+    pub anchors: Vec<Anchor>,
+    pub segment: Option<Anchor>,
     pub path: Option<PathBuf>,
     saved: Document,
     undo: Vec<Document>,
@@ -22,6 +25,8 @@ impl Default for Session {
             saved: doc.clone(),
             doc,
             selected: vec![],
+            anchors: vec![],
+            segment: None,
             path: None,
             undo: vec![],
             redo: vec![],
@@ -84,11 +89,30 @@ impl Session {
         }
         self.reconcile();
     }
-    fn reconcile(&mut self) {
+    pub fn reconcile(&mut self) {
+        self.anchors.retain(|a| {
+            self.doc.strokes.iter().any(|s| {
+                s.id == a.stroke
+                    && s.visible
+                    && self.selected.contains(&s.id)
+                    && s.nodes.iter().any(|n| n.id == a.node)
+            })
+        });
+        if self.segment.is_some_and(|a| {
+            !self.doc.strokes.iter().any(|s| {
+                s.id == a.stroke
+                    && self.selected.contains(&s.id)
+                    && s.segment_index(a.node).is_some()
+            })
+        }) {
+            self.segment = None;
+        }
         self.selected
             .retain(|id| self.doc.strokes.iter().any(|s| s.id == *id));
     }
     pub fn select(&mut self, id: u64, add: bool) {
+        self.anchors.clear();
+        self.segment = None;
         if add {
             if self.selected.contains(&id) {
                 self.selected.retain(|s| *s != id);
@@ -97,6 +121,52 @@ impl Session {
             }
         } else if !self.selected.contains(&id) {
             self.selected = vec![id];
+        }
+    }
+    pub fn select_anchor(&mut self, at: Anchor, add: bool) {
+        self.segment = None;
+        if add && self.anchors.contains(&at) {
+            self.anchors.retain(|a| *a != at);
+        } else {
+            if !add && !self.anchors.contains(&at) {
+                self.anchors.clear();
+            }
+            self.anchors.retain(|a| *a != at);
+            self.anchors.push(at);
+        }
+        self.selected = self
+            .anchors
+            .iter()
+            .map(|a| a.stroke)
+            .fold(Vec::new(), |mut ids, id| {
+                ids.retain(|v| *v != id);
+                ids.push(id);
+                ids
+            });
+    }
+    pub fn anchor_position(&self) -> Option<Point> {
+        let at = self.anchors.last()?;
+        Some(
+            self.doc
+                .strokes
+                .iter()
+                .find(|s| s.id == at.stroke)?
+                .nodes
+                .iter()
+                .find(|n| n.id == at.node)?
+                .p,
+        )
+    }
+    pub fn move_anchors(&mut self, delta: Vec2) {
+        for s in &mut self.doc.strokes {
+            for n in &mut s.nodes {
+                if self.anchors.contains(&Anchor {
+                    stroke: s.id,
+                    node: n.id,
+                }) {
+                    n.p += delta;
+                }
+            }
         }
     }
     pub fn remove(&mut self) {
@@ -259,6 +329,47 @@ pub fn inside(p: Point, contours: &[Vec<Point>]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn anchor_selection_coordinates_topology_and_undo() {
+        use pathweaver_core::editing;
+        let mut s = Session::default();
+        s.new_path(Point::ZERO);
+        s.add_point(Point::new(50., 30.));
+        s.add_point(Point::new(100., 0.));
+        let a = Anchor {
+            stroke: s.doc.strokes[0].id,
+            node: s.doc.strokes[0].nodes[0].id,
+        };
+        let b = Anchor {
+            stroke: a.stroke,
+            node: s.doc.strokes[0].nodes[1].id,
+        };
+        s.select_anchor(a, false);
+        s.select_anchor(b, true);
+        assert_eq!(s.anchor_position(), Some(Point::new(50., 30.)));
+        s.edit(|s| s.move_anchors(Vec2::new(20., -10.)));
+        assert_eq!(s.doc.strokes[0].nodes[0].p, Point::new(20., -10.));
+        assert_eq!(s.doc.strokes[0].nodes[2].p, Point::new(100., 0.));
+        s.undo();
+        assert_eq!(s.anchor_position(), Some(Point::new(50., 30.)));
+        let before = s.doc.clone();
+        s.edit(|s| {
+            let parts = editing::separate(&mut s.doc, b).unwrap();
+            s.anchors.clear();
+            for at in parts {
+                s.select_anchor(at, true);
+            }
+        });
+        assert_eq!(s.selected.len(), 2);
+        s.undo();
+        s.doc.validate().unwrap();
+        assert_eq!(s.doc, before);
+        assert_eq!(s.anchors, vec![b]);
+        s.redo();
+        assert_eq!(s.doc.strokes.len(), 2);
+        s.select(a.stroke, false);
+        assert!(s.anchors.is_empty());
+    }
     #[test]
     fn grouped_edit_undo_and_cancel() {
         let mut s = Session::default();

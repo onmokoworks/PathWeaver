@@ -2,6 +2,7 @@ mod app;
 mod drawing;
 mod input;
 mod nodes;
+mod path_edit;
 mod session;
 use gpui::{prelude::*, *};
 fn main() {
