@@ -33,7 +33,7 @@ pub fn choice(ui: &mut egui::Ui, svg: &str, label: &str, selected: bool) -> egui
                     })
                     .collect();
                 ui.painter()
-                    .add(egui::Shape::line(points, egui::Stroke::new(1.1, color)));
+                    .add(egui::Shape::line(points, egui::Stroke::new(1.1_f32, color)));
             }
         }
     }

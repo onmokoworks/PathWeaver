@@ -11,6 +11,15 @@ const ACCENT: Color32 = Color32::from_rgb(255, 112, 24);
 const GUIDE: Color32 = Color32::from_gray(155);
 const PAPER: Color32 = Color32::from_gray(13);
 
+// Keep hints consistent with the platform's primary modifier keys.
+fn platform_keys(text: &str) -> String {
+    if cfg!(target_os = "macos") {
+        text.replace("Ctrl", "Cmd").replace("Alt", "Option")
+    } else {
+        text.into()
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tool {
     Select,
@@ -118,6 +127,7 @@ pub struct Editor {
 
 impl Editor {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
         let mut fonts = egui::FontDefinitions::default();
         for path in [
@@ -250,6 +260,42 @@ impl Editor {
     fn world(&self, p: Pos2, rect: egui::Rect) -> Point {
         let v = (p - rect.min - self.pan) / self.zoom;
         Point::new(v.x as f64, v.y as f64)
+    }
+    fn zoom_at(&mut self, position: Pos2, zoom: f32) {
+        if !zoom.is_finite() || !self.canvas_rect.is_positive() {
+            return;
+        }
+        let before = self.world(position, self.canvas_rect);
+        self.zoom = zoom.clamp(0.01, 12.);
+        self.pan = position - self.canvas_rect.min
+            - EVec2::new(before.x as f32, before.y as f32) * self.zoom;
+    }
+    fn fit_canvas(&mut self) {
+        if !self.canvas_rect.is_positive() {
+            return;
+        }
+        self.cache();
+        let mut bounds = egui::Rect::NOTHING;
+        for stroke in self.doc.strokes.iter().filter(|s| s.visible) {
+            if let Some((_, Ok(outline))) = self.cache.get(&stroke.id) {
+                for p in &outline.vertices {
+                    bounds.extend_with(Pos2::new(p.x as f32, p.y as f32));
+                }
+            }
+            // Include unfinished paths that do not have a painted outline yet.
+            for node in &stroke.nodes {
+                bounds.extend_with(Pos2::new(node.p.x as f32, node.p.y as f32));
+            }
+        }
+        if !bounds.is_finite() {
+            self.zoom = 1.;
+            self.pan = EVec2::new(40., 80.);
+            return;
+        }
+        let available = (self.canvas_rect.size() - EVec2::splat(96.)).max(EVec2::splat(1.));
+        self.zoom = (available.x / bounds.width().max(1.))
+            .min(available.y / bounds.height().max(1.)).clamp(0.01, 12.);
+        self.pan = self.canvas_rect.size() * 0.5 - bounds.center().to_vec2() * self.zoom;
     }
     fn selection_bounds(&self) -> Option<kurbo::Rect> {
         let (_, result) = self.cache.get(&self.selected?)?;
@@ -602,24 +648,24 @@ impl Editor {
                     ui.strong(format!("{}{}", name, if self.dirty() { " *" } else { "" }));
                     ui.separator();
                     ui.menu_button("ファイル", |ui| {
-                        if ui.button("新規").clicked() {
+                        if ui.button(platform_keys("新規    Ctrl+N")).clicked() {
                             self.request(Pending::New);
                             ui.close();
                         }
-                        if ui.button("開く…    Ctrl+O").clicked() {
+                        if ui.button(platform_keys("開く…    Ctrl+O")).clicked() {
                             self.request(Pending::Open);
                             ui.close();
                         }
-                        if ui.button("保存    Ctrl+S").clicked() {
+                        if ui.button(platform_keys("保存    Ctrl+S")).clicked() {
                             self.save(false);
                             ui.close();
                         }
-                        if ui.button("名前を付けて保存…").clicked() {
+                        if ui.button(platform_keys("名前を付けて保存…    Ctrl+Shift+S")).clicked() {
                             self.save(true);
                             ui.close();
                         }
                         ui.separator();
-                        if ui.button("SVGを書き出す…").clicked() {
+                        if ui.button(platform_keys("SVGを書き出す…    Ctrl+Shift+E")).clicked() {
                             self.export();
                             ui.close();
                         }
@@ -628,7 +674,7 @@ impl Editor {
                         if ui
                             .add_enabled(
                                 !self.undo.is_empty(),
-                                egui::Button::new("元に戻す    Ctrl+Z"),
+                                egui::Button::new(platform_keys("元に戻す    Ctrl+Z")),
                             )
                             .clicked()
                         {
@@ -638,11 +684,21 @@ impl Editor {
                         if ui
                             .add_enabled(
                                 !self.redo.is_empty(),
-                                egui::Button::new("やり直す    Ctrl+Shift+Z"),
+                                egui::Button::new(platform_keys("やり直す    Ctrl+Shift+Z")),
                             )
                             .clicked()
                         {
                             self.redo();
+                            ui.close();
+                        }
+                    });
+                    ui.menu_button("表示", |ui| {
+                        if ui.button(platform_keys("全体を表示    Ctrl+0")).clicked() {
+                            self.fit_canvas();
+                            ui.close();
+                        }
+                        if ui.button(platform_keys("100%表示    Ctrl+1")).clicked() {
+                            self.zoom_at(self.canvas_rect.center(), 1.);
                             ui.close();
                         }
                     });
@@ -682,11 +738,16 @@ impl Editor {
         ui.small("A：アンカー・接線を編集");
         ui.small("P：端点をクリックして描画を再開");
         ui.small("回転中にShift：角度をスナップ");
-        ui.small("Ctrl＋芯をクリック：幅点を追加");
-        ui.small("Alt＋芯のドラッグ：曲線を曲げる");
-        ui.small("Ctrl＋端点：切り口を回転");
-        ui.small("Alt＋幅ハンドル：片側だけ調整");
+        ui.small(platform_keys("Ctrl＋芯をクリック：幅点を追加"));
+        ui.small(platform_keys("Alt＋芯のドラッグ：曲線を曲げる"));
+        ui.small(platform_keys("Ctrl＋端点：切り口を回転"));
+        ui.small(platform_keys("Alt＋幅ハンドル：片側だけ調整"));
         ui.small("中ボタンドラッグ：パン");
+        ui.small("Space＋ドラッグ：パン");
+        if cfg!(target_os = "macos") {
+            ui.small("2本指スクロール：パン");
+            ui.small("ピンチ / Cmd＋スクロール：ズーム");
+        }
         ui.small("ホイール：ズーム");
         ui.small("Enter：描画終了 / Esc：取消");
     }
@@ -887,7 +948,7 @@ impl Editor {
         ui.checkbox(&mut self.scale_widths, "拡大縮小に合わせて線幅も変更");
         if self.tool == Tool::Select {
             ui.small(
-                "枠：拡大縮小 / 枠外・上の丸：回転\nShift：比率固定・角度スナップ / Alt：中心基準",
+                platform_keys("枠：拡大縮小 / 枠外・上の丸：回転\nShift：比率固定・角度スナップ / Alt：中心基準"),
             );
         }
         ui.horizontal_wrapped(|ui| {
@@ -1131,7 +1192,7 @@ impl Editor {
     fn hit_shape(&self, p: Point) -> Option<u64> {
         for s in self.doc.strokes.iter().rev().filter(|s| s.visible) {
             if let Some((_, Ok(o))) = self.cache.get(&s.id) {
-                for tri in o.indices.chunks_exact(3) {
+                for tri in o.indices.as_chunks::<3>().0 {
                     let a = o.vertices[tri[0] as usize];
                     let b = o.vertices[tri[1] as usize];
                     let c = o.vertices[tri[2] as usize];
@@ -2190,12 +2251,27 @@ impl Editor {
         });
         let text_focus = ctx.wants_keyboard_input();
         for (key, m) in keys {
+            if self.pending.is_some() || self.allow_close {
+                break;
+            }
             if m.command || m.ctrl {
                 match key {
                     egui::Key::S => {
                         self.save(m.shift);
                     }
                     egui::Key::O => self.request(Pending::Open),
+                    egui::Key::N => self.request(Pending::New),
+                    egui::Key::E if m.shift => self.export(),
+                    egui::Key::W => self.request(Pending::Close),
+                    egui::Key::Q if cfg!(target_os = "macos") => self.request(Pending::Close),
+                    egui::Key::Num0 if !text_focus => self.fit_canvas(),
+                    egui::Key::Num1 if !text_focus => self.zoom_at(self.canvas_rect.center(), 1.),
+                    egui::Key::Plus | egui::Key::Equals if !text_focus => {
+                        self.zoom_at(self.canvas_rect.center(), self.zoom * 1.2);
+                    }
+                    egui::Key::Minus if !text_focus => {
+                        self.zoom_at(self.canvas_rect.center(), self.zoom / 1.2);
+                    }
                     egui::Key::Z if !text_focus => {
                         if m.shift {
                             self.redo();
@@ -2260,32 +2336,31 @@ impl Editor {
         let (rect, response) =
             ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
         self.canvas_rect = rect;
-        if response.hovered() {
-            let delta: f32 = ctx.input(|i| {
-                i.events
-                    .iter()
-                    .filter_map(|event| {
-                        if let egui::Event::MouseWheel { unit, delta, .. } = event {
-                            Some(
-                                delta.y
-                                    * match unit {
-                                        egui::MouseWheelUnit::Point => 1.,
-                                        egui::MouseWheelUnit::Line => 40.,
-                                        egui::MouseWheelUnit::Page => 200.,
-                                    },
-                            )
-                        } else {
-                            None
+        if response.hovered() && self.pending.is_none() && self.drag.is_none() {
+            let events = ctx.input(|i| i.events.clone());
+            if let Some(position) = response.hover_pos() {
+                for event in events {
+                    match event {
+                        egui::Event::MouseWheel { unit, delta, modifiers } => {
+                            if cfg!(target_os = "macos")
+                                && unit == egui::MouseWheelUnit::Point
+                                && !modifiers.command && !modifiers.ctrl
+                            {
+                                self.pan += delta;
+                            } else {
+                                let scale = match unit {
+                                    egui::MouseWheelUnit::Point => 1.,
+                                    egui::MouseWheelUnit::Line => 40.,
+                                    egui::MouseWheelUnit::Page => 200.,
+                                };
+                                self.zoom_at(position, self.zoom * (delta.y * scale * 0.002).exp());
+                            }
                         }
-                    })
-                    .sum()
-            });
-            if delta != 0. {
-                if let Some(p) = ctx.input(|i| i.pointer.hover_pos()) {
-                    let before = self.world(p, rect);
-                    self.zoom = (self.zoom * (delta * 0.002).exp()).clamp(0.1, 12.);
-                    self.pan =
-                        p - rect.min - EVec2::new(before.x as f32, before.y as f32) * self.zoom;
+                        egui::Event::Zoom(factor) if factor > 0. => {
+                            self.zoom_at(position, self.zoom * factor);
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
@@ -2317,7 +2392,7 @@ impl Editor {
                         self.press_with_shift(
                             self.world(origin, rect),
                             origin,
-                            ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command)),
+                            ctx.input(|i| i.modifiers.ctrl || i.modifiers.command),
                             ctx.input(|i| i.key_down(egui::Key::Space)),
                             ctx.input(|i| i.modifiers.shift),
                             ctx.input(|i| i.modifiers.alt),
@@ -2341,7 +2416,7 @@ impl Editor {
                     );
                 }
                 if response.double_clicked()
-                    && !ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command))
+                    && !ctx.input(|i| i.modifiers.ctrl || i.modifiers.command)
                     && !matches!(self.drag, Some(Drag::Cap(_)))
                 {
                     self.double_click(self.world(p, rect));
@@ -2381,7 +2456,7 @@ impl Editor {
             while x < rect.right() {
                 painter.line_segment(
                     [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
-                    EStroke::new(0.5, Color32::from_gray(32)),
+                    EStroke::new(0.5_f32, Color32::from_gray(32)),
                 );
                 x += step;
             }
@@ -2389,7 +2464,7 @@ impl Editor {
             while y < rect.bottom() {
                 painter.line_segment(
                     [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
-                    EStroke::new(0.5, Color32::from_gray(32)),
+                    EStroke::new(0.5_f32, Color32::from_gray(32)),
                 );
                 y += step;
             }
@@ -2409,7 +2484,7 @@ impl Editor {
                 } else {
                     [Pos2::new(rect.left(), p.y), Pos2::new(rect.right(), p.y)]
                 };
-                painter.line_segment(ends, EStroke::new(0.65, Color32::from_gray(100)));
+                painter.line_segment(ends, EStroke::new(0.65_f32, Color32::from_gray(100)));
             }
         }
         for s in self.doc.strokes.iter().filter(|s| s.visible) {
@@ -2426,7 +2501,7 @@ impl Editor {
                     for [a, b] in &o.boundary {
                         painter.line_segment(
                             [self.screen(*a, rect), self.screen(*b, rect)],
-                            EStroke::new(0.7, INK),
+                            EStroke::new(0.7_f32, INK),
                         );
                     }
                 } else {
@@ -2450,7 +2525,7 @@ impl Editor {
                         for [a, b] in &layer.outline.boundary {
                             painter.line_segment(
                                 [self.screen(*a, rect), self.screen(*b, rect)],
-                                EStroke::new(0.7, color),
+                                EStroke::new(0.7_f32, color),
                             );
                         }
                     }
@@ -2476,7 +2551,7 @@ impl Editor {
                 if !self.preview && self.selected == Some(s.id) {
                     painter.add(egui::Shape::line(
                         o.samples.iter().map(|p| self.screen(p.p, rect)).collect(),
-                        EStroke::new(0.65, GUIDE),
+                        EStroke::new(0.65_f32, GUIDE),
                     ));
                 }
             }
@@ -2485,7 +2560,7 @@ impl Editor {
             if let Some(Drag::Marquee(a, b)) = self.drag {
                 let bounds = egui::Rect::from_two_pos(self.screen(a, rect), self.screen(b, rect));
                 painter.rect_filled(bounds, 0., Color32::from_white_alpha(12));
-                painter.rect_stroke(bounds, 0., EStroke::new(0.7, INK), egui::StrokeKind::Middle);
+                painter.rect_stroke(bounds, 0., EStroke::new(0.7_f32, INK), egui::StrokeKind::Middle);
             }
             if self.tool == Tool::Select {
                 if let (Some(bounds), Some(s)) = (self.selection_bounds(), self.stroke()) {
@@ -2501,11 +2576,11 @@ impl Editor {
                         painter.rect_stroke(
                             egui::Rect::from_two_pos(corners[0], corners[2]),
                             0.,
-                            EStroke::new(0.7, ACCENT),
+                            EStroke::new(0.7_f32, ACCENT),
                             egui::StrokeKind::Middle,
                         );
                     } else {
-                        painter.add(egui::Shape::closed_line(corners, EStroke::new(0.7, ACCENT)));
+                        painter.add(egui::Shape::closed_line(corners, EStroke::new(0.7_f32, ACCENT)));
                     }
                     for (x, y) in [
                         (0., 0.),
@@ -2526,16 +2601,16 @@ impl Editor {
                         painter.rect_stroke(
                             marker,
                             0.,
-                            EStroke::new(0.7, ACCENT),
+                            EStroke::new(0.7_f32, ACCENT),
                             egui::StrokeKind::Middle,
                         );
                     }
                     let c = bounds.center();
                     let top = screen(c.x, bounds.y0);
                     let h = screen(c.x, bounds.y0 - 28. / self.zoom as f64);
-                    painter.line_segment([top, h], EStroke::new(0.7, ACCENT));
+                    painter.line_segment([top, h], EStroke::new(0.7_f32, ACCENT));
                     painter.circle_filled(h, 4., PAPER);
-                    painter.circle_stroke(h, 4., EStroke::new(0.8, ACCENT));
+                    painter.circle_stroke(h, 4., EStroke::new(0.8_f32, ACCENT));
                 }
             }
         }
@@ -2563,7 +2638,7 @@ impl Editor {
                             self.screen(p.to_point(), rect)
                         })
                         .collect();
-                    painter.add(egui::Shape::line(curve, EStroke::new(0.65, GUIDE)));
+                    painter.add(egui::Shape::line(curve, EStroke::new(0.65_f32, GUIDE)));
                 }
             }
         }
@@ -2597,13 +2672,13 @@ impl Editor {
                         }
                         if v.hypot() > 0.01 {
                             let h = self.screen(n.p + v, rect);
-                            painter.line_segment([c, h], EStroke::new(0.65, GUIDE));
+                            painter.line_segment([c, h], EStroke::new(0.65_f32, GUIDE));
                             painter.circle_filled(h, 4., PAPER);
                             painter.circle_stroke(
                                 h,
                                 4.,
                                 EStroke::new(
-                                    1.,
+                                    1_f32,
                                     if self.handle_selected == Some((n.id, out)) {
                                         ACCENT
                                     } else {
@@ -2629,7 +2704,7 @@ impl Editor {
                         r,
                         0.,
                         EStroke::new(
-                            0.7,
+                            0.7_f32,
                             if (Some(s.id) == self.selected && self.node_selected == Some(i))
                                 || self.selected_nodes.contains(&n.id)
                             {
@@ -2658,7 +2733,7 @@ impl Editor {
                                 ACCENT
                             };
                             painter.circle_filled(h, 4., PAPER);
-                            painter.circle_stroke(h, 4., EStroke::new(0.8, color));
+                            painter.circle_stroke(h, 4., EStroke::new(0.8_f32, color));
                             painter.circle_filled(h, 1.2, color);
                         }
                     }
@@ -2673,14 +2748,14 @@ impl Editor {
                         let w = s.width(target).unwrap();
                         let a = self.screen(c + n * (w.left + 10. / self.zoom as f64), rect);
                         let b = self.screen(c - n * (w.right + 10. / self.zoom as f64), rect);
-                        painter.line_segment([a, b], EStroke::new(0.65, GUIDE));
+                        painter.line_segment([a, b], EStroke::new(0.65_f32, GUIDE));
                         for p in [a, b] {
                             painter.circle_filled(p, 3., PAPER);
                             painter.circle_stroke(
                                 p,
                                 3.,
                                 EStroke::new(
-                                    0.8,
+                                    0.8_f32,
                                     if self.width_selected == Some(target) {
                                         ACCENT
                                     } else {
@@ -2726,13 +2801,13 @@ impl Editor {
                         {
                             continue;
                         }
-                        painter.line_segment([self.screen(c, rect), h], EStroke::new(0.6, GUIDE));
+                        painter.line_segment([self.screen(c, rect), h], EStroke::new(0.6_f32, GUIDE));
                         painter.circle_filled(h, 4., PAPER);
                         painter.circle_stroke(
                             h,
                             4.,
                             EStroke::new(
-                                1.,
+                                1_f32,
                                 if matches!(self.drag,Some(Drag::Cap(e)) if e==end) {
                                     ACCENT
                                 } else {
@@ -2740,7 +2815,7 @@ impl Editor {
                                 },
                             ),
                         );
-                        if ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command))
+                        if ctx.input(|i| i.modifiers.ctrl || i.modifiers.command)
                             || matches!(self.drag,Some(Drag::Cap(e)) if e==end)
                         {
                             for tick in 0..(180. / self.doc.angle_step).ceil() as usize {
@@ -2751,7 +2826,7 @@ impl Editor {
                                         self.screen(c + n * (48. / self.zoom as f64), rect),
                                         self.screen(c + n * (52. / self.zoom as f64), rect),
                                     ],
-                                    EStroke::new(0.5, GUIDE),
+                                    EStroke::new(0.5_f32, GUIDE),
                                 );
                             }
                             painter.text(
@@ -2800,7 +2875,7 @@ impl Editor {
                         Pos2::new(p.x, rect.top() + 13.),
                         Pos2::new(p.x, rect.top() + 18.),
                     ],
-                    EStroke::new(0.5, ink),
+                    EStroke::new(0.5_f32, ink),
                 );
                 x += spacing;
             }
@@ -2819,7 +2894,7 @@ impl Editor {
                         Pos2::new(rect.left() + 13., p.y),
                         Pos2::new(rect.left() + 18., p.y),
                     ],
-                    EStroke::new(0.5, ink),
+                    EStroke::new(0.5_f32, ink),
                 );
                 y += spacing;
             }
@@ -3860,6 +3935,123 @@ mod tests {
         assert!(output.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Circle(c) if c.center.distance(h)<0.1 && c.radius==4.)));
         e.press(world, Pos2::ZERO, false, false);
         assert!(matches!(e.drag, Some(Drag::Corner { .. })));
+    }
+    fn command_key(key: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers { command: true, mac_cmd: true, ..Default::default() },
+        }
+    }
+    #[test]
+    fn point_scroll_pans_on_mac_and_command_scroll_zooms_at_pointer() {
+        let (ctx, mut e) = setup();
+        let p = e.canvas_rect.center();
+        let original = e.doc.clone();
+        frame(&ctx, &mut e, 0.1, vec![egui::Event::PointerMoved(p)], egui::Modifiers::NONE);
+        let pan = e.pan;
+        let delta = EVec2::new(24., -16.);
+        frame(&ctx, &mut e, 0.2, vec![egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point, delta, modifiers: egui::Modifiers::NONE,
+        }], egui::Modifiers::NONE);
+        if cfg!(target_os = "macos") {
+            assert_eq!(e.pan, pan + delta);
+            assert_eq!(e.zoom, 1.);
+        } else {
+            assert!(e.zoom < 1.);
+        }
+        let before = e.world(p, e.canvas_rect);
+        let zoom = e.zoom;
+        let command = egui::Modifiers { command: true, mac_cmd: true, ..Default::default() };
+        frame(&ctx, &mut e, 0.3, vec![egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point, delta: EVec2::new(0., 30.), modifiers: command,
+        }], egui::Modifiers::NONE); // modifiers may have been released in the same frame
+        assert!(e.zoom > zoom);
+        assert!(before.distance(e.world(p, e.canvas_rect)) < 0.001);
+        assert_eq!(e.doc, original);
+        assert!(e.undo.is_empty());
+    }
+    #[test]
+    fn pinch_preserves_pointer_and_is_ignored_outside_canvas_or_during_drag() {
+        let (ctx, mut e) = setup();
+        let p = e.canvas_rect.center();
+        frame(&ctx, &mut e, 0.1, vec![egui::Event::PointerMoved(p)], egui::Modifiers::NONE);
+        let before = e.world(p, e.canvas_rect);
+        frame(&ctx, &mut e, 0.2, vec![egui::Event::Zoom(1.5)], egui::Modifiers::NONE);
+        assert!((e.zoom - 1.5).abs() < 0.001);
+        assert!(before.distance(e.world(p, e.canvas_rect)) < 0.001);
+        e.drag = Some(Drag::Pan(p, e.pan));
+        frame(&ctx, &mut e, 0.3, vec![egui::Event::Zoom(2.)], egui::Modifiers::NONE);
+        assert!((e.zoom - 1.5).abs() < 0.001);
+        e.drag = None;
+        frame(&ctx, &mut e, 0.4, vec![egui::Event::PointerMoved(Pos2::new(5., 5.)), egui::Event::Zoom(2.)], egui::Modifiers::NONE);
+        assert!((e.zoom - 1.5).abs() < 0.001);
+        assert!(!e.dirty());
+        assert!(e.undo.is_empty());
+    }
+    #[test]
+    fn fit_includes_painted_bounds_ignores_hidden_paths_and_does_not_edit() {
+        let (_, mut e) = setup();
+        let mut hidden = e.doc.strokes[0].clone();
+        hidden.id = 999;
+        hidden.visible = false;
+        for node in &mut hidden.nodes { node.p.x += 100_000.; }
+        e.doc.strokes.push(hidden);
+        let original = e.doc.clone();
+        e.fit_canvas();
+        let zoom = e.zoom;
+        for stroke in e.doc.strokes.iter().filter(|s| s.visible) {
+            for p in &outline::paint(stroke).unwrap().vertices {
+                assert!(e.canvas_rect.shrink(40.).contains(e.screen(*p, e.canvas_rect)));
+            }
+        }
+        assert_eq!(e.doc, original);
+        e.doc.strokes.pop();
+        e.fit_canvas();
+        assert_eq!(e.zoom, zoom);
+        assert!(e.undo.is_empty());
+        e.doc = Document::default();
+        e.fit_canvas();
+        assert_eq!(e.zoom, 1.);
+        assert!(e.pan.is_finite());
+    }
+    #[test]
+    fn command_shortcuts_work_after_modifier_release_and_preserve_unsaved_work() {
+        let (ctx, mut e) = setup();
+        ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        e.zoom = 3.;
+        let before = e.doc.clone();
+        frame(&ctx, &mut e, 0.1, vec![command_key(egui::Key::Num1)], egui::Modifiers::NONE);
+        assert_eq!(e.zoom, 1.);
+        frame(&ctx, &mut e, 0.2, vec![command_key(egui::Key::Num0)], egui::Modifiers::NONE);
+        assert_ne!(e.zoom, 1.);
+        assert_eq!(e.doc, before);
+        e.doc.strokes[0].name = "Unsaved".into();
+        let unsaved = e.doc.clone();
+        frame(&ctx, &mut e, 0.3, vec![command_key(egui::Key::N), command_key(egui::Key::W)], egui::Modifiers::NONE);
+        assert!(matches!(e.pending, Some(Pending::New)));
+        assert_eq!(e.doc, unsaved);
+        assert!(!e.allow_close);
+        e.pending = None;
+        frame(&ctx, &mut e, 0.4, vec![command_key(egui::Key::W)], egui::Modifiers::NONE);
+        assert!(matches!(e.pending, Some(Pending::Close)));
+        assert_eq!(e.doc, unsaved);
+        assert!(!e.allow_close);
+    }
+    #[test]
+    fn zoom_clamps_without_moving_world_point_and_ignores_invalid_values() {
+        let (_, mut e) = setup();
+        let p = e.canvas_rect.center();
+        let before = e.world(p, e.canvas_rect);
+        e.zoom_at(p, 100.);
+        assert_eq!(e.zoom, 12.);
+        e.zoom_at(p, 0.0001);
+        assert_eq!(e.zoom, 0.01);
+        assert!(before.distance(e.world(p, e.canvas_rect)) < 0.01);
+        e.zoom_at(p, f32::NAN);
+        assert_eq!(e.zoom, 0.01);
     }
     #[test]
     fn wheel_zooms_at_pointer_with_or_without_ctrl() {

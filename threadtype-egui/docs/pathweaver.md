@@ -2,7 +2,9 @@
 
 ## 起動・更新
 
-起動ファイルは `target/debug/pathweaver.exe` に統一します。更新時も同じファイルを上書きします。
+Windowsの起動ファイルは `target/debug/pathweaver.exe`、macOS/Linuxは `target/debug/pathweaver` です。
+Macではリポジトリ直下の `./run-pathweaver.sh` からビルド・起動できます。
+`./scripts/build-macos-app.sh` でFinderから起動できる `dist/PathWeaver.app` を生成します。
 起動時は空のキャンバス、ペンツールです。サンプルは「サンプルを開く」から明示的に開きます。
 
 ソースから更新する場合は、編集中の内容を保存してアプリを閉じてから `cargo build --locked --bin pathweaver`。
@@ -10,7 +12,7 @@
 
 ## 操作
 
-WindowsのCtrlはmacOSではCommandです。
+WindowsのCtrlはmacOSではCommand、AltはOptionです。Macの画面上の操作案内もCmd／Optionを表示します。
 
 | 操作 | 動作 |
 | --- | --- |
@@ -32,6 +34,10 @@ WindowsのCtrlはmacOSではCommandです。
 | Ctrl＋始点・終点、または表示された回転用の丸をドラッグ | その端の角度指定を開始し、切り口を自由回転 |
 | Ctrl＋Shift＋始点・終点をドラッグ | 設定した間隔で切り口をスナップ。初期値15度 |
 | ホイール | ポインター位置を中心にズーム。Ctrl併用も対応 |
+| Macの2本指スクロール／ピンチ | パン／ポインター位置を中心にズーム。Cmd＋スクロールでもズーム |
+| Ctrl+0 / Ctrl+1 / Ctrl+Plus / Ctrl+Minus | 全体表示／100%表示／拡大／縮小 |
+| Ctrl+N / Ctrl+Shift+E | 新規／SVG書き出し |
+| Ctrl+W / MacのCmd+Q | 終了。未保存なら確認 |
 | 中ボタンドラッグ／Space＋ドラッグ | キャンバス移動 |
 | Enter / Esc | 描画終了／ドラッグ取消 |
 | Delete / Backspace | 選択した点・パスを削除 |

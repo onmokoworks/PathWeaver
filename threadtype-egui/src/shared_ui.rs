@@ -122,7 +122,7 @@ impl Theme {
         visuals.panel_fill = self.panel;
         visuals.extreme_bg_color = self.bg1;
         visuals.faint_bg_color = self.bg2;
-        visuals.window_stroke = Stroke::new(1.0, self.border);
+        visuals.window_stroke = Stroke::new(1.0_f32, self.border);
         visuals.window_shadow = egui::epaint::Shadow {
             offset: [0, 3],
             blur: 14,
@@ -138,7 +138,7 @@ impl Theme {
         visuals.widgets.inactive.bg_stroke = Stroke::NONE;
         visuals.widgets.active.bg_stroke = Stroke::NONE;
         visuals.widgets.hovered.bg_stroke = Stroke::NONE;
-        visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, self.border);
+        visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, self.border);
         // After Effects風: トラックは細い一本線、操作点は小さな丸。
         // 値まで塗りつぶさず、位置そのものをノブで読む編集UIにする。
         visuals.slider_trailing_fill = false;
