@@ -28,7 +28,12 @@ pub enum Drag {
         nodes: bool,
         last: Point<Pixels>,
     },
+    Guide {
+        index: usize,
+    },
     Move {
+        start: KPoint,
+        origin: KPoint,
         last: KPoint,
     },
     Anchor {
@@ -68,6 +73,7 @@ pub enum Drag {
 }
 #[derive(Clone)]
 pub enum Editing {
+    GridSpacing,
     AnchorX,
     AnchorY,
     PathName,
@@ -391,6 +397,15 @@ impl Workspace {
         self.session.begin();
         let result = (|| -> Result<(), String> {
             match kind {
+                Editing::GridSpacing => {
+                    let value = text
+                        .parse::<f64>()
+                        .map_err(|_| "間隔を数値で入力してください")?;
+                    if !value.is_finite() || !(1.0..=10000.0).contains(&value) {
+                        return Err("間隔は1〜10000で入力してください".into());
+                    }
+                    self.session.doc.grid_spacing = value;
+                }
                 Editing::AnchorX | Editing::AnchorY => {
                     let v = text
                         .parse::<f64>()
@@ -568,6 +583,9 @@ impl Workspace {
         if e.button != MouseButton::Left {
             return;
         }
+        if self.guide_down(p, e, cx) {
+            return;
+        }
         if self.tool == Tool::Pen {
             self.session.begin();
             let same = self.pen_path.is_some_and(|id| {
@@ -666,8 +684,12 @@ impl Workspace {
         }
         if let Some(id) = self.hit_art(p) {
             self.session.select(id, e.modifiers.shift);
+            if !self.session.selected.contains(&id) {
+                cx.notify();
+                return;
+            }
             self.session.begin();
-            self.drag = Drag::Move { last: p };
+            self.start_path_move(p);
         } else {
             if !e.modifiers.shift {
                 self.session.selected.clear();
@@ -713,9 +735,37 @@ impl Workspace {
                     - f32::from(e.position.y))
                 .clamp(170., 600.);
             }
-            Drag::Move { last } => {
-                self.session.transform(Affine::translate(p - last));
-                self.drag = Drag::Move { last: p };
+            Drag::Guide { index } => {
+                if let Some(guide) = self.session.doc.guides.get_mut(index) {
+                    guide.position = (if guide.vertical { p.x } else { p.y }).clamp(-1e6, 1e6);
+                    self.status = format!(
+                        "{}ガイド  {:.2}  ·  定規の外へ戻すと削除",
+                        if guide.vertical { "縦" } else { "横" },
+                        guide.position
+                    );
+                }
+            }
+            Drag::Move {
+                start,
+                origin,
+                last,
+            } => {
+                let (snapped, guide) = snapping::translation(
+                    &self.session.doc,
+                    p,
+                    start,
+                    origin,
+                    &self.snap_frames,
+                    self.art_view.zoom as f64,
+                    e.modifiers.control,
+                );
+                self.snap_guide = guide;
+                self.session.transform(Affine::translate(snapped - last));
+                self.drag = Drag::Move {
+                    start,
+                    origin,
+                    last: snapped,
+                };
                 changed = true;
             }
             Drag::Anchor { node, handle } => {
@@ -814,6 +864,19 @@ impl Workspace {
     }
     pub fn mouse_up(&mut self, e: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         match self.drag.clone() {
+            Drag::Guide { index } => {
+                let b = self.art_bounds.get();
+                if (!b.contains(&e.position)
+                    || e.position.x < b.left() + px(20.)
+                    || e.position.y < b.top() + px(20.))
+                    && index < self.session.doc.guides.len()
+                {
+                    self.session.doc.guides.remove(index);
+                    self.status = "ガイドを削除しました（⌘Zで元に戻す）".into();
+                } else {
+                    self.status = "ガイドを配置しました。Vでドラッグして移動できます".into();
+                }
+            }
             Drag::Marquee {
                 start,
                 current,
@@ -1291,17 +1354,7 @@ impl Workspace {
         } else {
             col = col.child("パスを選択すると設定を編集できます。");
         }
-        col.child(self.button(
-            if self.session.doc.snap_grid {
-                "グリッド吸着：オン"
-            } else {
-                "グリッド吸着：オフ"
-            },
-            false,
-            cx,
-            |s, _, _| s.session.edit(|s| s.doc.snap_grid = !s.doc.snap_grid),
-        ))
-        .into_any_element()
+        col.into_any_element()
     }
 }
 impl Render for Workspace {

@@ -12,6 +12,8 @@ pub enum Kind {
     Tangent,
     Normal,
     Guide,
+    Intersection,
+    Grid,
 }
 #[derive(Clone, Copy, Debug)]
 pub struct Guide {
@@ -69,20 +71,49 @@ pub fn snap(doc: &Document, point: Point, frames: &[Frame], zoom: f64) -> (Point
             consider(f.origin, Vec2::new(-f.tangent.y, f.tangent.x), Kind::Normal);
         }
     }
+    // Explicit ruler guides take priority. Solve X and Y independently so
+    // crossing guides snap to their intersection, not just whichever came first.
     if doc.snap_guides {
-        for g in &doc.guides {
-            consider(
-                if g.vertical {
-                    Point::new(g.position, 0.)
+        let closest = |vertical: bool| {
+            doc.guides
+                .iter()
+                .filter(|g| g.vertical == vertical)
+                .filter_map(|g| {
+                    let distance = (if vertical { point.x } else { point.y } - g.position).abs();
+                    (distance < tolerance).then_some((distance, g.position))
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .map(|v| v.1)
+        };
+        let x = closest(true);
+        let y = closest(false);
+        if x.is_some() || y.is_some() {
+            let grid = |v: f64| {
+                if doc.snap_grid {
+                    (v / doc.grid_spacing).round() * doc.grid_spacing
                 } else {
-                    Point::new(0., g.position)
-                },
-                if g.vertical {
-                    Vec2::new(0., 1.)
-                } else {
-                    Vec2::new(1., 0.)
-                },
-                Kind::Guide,
+                    v
+                }
+            };
+            result = Point::new(
+                x.unwrap_or_else(|| grid(point.x)),
+                y.unwrap_or_else(|| grid(point.y)),
+            );
+            return (
+                result,
+                Some(Guide {
+                    origin: result,
+                    direction: if x.is_some() {
+                        Vec2::new(0., 1.)
+                    } else {
+                        Vec2::new(1., 0.)
+                    },
+                    kind: if x.is_some() && y.is_some() {
+                        Kind::Intersection
+                    } else {
+                        Kind::Guide
+                    },
+                }),
             );
         }
     }
@@ -90,8 +121,31 @@ pub fn snap(doc: &Document, point: Point, frames: &[Frame], zoom: f64) -> (Point
     if guide.is_none() && doc.snap_grid {
         let g = doc.grid_spacing;
         result = Point::new((point.x / g).round() * g, (point.y / g).round() * g);
+        guide = Some(Guide {
+            origin: result,
+            direction: Vec2::ZERO,
+            kind: Kind::Grid,
+        });
     }
     (result, guide)
+}
+
+/// Snap a fixed drag reference while preserving the pointer's grab offset.
+pub fn translation(
+    doc: &Document,
+    pointer: Point,
+    start: Point,
+    origin: Point,
+    frames: &[Frame],
+    zoom: f64,
+    bypass: bool,
+) -> (Point, Option<Guide>) {
+    let desired = origin + (pointer - start);
+    if bypass {
+        (desired, None)
+    } else {
+        snap(doc, desired, frames, zoom)
+    }
 }
 
 #[cfg(test)]
@@ -133,5 +187,82 @@ mod tests {
             ..d
         };
         assert_eq!(snap(&d, Point::new(2., 3.), &f, 1.).0, Point::new(2., 3.));
+    }
+    #[test]
+    fn guides_snap_both_axes_and_respect_zoom_and_toggle() {
+        use crate::model::Guide as RulerGuide;
+        let mut d = Document {
+            guides: vec![
+                RulerGuide {
+                    vertical: true,
+                    position: 42.,
+                },
+                RulerGuide {
+                    vertical: false,
+                    position: -18.,
+                },
+            ],
+            ..Default::default()
+        };
+        let (p, g) = snap(&d, Point::new(44., -15.), &[], 1.);
+        assert_eq!(p, Point::new(42., -18.));
+        assert_eq!(g.unwrap().kind, Kind::Intersection);
+        assert_eq!(
+            snap(&d, Point::new(47., 100.), &[], 2.).0,
+            Point::new(47., 100.)
+        );
+        d.snap_guides = false;
+        assert_eq!(
+            snap(&d, Point::new(44., -15.), &[], 1.).0,
+            Point::new(44., -15.)
+        );
+    }
+    #[test]
+    fn grid_uses_spacing_negative_coordinates_and_free_guide_axis() {
+        let mut d = Document {
+            snap_grid: true,
+            grid_spacing: 20.,
+            ..Default::default()
+        };
+        let (p, g) = snap(&d, Point::new(29., -32.), &[], 0.5);
+        assert_eq!(p, Point::new(20., -40.));
+        assert_eq!(g.unwrap().kind, Kind::Grid);
+        d.guides.push(crate::model::Guide {
+            vertical: true,
+            position: 27.,
+        });
+        assert_eq!(
+            snap(&d, Point::new(29., -32.), &[], 1.).0,
+            Point::new(27., -40.)
+        );
+    }
+    #[test]
+    fn translation_uses_total_drag_distance_and_keeps_grab_offset() {
+        let d = Document {
+            snap_grid: true,
+            grid_spacing: 20.,
+            ..Default::default()
+        };
+        let start = Point::new(100., 100.);
+        let origin = Point::new(20., 40.);
+        let mut last = origin;
+        let mut total = Vec2::ZERO;
+        for i in 1..=30 {
+            let (p, _) = translation(
+                &d,
+                start + Vec2::new(i as f64, 0.),
+                start,
+                origin,
+                &[],
+                1.,
+                false,
+            );
+            total += p - last;
+            last = p;
+        }
+        assert_eq!(total, Vec2::new(40., 0.));
+        let (p, g) = translation(&d, Point::new(113., 105.), start, origin, &[], 1., true);
+        assert_eq!(p, Point::new(33., 45.));
+        assert!(g.is_none());
     }
 }

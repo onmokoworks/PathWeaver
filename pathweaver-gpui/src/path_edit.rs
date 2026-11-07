@@ -18,6 +18,77 @@ pub enum Operation {
 }
 
 impl Workspace {
+    pub fn guide_down(&mut self, p: KPoint, e: &MouseDownEvent, cx: &mut Context<Self>) -> bool {
+        let b = self.art_bounds.get();
+        let left = e.position.x < b.left() + px(20.);
+        let top = e.position.y < b.top() + px(20.);
+        if left && top {
+            return true;
+        }
+        let index = if left || top {
+            self.session.begin();
+            self.session.doc.guides.push(pathweaver_core::model::Guide {
+                vertical: left,
+                position: if left { p.x } else { p.y },
+            });
+            self.session.doc.guides.len() - 1
+        } else if self.tool == Tool::Select && self.hit_art(p).is_none() {
+            let hit = self
+                .session
+                .doc
+                .guides
+                .iter()
+                .enumerate()
+                .map(|(i, g)| (i, (if g.vertical { p.x } else { p.y } - g.position).abs()))
+                .filter(|v| v.1 < 6. / self.art_view.zoom as f64)
+                .min_by(|a, b| a.1.total_cmp(&b.1));
+            let Some((i, _)) = hit else {
+                return false;
+            };
+            self.session.begin();
+            i
+        } else {
+            return false;
+        };
+        self.drag = Drag::Guide { index };
+        self.pen_path = None;
+        cx.notify();
+        true
+    }
+    pub fn start_path_move(&mut self, p: KPoint) {
+        let nearest = self
+            .session
+            .doc
+            .strokes
+            .iter()
+            .filter(|s| self.session.selected.contains(&s.id))
+            .flat_map(|s| {
+                s.nodes.iter().map(|n| {
+                    (
+                        Anchor {
+                            stroke: s.id,
+                            node: n.id,
+                        },
+                        n.p,
+                    )
+                })
+            })
+            .min_by(|a, b| a.1.distance(p).total_cmp(&b.1.distance(p)));
+        let origin = nearest
+            .map(|v| v.1)
+            .or_else(|| {
+                self.session
+                    .bounds_cached(&self.outlines)
+                    .map(|r| KPoint::new(r.x0, r.y0))
+            })
+            .unwrap_or(p);
+        self.capture_frames(nearest.map(|v| v.0));
+        self.drag = Drag::Move {
+            start: p,
+            origin,
+            last: origin,
+        };
+    }
     pub fn capture_frames(&mut self, primary: Option<Anchor>) {
         self.snap_frames.clear();
         // Use the gesture's anchor first; never recompute its direction while dragging.
@@ -27,13 +98,11 @@ impl Workspace {
         {
             self.snap_frames.push(f);
         }
-        for s in self
-            .session
-            .doc
-            .strokes
-            .iter()
-            .filter(|s| s.visible && s.contours.is_none())
-        {
+        for s in self.session.doc.strokes.iter().filter(|s| {
+            s.visible
+                && s.contours.is_none()
+                && (self.tool != Tool::Select || !self.session.selected.contains(&s.id))
+        }) {
             for n in &s.nodes {
                 let a = Anchor {
                     stroke: s.id,
@@ -356,6 +425,7 @@ impl Workspace {
             (0, "接線", self.session.doc.snap_tangent),
             (1, "法線", self.session.doc.snap_normal),
             (2, "ガイド", self.session.doc.snap_guides),
+            (3, "グリッド", self.session.doc.snap_grid),
         ] {
             col = col.child(self.button(
                 format!("{label}吸着：{}", if on { "オン" } else { "オフ" }),
@@ -366,14 +436,28 @@ impl Workspace {
                         let target = match index {
                             0 => &mut s.doc.snap_tangent,
                             1 => &mut s.doc.snap_normal,
-                            _ => &mut s.doc.snap_guides,
+                            2 => &mut s.doc.snap_guides,
+                            _ => &mut s.doc.snap_grid,
                         };
                         *target = !*target;
                     })
                 },
             ));
         }
+        let spacing = self.session.doc.grid_spacing;
+        col = col.child(self.button(
+            format!("グリッド間隔  {spacing}"),
+            false,
+            cx,
+            move |s, w, cx| s.start_edit(Editing::GridSpacing, spacing.to_string(), w, cx),
+        ));
         col.child(
+            div()
+                .text_size(px(11.))
+                .text_color(rgb(0xaaaaaa))
+                .child("定規からドラッグ：ガイド追加\nVでガイド移動、外へ戻すと削除"),
+        )
+        .child(
             div()
                 .text_size(px(11.))
                 .text_color(rgb(0xaaaaaa))

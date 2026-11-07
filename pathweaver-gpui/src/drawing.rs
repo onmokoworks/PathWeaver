@@ -298,19 +298,52 @@ impl Workspace {
             }
             if let Some(g) = self.snap_guide {
                 let reach = 2000. / self.art_view.zoom as f64;
-                line(
-                    window,
-                    &[
-                        self.art_view.screen(g.origin - g.direction * reach, b),
-                        self.art_view.screen(g.origin + g.direction * reach, b),
-                    ],
-                    0x7bcbb8,
-                    1.,
-                );
+                if g.kind != pathweaver_core::snapping::Kind::Grid {
+                    line(
+                        window,
+                        &[
+                            self.art_view.screen(g.origin - g.direction * reach, b),
+                            self.art_view.screen(g.origin + g.direction * reach, b),
+                        ],
+                        0x7bcbb8,
+                        1.,
+                    );
+                    if g.kind == pathweaver_core::snapping::Kind::Intersection {
+                        line(
+                            window,
+                            &[
+                                self.art_view
+                                    .screen(g.origin - kurbo::Vec2::new(reach, 0.), b),
+                                self.art_view
+                                    .screen(g.origin + kurbo::Vec2::new(reach, 0.), b),
+                            ],
+                            0x7bcbb8,
+                            1.,
+                        );
+                    }
+                }
+                if matches!(
+                    g.kind,
+                    pathweaver_core::snapping::Kind::Grid
+                        | pathweaver_core::snapping::Kind::Intersection
+                        | pathweaver_core::snapping::Kind::Guide
+                ) {
+                    let center = self.art_view.screen(g.origin, b);
+                    rect(
+                        window,
+                        Bounds::new(center - point(px(4.), px(4.)), size(px(8.), px(8.))),
+                        0x7bcbb8,
+                        0x202020,
+                        1.,
+                        1.,
+                    );
+                }
                 let label = match g.kind {
                     pathweaver_core::snapping::Kind::Tangent => "接線",
                     pathweaver_core::snapping::Kind::Normal => "法線",
                     pathweaver_core::snapping::Kind::Guide => "ガイド",
+                    pathweaver_core::snapping::Kind::Intersection => "ガイド交点",
+                    pathweaver_core::snapping::Kind::Grid => "グリッド",
                 };
                 text(
                     window,
