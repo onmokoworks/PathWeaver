@@ -1,15 +1,24 @@
 #!/usr/bin/env bash
-# macOS / Linux: ./run-pathweaver.sh [--release|--test|--check]
+# macOS defaults to GPUI; the egui frontend remains available for compatibility.
 set -euo pipefail
-cd "$(dirname "$0")/threadtype-egui"
+cd "$(dirname "$0")"
 if ! command -v cargo >/dev/null 2>&1; then
     echo 'Rust (cargo) is required. Install from https://rustup.rs and reopen Terminal.' >&2
     exit 1
 fi
+manifest=pathweaver-gpui/Cargo.toml
+if [[ "$(uname -s)" != Darwin ]]; then manifest=threadtype-egui/Cargo.toml; fi
 case "${1:-}" in
-    '') exec cargo run --locked --bin pathweaver ;;
-    --release) exec cargo run --locked --release --bin pathweaver ;;
-    --test) exec cargo test --locked --bin pathweaver ;;
-    --check) exec cargo clippy --locked --bin pathweaver -- -D warnings ;;
-    *) echo "Usage: $0 [--release|--test|--check]" >&2; exit 2 ;;
+    '') exec cargo run --manifest-path "$manifest" --locked --bin pathweaver ;;
+    --release) exec cargo run --manifest-path "$manifest" --locked --release --bin pathweaver ;;
+    --legacy) exec cargo run --manifest-path threadtype-egui/Cargo.toml --locked --bin pathweaver ;;
+    --test)
+        cargo test --manifest-path pathweaver-core/Cargo.toml --locked
+        cargo test --manifest-path "$manifest" --locked --bin pathweaver
+        ;;
+    --check)
+        cargo clippy --manifest-path pathweaver-core/Cargo.toml --locked --all-targets -- -D warnings
+        cargo clippy --manifest-path "$manifest" --locked --all-targets -- -D warnings
+        ;;
+    *) echo "Usage: $0 [--release|--test|--check|--legacy]" >&2; exit 2 ;;
 esac

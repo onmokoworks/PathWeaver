@@ -257,7 +257,7 @@ mod tests {
     #[test]
     fn shadow_is_below_source_and_offsets_its_silhouette() {
         let original = square();
-        let result = shadow(&[original.clone()], 20., 30., 0., [1, 2, 3], 0.6, 0.).unwrap();
+        let result = shadow(std::slice::from_ref(&original), 20., 30., 0., [1, 2, 3], 0.6, 0.).unwrap();
         assert_eq!(result.last().unwrap(), &original);
         assert_eq!(result[0].color, [1, 2, 3]);
         assert_eq!(result[0].opacity, 0.6);
@@ -268,7 +268,7 @@ mod tests {
     fn blur_is_bounded_and_fades_toward_outside() {
         let original = square();
         assert_eq!(
-            blur(&[original.clone()], 0.).unwrap(),
+            blur(std::slice::from_ref(&original), 0.).unwrap(),
             vec![original.clone()]
         );
         let blurred = blur(&[original], 10.).unwrap();
@@ -285,7 +285,7 @@ mod tests {
     #[test]
     fn inner_glow_is_clipped_while_outer_glow_sits_behind_source() {
         let original = square();
-        let inner = glow(&[original.clone()], 10., [255, 0, 0], 0.5, true).unwrap();
+        let inner = glow(std::slice::from_ref(&original), 10., [255, 0, 0], 0.5, true).unwrap();
         assert_eq!(inner[0], original);
         assert!(inner[1..].iter().all(|l| l
             .contours

@@ -335,7 +335,7 @@ impl Default for PaintLayer {
 pub struct Outline {
     pub layers: Vec<PaintLayer>,
     pub samples: Vec<Sample>,
-    #[cfg(test)]
+    /// Pre-normalization stroke boundary, retained for geometry diagnostics.
     pub ring: Vec<Point>,
     pub contours: Vec<Vec<Point>>,
     pub vertices: Vec<Point>,
@@ -553,7 +553,6 @@ pub(super) fn tessellate(
         boundary,
         samples,
         contours,
-        #[cfg(test)]
         ring: _ring,
         vertices: buffers.vertices,
         indices: buffers.indices,
@@ -1018,7 +1017,7 @@ mod tests {
         }
     }
     fn filled(o: &Outline, p: Point) -> bool {
-        o.indices.chunks_exact(3).any(|t| {
+        o.indices.as_chunks::<3>().0.iter().any(|t| {
             let a = o.vertices[t[0] as usize];
             let b = o.vertices[t[1] as usize];
             let c = o.vertices[t[2] as usize];

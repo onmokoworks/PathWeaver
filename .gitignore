@@ -16,3 +16,6 @@ logs
 
 # Local macOS app bundles
 /dist/
+
+# Rust build artifacts
+**/target/

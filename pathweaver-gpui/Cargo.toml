@@ -1,0 +1,19 @@
+[package]
+name = "pathweaver-gpui"
+version = "0.2.0"
+edition = "2024"
+default-run = "pathweaver"
+
+[[bin]]
+name = "pathweaver"
+path = "src/main.rs"
+
+[dependencies]
+gpui = { version = "=0.2.2", default-features = false, features = ["font-kit"] }
+pathweaver-core = { path = "../pathweaver-core" }
+kurbo = "0.11"
+serde_json = "1"
+unicode-segmentation = "1"
+
+[profile.dev]
+opt-level = 1

@@ -10,6 +10,7 @@ name = "pathweaver"
 path = "src/path_tool/main.rs"
 
 [dependencies]
+pathweaver-core = { path = "../pathweaver-core" }
 eframe = "=0.33.3"
 egui = "=0.33.3"
 egui_dock = "=0.18.0"

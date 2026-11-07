@@ -1,14 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-mod appearance;
-mod appearance_effects;
-mod appearance_paint;
+use pathweaver_core::{appearance, appearance_assets, appearance_effects, corners, model, outline};
 mod appearance_ui;
-mod appearance_assets;
 mod editor;
 mod icons;
-mod corners;
-mod model;
-mod outline;
 #[path = "../shared_ui.rs"]
 mod shared_ui;
 
