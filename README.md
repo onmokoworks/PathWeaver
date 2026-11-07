@@ -44,6 +44,13 @@ open dist/PathWeaver.app
 Macのポイント単位スクロール（Magic Mouseを含む）はパンとして扱います。
 ズームしたいときはCmdを併用してください。操作中のドラッグや未保存確認中はジェスチャーを受け付けません。
 
+## 範囲選択とノード効果
+
+Vで空白からドラッグして複数パスを選択し、まとめて移動・変形・削除できます。Shiftで追加・解除します。
+パスを選択してプロパティの「ノードで外観を編集…」を開くと、ラフ・角丸・オフセット・縁取り・影・光彩などを接続できます。
+値・計算・計測を含む25種類のノードに対応し、元の芯を保ったまま保存・SVG出力できます。
+[ノードの操作・一覧と実装範囲](threadtype-egui/docs/pathweaver-appearance.md)を参照してください。
+
 ## Windows・Linux
 
 Windowsでは`run-pathweaver.ps1`、Linuxでは`./run-pathweaver.sh`を使用します。

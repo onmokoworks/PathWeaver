@@ -1,4 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod appearance;
+mod appearance_effects;
+mod appearance_paint;
+mod appearance_ui;
 mod editor;
 mod icons;
 mod corners;

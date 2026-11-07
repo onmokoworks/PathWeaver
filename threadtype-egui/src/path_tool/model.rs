@@ -81,6 +81,8 @@ pub struct Corner {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Stroke {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub appearance: Option<super::appearance::Graph>,
     #[serde(default)]
     pub closed: bool,
     /// Closed, normalized contours after expansion or a Boolean operation.
@@ -175,6 +177,7 @@ impl Stroke {
     }
     pub fn new(id: u64, name: String) -> Self {
         Self {
+            appearance: None,
             closed: false,
             contours: None,
             fill: None,
@@ -504,6 +507,7 @@ impl Document {
         }
         for s in &self.strokes {
             check_id(s.id)?;
+            if let Some(graph) = &s.appearance { graph.validate()?; }
             if !s.edge_width.is_finite() || !(0.0..=10000.0).contains(&s.edge_width) {
                 return Err("輪郭線の幅が不正です".into());
             }

@@ -322,10 +322,14 @@ fn cap_patch(
     (k, join(&a, w.left, 1.), join(&b, w.right, -1.))
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct PaintLayer {
     pub color: [u8; 3],
+    pub opacity: f64,
     pub outline: Outline,
+}
+impl Default for PaintLayer {
+    fn default() -> Self { Self { color: [0; 3], opacity: 1., outline: Outline::default() } }
 }
 #[derive(Clone, Default)]
 pub struct Outline {
@@ -504,7 +508,7 @@ pub fn boolean_contours(
         .collect()
 }
 
-fn tessellate(
+pub(super) fn tessellate(
     contours: Vec<Vec<Point>>,
     samples: Vec<Sample>,
     _ring: Vec<Point>,
@@ -580,6 +584,7 @@ pub fn paint(s: &Stroke) -> Result<Outline, String> {
         };
         layers.push(PaintLayer {
             color,
+            opacity: 1.,
             outline: tessellate(contours, vec![], vec![])?,
         });
     }
@@ -619,7 +624,15 @@ pub fn paint(s: &Stroke) -> Result<Outline, String> {
         } else {
             build(s)?
         };
-        layers.push(PaintLayer { color, outline });
+        layers.push(PaintLayer { color, opacity: 1., outline });
+    }
+    if let Some(graph) = &s.appearance {
+        let original = layers.iter().map(|layer| super::appearance::Layer {
+            color: layer.color, opacity: layer.opacity, contours: layer.outline.contours.clone(),
+        }).collect::<Vec<_>>();
+        layers = super::appearance::evaluate(graph, &original)?.into_iter().map(|layer| {
+            Ok(PaintLayer { color: layer.color, opacity: layer.opacity, outline: tessellate(layer.contours, vec![], vec![])? })
+        }).collect::<Result<Vec<_>, String>>()?;
     }
     let contours = layers
         .iter()
@@ -676,9 +689,10 @@ pub fn svg(doc: &Document) -> Result<String, String> {
     for s in doc.strokes.iter().filter(|s| s.visible) {
         let rendered = paint(s)?;
         for layer in &rendered.layers {
+            if layer.opacity <= 0. { continue; }
             let [r, g, b] = layer.color;
             paths.push_str(&format!(
-                "  <path fill=\"#{r:02x}{g:02x}{b:02x}\" fill-rule=\"nonzero\" d=\""
+                "  <path fill=\"#{r:02x}{g:02x}{b:02x}\" fill-opacity=\"{:.6}\" fill-rule=\"nonzero\" d=\"", layer.opacity.clamp(0., 1.)
             ));
             for contour in &layer.outline.contours {
                 for (i, p) in contour.iter().enumerate() {

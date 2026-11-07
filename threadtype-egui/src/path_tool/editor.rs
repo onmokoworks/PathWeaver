@@ -11,14 +11,40 @@ const ACCENT: Color32 = Color32::from_rgb(255, 112, 24);
 const GUIDE: Color32 = Color32::from_gray(155);
 const PAPER: Color32 = Color32::from_gray(13);
 
+fn baked_opacity(opacity: f64) -> Option<super::appearance::Graph> {
+    if opacity >= 1. {
+        return None;
+    }
+    let mut graph = super::appearance::Graph::default();
+    let id = graph
+        .add(super::appearance::Kind::Opacity, [270., 90.])
+        .unwrap();
+    graph.node_mut(id).unwrap().opacity = opacity.clamp(0., 1.);
+    graph.connect(1, id, 0).unwrap();
+    graph.connect(id, graph.output, 0).unwrap();
+    Some(graph)
+}
+
 fn triangle_intersects_rect(tri: [Point; 3], rect: kurbo::Rect) -> bool {
-    let corners = [Point::new(rect.x0, rect.y0), Point::new(rect.x1, rect.y0),
-        Point::new(rect.x1, rect.y1), Point::new(rect.x0, rect.y1)];
+    let corners = [
+        Point::new(rect.x0, rect.y0),
+        Point::new(rect.x1, rect.y0),
+        Point::new(rect.x1, rect.y1),
+        Point::new(rect.x0, rect.y1),
+    ];
     let edges = [tri[1] - tri[0], tri[2] - tri[1], tri[0] - tri[2]];
-    [Vec2::new(1., 0.), Vec2::new(0., 1.)].into_iter()
-        .chain(edges.map(|e| Vec2::new(-e.y, e.x))).all(|axis| {
-            let project = |points: &[Point]| points.iter().map(|p| p.to_vec2().dot(axis))
-                .fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), v| (min.min(v), max.max(v)));
+    [Vec2::new(1., 0.), Vec2::new(0., 1.)]
+        .into_iter()
+        .chain(edges.map(|e| Vec2::new(-e.y, e.x)))
+        .all(|axis| {
+            let project = |points: &[Point]| {
+                points
+                    .iter()
+                    .map(|p| p.to_vec2().dot(axis))
+                    .fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), v| {
+                        (min.min(v), max.max(v))
+                    })
+            };
             let (a0, a1) = project(&tri);
             let (b0, b1) = project(&corners);
             a1 >= b0 && b1 >= a0
@@ -114,6 +140,9 @@ pub struct Editor {
     selection_angle: f64,
     marquee_previous: Vec<u64>,
     marquee_additive: bool,
+    appearance_editor: super::appearance_ui::GraphEditor,
+    appearance_open: bool,
+    appearance_target: Option<u64>,
     width_selected: Option<WidthTarget>,
     node_selected: Option<usize>,
     handle_selected: Option<(u64, bool)>,
@@ -211,7 +240,9 @@ impl Editor {
     fn path_selection(&self) -> Vec<u64> {
         let mut ids = self.selected_paths.clone();
         if let Some(id) = self.selected {
-            if !ids.contains(&id) { ids.push(id); }
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
         }
         ids
     }
@@ -227,27 +258,49 @@ impl Editor {
     }
     fn toggle_path(&mut self, id: u64) {
         let mut ids = self.path_selection();
-        if ids.contains(&id) { ids.retain(|selected| *selected != id); }
-        else { ids.push(id); }
+        if ids.contains(&id) {
+            ids.retain(|selected| *selected != id);
+        } else {
+            ids.push(id);
+        }
         self.select_paths(ids);
     }
     fn selection_rotation(&self) -> f64 {
-        if self.selected_paths.len() > 1 { self.selection_angle }
-        else { self.stroke().map_or(0., |s| s.frame_angle) }
+        if self.selected_paths.len() > 1 {
+            self.selection_angle
+        } else {
+            self.stroke().map_or(0., |s| s.frame_angle)
+        }
     }
     fn begin_path_marquee(&mut self, p: Point, additive: bool) {
         self.marquee_previous = self.path_selection();
         self.marquee_additive = additive;
-        if !additive { self.select_paths(vec![]); }
+        if !additive {
+            self.select_paths(vec![]);
+        }
         self.drag = Some(Drag::PathMarquee(p, p));
     }
     fn paths_in_rect(&self, rect: kurbo::Rect) -> Vec<u64> {
-        self.doc.strokes.iter().filter(|s| s.visible).filter(|s| {
-            self.cache.get(&s.id).and_then(|(_, result)| result.as_ref().ok())
-                .is_some_and(|outline| outline.indices.as_chunks::<3>().0.iter().any(|tri| {
-                    triangle_intersects_rect(tri.map(|i| outline.vertices[i as usize]), rect)
-                })) || s.nodes.iter().any(|n| rect.contains(n.p))
-        }).map(|s| s.id).collect()
+        self.doc
+            .strokes
+            .iter()
+            .filter(|s| s.visible)
+            .filter(|s| {
+                self.cache
+                    .get(&s.id)
+                    .and_then(|(_, result)| result.as_ref().ok())
+                    .is_some_and(|outline| {
+                        outline.indices.as_chunks::<3>().0.iter().any(|tri| {
+                            triangle_intersects_rect(
+                                tri.map(|i| outline.vertices[i as usize]),
+                                rect,
+                            )
+                        })
+                    })
+                    || s.nodes.iter().any(|n| rect.contains(n.p))
+            })
+            .map(|s| s.id)
+            .collect()
     }
     fn transform_selection(&mut self, matrix: kurbo::Affine, scale_widths: bool) {
         let ids = self.path_selection();
@@ -261,6 +314,7 @@ impl Editor {
             }
         }
     }
+
     fn dirty(&self) -> bool {
         self.doc != self.saved
     }
@@ -380,7 +434,12 @@ impl Editor {
         let mut min = Point::new(f64::INFINITY, f64::INFINITY);
         let mut max = Point::new(f64::NEG_INFINITY, f64::NEG_INFINITY);
         let unrotate = kurbo::Affine::rotate(-self.selection_rotation());
-        for s in self.doc.strokes.iter().filter(|s| s.visible && self.path_selected(s.id)) {
+        for s in self
+            .doc
+            .strokes
+            .iter()
+            .filter(|s| s.visible && self.path_selected(s.id))
+        {
             if let Some((_, Ok(outline))) = self.cache.get(&s.id) {
                 for p in &outline.vertices {
                     let p = unrotate * *p;
@@ -394,6 +453,7 @@ impl Editor {
         (min.x.is_finite() && max.x > min.x && max.y > min.y)
             .then(|| kurbo::Rect::from_points(min, max))
     }
+
     fn corner_targets(&self) -> Vec<u64> {
         self.doc
             .strokes
@@ -532,6 +592,10 @@ impl Editor {
     ) {
         self.bend_segments = alt;
         if shift && !ctrl && !space && self.tool == Tool::Select && !self.preview {
+            if let Some(drag) = self.transform_hit(p) {
+                self.drag = Some(drag);
+                return;
+            }
             if let Some(id) = self.hit_shape(p) {
                 self.toggle_path(id);
                 self.drag = None;
@@ -582,6 +646,7 @@ impl Editor {
         self.selected_nodes.clear();
         self.commit();
         self.tool = tool;
+        self.preview = false;
         if tool != Tool::Select { self.selected_paths.clear(); }
         self.drawing = false;
         self.resume_endpoint = false;
@@ -698,6 +763,8 @@ impl Editor {
         self.undo.clear();
         self.redo.clear();
         self.cache.clear();
+        self.appearance_open = false;
+        self.appearance_target = None;
         self.selected_paths.clear();
         self.selected = self.doc.strokes.first().map(|s| s.id);
         self.clean_selection();
@@ -801,7 +868,8 @@ impl Editor {
                         }
                     });
                     ui.separator();
-                    ui.checkbox(&mut self.preview, "仕上がり表示");
+                    ui.checkbox(&mut self.preview, "仕上がり表示")
+                        .on_hover_text("編集操作を一時停止して仕上がりを確認します。Tabかツールの選択で編集に戻ります。");
                 });
             });
     }
@@ -917,6 +985,7 @@ impl Editor {
                     shape.corners.clear();
                     shape.fill = Some(layer.color);
                     shape.edge = None;
+                    shape.appearance = baked_opacity(layer.opacity);
                     self.doc.strokes.insert(position + i, shape);
                 }
                 self.clean_selection();
@@ -937,18 +1006,22 @@ impl Editor {
         if sources.len() < 2 {
             return;
         }
-        let result = (|| -> Result<Vec<Vec<Point>>, String> {
-            let mut contours = outline::paint(&sources[0])?.contours;
+        let result = (|| -> Result<_, String> {
+            let back = outline::paint(&sources[0])?;
+            let color = back.layers.first().map(|layer| layer.color);
+            let opacity = back.layers.first().map_or(1., |layer| layer.opacity);
+            let mut contours = back.contours;
             for s in &sources[1..] {
                 contours = outline::boolean_contours(&contours, &outline::paint(s)?.contours, op);
             }
-            Ok(contours)
+            Ok((contours, color, opacity))
         })();
         match result {
-            Ok(contours) => {
+            Ok((contours, color, opacity)) => {
                 let mut result = sources[0].clone();
                 result.contours = Some(contours);
-                result.fill = result.edge.or(result.fill);
+                result.fill = color;
+                result.appearance = baked_opacity(opacity);
                 result.edge = None;
                 result.nodes.clear();
                 result.widths.clear();
@@ -975,10 +1048,55 @@ impl Editor {
             Err(e) => self.status = e,
         }
     }
+    fn open_appearance_editor(&mut self) {
+        if let Some(s) = self.stroke_mut() {
+            s.appearance
+                .get_or_insert_with(super::appearance::Graph::default);
+            self.appearance_target = self.selected;
+            self.appearance_open = true;
+            self.appearance_editor = super::appearance_ui::GraphEditor::default();
+        }
+    }
+    fn appearance_window(&mut self, ctx: &egui::Context) {
+        if !self.appearance_open || self.pending.is_some() {
+            return;
+        }
+        let graph = self
+            .doc
+            .strokes
+            .iter_mut()
+            .find(|s| Some(s.id) == self.appearance_target)
+            .and_then(|s| s.appearance.as_mut());
+        if let Some(graph) = graph {
+            let before = graph.clone();
+            self.appearance_editor
+                .show(ctx, &mut self.appearance_open, graph);
+            if *graph != before { ctx.request_repaint(); }
+        } else {
+            self.appearance_open = false;
+            self.appearance_target = None;
+        }
+    }
+
     fn properties_ui(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().show(ui, |ui| self.properties_contents(ui));
     }
     fn properties_contents(&mut self, ui: &mut egui::Ui) {
+        if self.selected_paths.len() > 1 {
+            ui.strong(format!("{}パスを選択中", self.selected_paths.len()));
+            if let Some(s) = self.stroke() {
+                ui.small(format!("外観の編集対象：{}", s.name));
+            }
+        }
+        if ui.add_enabled(self.stroke().is_some(), egui::Button::new("ノードで外観を編集…")).clicked() {
+            self.open_appearance_editor();
+        }
+        if let Some(s) = self.stroke_mut() {
+            if let Some(graph) = &mut s.appearance {
+                ui.checkbox(&mut graph.enabled, "ノード効果を適用");
+            }
+        }
+        ui.separator();
         if let Some(s) = self.stroke_mut() {
             ui.label("塗りと線");
             for (label, value) in [("塗り", &mut s.fill), ("線", &mut s.edge)] {
@@ -1017,7 +1135,7 @@ impl Editor {
         }
         let can_expand = self
             .stroke()
-            .is_some_and(|s| s.contours.is_none() && s.nodes.len() > 1);
+            .is_some_and(|s| s.contours.is_some() || s.nodes.len() > 1);
         if ui
             .add_enabled(can_expand, egui::Button::new("アウトライン化"))
             .clicked()
@@ -1281,7 +1399,20 @@ impl Editor {
         self.cache
             .retain(|id, _| self.doc.strokes.iter().any(|s| s.id == *id));
         for s in &mut self.doc.strokes {
-            if self.cache.get(&s.id).is_none_or(|(old, _)| old != s) {
+            let unchanged = self.cache.get(&s.id).is_some_and(|(old, _)| {
+                if old == s { return true; }
+                if let (Some(before), Some(after)) = (&old.appearance, &s.appearance) {
+                    if before.same_rendering(after) {
+                        let mut layout_updated = old.clone();
+                        layout_updated.appearance = s.appearance.clone();
+                        return layout_updated == *s;
+                    }
+                }
+                false
+            });
+            if unchanged {
+                if let Some((old, _)) = self.cache.get_mut(&s.id) { *old = s.clone(); }
+            } else {
                 let result = outline::paint(s);
                 if let Err(error) = &result {
                     self.status = error.clone();
@@ -1704,6 +1835,7 @@ impl Editor {
             return;
         }
         if self.tool == Tool::Select && !ctrl {
+            self.selected_nodes.clear();
             if let Some(id) = self.hit_shape(p) {
                 if !self.path_selected(id) { self.select_paths(vec![id]); }
                 self.selected = Some(id);
@@ -2374,6 +2506,7 @@ impl Editor {
                 .collect()
         });
         let text_focus = ctx.wants_keyboard_input();
+        let canvas_keys = !text_focus && !self.appearance_open;
         for (key, m) in keys {
             if self.pending.is_some() || self.allow_close {
                 break;
@@ -2385,7 +2518,7 @@ impl Editor {
                     }
                     egui::Key::O => self.request(Pending::Open),
                     egui::Key::N => self.request(Pending::New),
-                    egui::Key::A if !text_focus && self.tool == Tool::Select => {
+                    egui::Key::A if canvas_keys && self.tool == Tool::Select => {
                         let ids = self.doc.strokes.iter().filter(|s| s.visible).map(|s| s.id).collect();
                         self.select_paths(ids);
                     }
@@ -2427,7 +2560,7 @@ impl Editor {
                 }
                 continue;
             }
-            if text_focus {
+            if !canvas_keys {
                 continue;
             }
             match key {
@@ -2635,7 +2768,9 @@ impl Editor {
                 } else {
                     for layer in &o.layers {
                         let [r, g, b] = layer.color;
-                        let color = Color32::from_rgb(r, g, b);
+                        let color = Color32::from_rgba_unmultiplied(
+                            r, g, b, (layer.opacity.clamp(0., 1.) * 255.).round() as u8,
+                        );
                         painter.add(egui::Shape::mesh(egui::Mesh {
                             indices: layer.outline.indices.clone(),
                             vertices: layer
@@ -3050,6 +3185,11 @@ impl Editor {
                 }
             }
         }
+        if self.preview {
+            painter.text(rect.center_top() + EVec2::new(0., 24.), egui::Align2::CENTER_TOP,
+                "仕上がり表示中 — Tab またはツールを選んで編集に戻る",
+                egui::FontId::proportional(12.), GUIDE);
+        }
         painter.text(
             rect.max - EVec2::new(12., 12.),
             egui::Align2::RIGHT_BOTTOM,
@@ -3092,6 +3232,7 @@ impl Editor {
             .show_leaf_collapse_buttons(false)
             .show(ctx, &mut Viewer { editor: self });
         self.dock = dock;
+        self.appearance_window(ctx);
         self.confirmation(ctx);
         self.tool_changed = false;
         if ctx.input(|i| i.pointer.any_released()) {
@@ -3130,6 +3271,9 @@ impl Default for Editor {
             selection_angle: 0.,
             marquee_previous: vec![],
             marquee_additive: false,
+            appearance_editor: super::appearance_ui::GraphEditor::default(),
+            appearance_open: false,
+            appearance_target: None,
             width_selected: None,
             node_selected: None,
             handle_selected: None,
@@ -4077,10 +4221,19 @@ mod tests {
     fn path_selection_fixture() -> Editor {
         let mut e = Editor::default();
         e.tool = Tool::Select;
-        for (id, x, visible) in [(1, 100., true), (2, 220., true), (3, 440., true), (4, 160., false)] {
+        for (id, x, visible) in [
+            (1, 100., true),
+            (2, 220., true),
+            (3, 440., true),
+            (4, 160., false),
+        ] {
             let mut s = Stroke::new(id, format!("Square {id}"));
-            s.contours = Some(vec![vec![Point::new(x, 100.), Point::new(x + 60., 100.),
-                Point::new(x + 60., 160.), Point::new(x, 160.)]]);
+            s.contours = Some(vec![vec![
+                Point::new(x, 100.),
+                Point::new(x + 60., 100.),
+                Point::new(x + 60., 160.),
+                Point::new(x, 160.),
+            ]]);
             s.fill = Some([224, 224, 224]);
             s.edge = None;
             s.visible = visible;
@@ -4098,11 +4251,37 @@ mod tests {
         frame(&ctx, &mut e, 0.01, vec![], egui::Modifiers::NONE);
         let a = e.screen(Point::new(80., 80.), e.canvas_rect);
         let b = e.screen(Point::new(300., 180.), e.canvas_rect);
-        frame(&ctx, &mut e, 0.1, vec![egui::Event::PointerMoved(a), button(a, true, egui::PointerButton::Primary, egui::Modifiers::NONE)], egui::Modifiers::NONE);
-        frame(&ctx, &mut e, 0.2, vec![egui::Event::PointerMoved(b)], egui::Modifiers::NONE);
+        frame(
+            &ctx,
+            &mut e,
+            0.1,
+            vec![
+                egui::Event::PointerMoved(a),
+                button(a, true, egui::PointerButton::Primary, egui::Modifiers::NONE),
+            ],
+            egui::Modifiers::NONE,
+        );
+        frame(
+            &ctx,
+            &mut e,
+            0.2,
+            vec![egui::Event::PointerMoved(b)],
+            egui::Modifiers::NONE,
+        );
         assert!(matches!(e.drag, Some(Drag::PathMarquee(..))));
         assert_eq!(e.path_selection(), vec![1, 2]);
-        frame(&ctx, &mut e, 0.3, vec![button(b, false, egui::PointerButton::Primary, egui::Modifiers::NONE)], egui::Modifiers::NONE);
+        frame(
+            &ctx,
+            &mut e,
+            0.3,
+            vec![button(
+                b,
+                false,
+                egui::PointerButton::Primary,
+                egui::Modifiers::NONE,
+            )],
+            egui::Modifiers::NONE,
+        );
         assert_eq!(e.path_selection(), vec![1, 2]);
         assert!(e.drag.is_none());
         assert!(e.undo.is_empty());
@@ -4112,9 +4291,23 @@ mod tests {
     fn object_selection_add_toggle_clear_and_cancel_do_not_change_document() {
         let mut e = path_selection_fixture();
         e.select_paths(vec![1]);
-        e.press_with_shift(Point::new(250., 130.), Pos2::ZERO, false, false, true, false);
+        e.press_with_shift(
+            Point::new(250., 130.),
+            Pos2::ZERO,
+            false,
+            false,
+            true,
+            false,
+        );
         assert_eq!(e.path_selection(), vec![1, 2]);
-        e.press_with_shift(Point::new(130., 130.), Pos2::ZERO, false, false, true, false);
+        e.press_with_shift(
+            Point::new(130., 130.),
+            Pos2::ZERO,
+            false,
+            false,
+            true,
+            false,
+        );
         assert_eq!(e.path_selection(), vec![2]);
         e.transaction = Some(e.doc.clone());
         e.press_with_shift(Point::new(420., 80.), Pos2::ZERO, false, false, true, false);
@@ -4139,7 +4332,10 @@ mod tests {
         e.drag_with_modifiers(Point::new(170., 150.), Pos2::ZERO, false, false);
         e.commit();
         for i in [0, 1] {
-            assert_eq!(e.doc.strokes[i], before.strokes[i].transformed(kurbo::Affine::translate((40., 20.)), false));
+            assert_eq!(
+                e.doc.strokes[i],
+                before.strokes[i].transformed(kurbo::Affine::translate((40., 20.)), false)
+            );
         }
         assert_eq!(e.doc.strokes[2..], before.strokes[2..]);
         assert_eq!(e.undo.len(), 1);
@@ -4148,7 +4344,10 @@ mod tests {
         let old = e.doc.clone();
         e.delete();
         e.record(old);
-        assert_eq!(e.doc.strokes.iter().map(|s| s.id).collect::<Vec<_>>(), vec![3, 4]);
+        assert_eq!(
+            e.doc.strokes.iter().map(|s| s.id).collect::<Vec<_>>(),
+            vec![3, 4]
+        );
         e.undo();
         assert_eq!(e.doc, before);
     }
@@ -4162,8 +4361,15 @@ mod tests {
         let handle = Point::new(bounds.x1, bounds.y1);
         e.drag = e.transform_hit(handle);
         e.drag_with_modifiers(Point::new(460., 220.), Pos2::ZERO, false, false);
-        let matrix = kurbo::Affine::translate((100., 100.)) * kurbo::Affine::scale(2.) * kurbo::Affine::translate((-100., -100.));
-        for i in [0, 1] { assert_eq!(e.doc.strokes[i], before.strokes[i].transformed(matrix, true)); }
+        let matrix = kurbo::Affine::translate((100., 100.))
+            * kurbo::Affine::scale(2.)
+            * kurbo::Affine::translate((-100., -100.));
+        for i in [0, 1] {
+            assert_eq!(
+                e.doc.strokes[i],
+                before.strokes[i].transformed(matrix, true)
+            );
+        }
         e.cancel_drag();
         assert_eq!(e.doc, before);
         e.cache();
@@ -4171,8 +4377,15 @@ mod tests {
         let center = e.selection_bounds().unwrap().center();
         e.drag = Some(Drag::Rotate { center, angle: 0. });
         e.drag_with_modifiers(center + Vec2::new(0., 100.), Pos2::ZERO, false, false);
-        let matrix = kurbo::Affine::translate(center.to_vec2()) * kurbo::Affine::rotate(std::f64::consts::FRAC_PI_2) * kurbo::Affine::translate(-center.to_vec2());
-        for i in [0, 1] { assert_eq!(e.doc.strokes[i], before.strokes[i].transformed(matrix, true)); }
+        let matrix = kurbo::Affine::translate(center.to_vec2())
+            * kurbo::Affine::rotate(std::f64::consts::FRAC_PI_2)
+            * kurbo::Affine::translate(-center.to_vec2());
+        for i in [0, 1] {
+            assert_eq!(
+                e.doc.strokes[i],
+                before.strokes[i].transformed(matrix, true)
+            );
+        }
         assert!((e.selection_rotation() - std::f64::consts::FRAC_PI_2).abs() < 1e-8);
         assert_eq!(e.doc.strokes[2..], before.strokes[2..]);
         e.commit();
@@ -4180,19 +4393,167 @@ mod tests {
         assert_eq!(e.doc, before);
     }
     #[test]
-    fn marquee_uses_painted_geometry_instead_of_only_bounds() {
-        let tri = [Point::new(0., 0.), Point::new(100., 0.), Point::new(0., 100.)];
-        assert!(!triangle_intersects_rect(tri, kurbo::Rect::new(80., 80., 90., 90.)));
-        assert!(triangle_intersects_rect(tri, kurbo::Rect::new(10., 10., 20., 20.)));
-        assert!(triangle_intersects_rect(tri, kurbo::Rect::new(40., -10., 60., 110.)));
+    fn shift_at_transform_handle_preserves_group_and_constrains_scale() {
         let mut e = path_selection_fixture();
-        let ring = vec![Point::new(100., 100.), Point::new(160., 100.), Point::new(160., 160.), Point::new(100., 160.)];
-        let hole = vec![Point::new(120., 120.), Point::new(120., 140.), Point::new(140., 140.), Point::new(140., 120.)];
+        e.select_paths(vec![1, 2]);
+        e.transaction = Some(e.doc.clone());
+        let bounds = e.selection_bounds().unwrap();
+        e.press_with_shift(
+            Point::new(bounds.x1, bounds.y1),
+            Pos2::ZERO,
+            false,
+            false,
+            true,
+            false,
+        );
+        assert!(matches!(e.drag, Some(Drag::Scale { .. })));
+        e.drag_with_modifiers(Point::new(460., 190.), Pos2::ZERO, false, true);
+        assert_eq!(e.path_selection(), vec![1, 2]);
+        e.cache();
+        let scaled = e.selection_bounds().unwrap();
+        assert!((scaled.width() / bounds.width() - scaled.height() / bounds.height()).abs() < 1e-8);
+    }
+    #[test]
+    fn effect_expansion_preserves_svg_opacity_and_does_not_apply_effect_twice() {
+        use super::super::appearance::{Graph, Kind};
+        let mut e = path_selection_fixture();
+        e.doc.strokes.truncate(1);
+        e.select_paths(vec![1]);
+        let mut graph = Graph::rough();
+        let opacity = graph.add(Kind::Opacity, [420., 90.]).unwrap();
+        graph.node_mut(opacity).unwrap().opacity = 0.4;
+        graph.connect(3, opacity, 0).unwrap();
+        graph.connect(opacity, graph.output, 0).unwrap();
+        e.stroke_mut().unwrap().appearance = Some(graph);
+        let before = e.doc.clone();
+        let svg = outline::svg(&e.doc).unwrap();
+        e.expand_selected();
+        assert!(e.stroke().unwrap().contours.is_some());
+        assert!(e.stroke().unwrap().nodes.is_empty());
+        assert!(!e
+            .stroke()
+            .unwrap()
+            .appearance
+            .as_ref()
+            .unwrap()
+            .nodes
+            .iter()
+            .any(|n| n.kind == Kind::Rough));
+        assert_eq!(outline::svg(&e.doc).unwrap(), svg);
+        e.record(before.clone());
+        e.undo();
+        assert_eq!(e.doc, before);
+    }
+    #[test]
+    fn boolean_bakes_node_transforms_once_and_keeps_back_layer_alpha() {
+        use super::super::appearance::{Graph, Kind};
+        let mut e = path_selection_fixture();
+        let mut graph = Graph::default();
+        let transform = graph.add(Kind::Transform, [200., 90.]).unwrap();
+        graph.node_mut(transform).unwrap().translation = [30., 0.];
+        let opacity = graph.add(Kind::Opacity, [400., 90.]).unwrap();
+        graph.node_mut(opacity).unwrap().opacity = 0.5;
+        for (from, to) in [
+            (1, transform),
+            (transform, opacity),
+            (opacity, graph.output),
+        ] {
+            graph.connect(from, to, 0).unwrap();
+        }
+        e.doc.strokes[0].appearance = Some(graph);
+        e.boolean_selection = vec![1, 2];
+        let expected = outline::boolean_contours(
+            &outline::paint(&e.doc.strokes[0]).unwrap().contours,
+            &outline::paint(&e.doc.strokes[1]).unwrap().contours,
+            i_overlay::core::overlay_rule::OverlayRule::Union,
+        );
+        e.combine_selected(i_overlay::core::overlay_rule::OverlayRule::Union);
+        let rendered = outline::paint(e.stroke().unwrap()).unwrap();
+        assert_eq!(rendered.contours, expected);
+        assert_eq!(rendered.layers[0].opacity, 0.5);
+        assert!(!e
+            .stroke()
+            .unwrap()
+            .appearance
+            .as_ref()
+            .unwrap()
+            .nodes
+            .iter()
+            .any(|n| n.kind == Kind::Transform));
+    }
+    #[test]
+    fn graph_editor_opens_for_primary_path_and_is_part_of_document_undo() {
+        let (ctx, mut e) = setup();
+        let before = e.doc.clone();
+        e.open_appearance_editor();
+        assert!(e.appearance_open);
+        assert_eq!(e.appearance_target, e.selected);
+        assert!(e.stroke().unwrap().appearance.is_some());
+        e.record(before.clone());
+        // Canvas shortcuts must not delete a path while editing graph nodes.
+        let event = egui::Event::Key {
+            key: egui::Key::Delete,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let _ = ctx.run(
+            egui::RawInput {
+                events: vec![event],
+                ..Default::default()
+            },
+            |ctx| e.shortcuts(ctx),
+        );
+        assert_eq!(e.doc.strokes.len(), before.strokes.len());
+        e.undo();
+        assert_eq!(e.doc, before);
+        e.appearance_window(&ctx);
+        assert!(!e.appearance_open);
+    }
+    #[test]
+    fn marquee_uses_painted_geometry_instead_of_only_bounds() {
+        let tri = [
+            Point::new(0., 0.),
+            Point::new(100., 0.),
+            Point::new(0., 100.),
+        ];
+        assert!(!triangle_intersects_rect(
+            tri,
+            kurbo::Rect::new(80., 80., 90., 90.)
+        ));
+        assert!(triangle_intersects_rect(
+            tri,
+            kurbo::Rect::new(10., 10., 20., 20.)
+        ));
+        assert!(triangle_intersects_rect(
+            tri,
+            kurbo::Rect::new(40., -10., 60., 110.)
+        ));
+        let mut e = path_selection_fixture();
+        let ring = vec![
+            Point::new(100., 100.),
+            Point::new(160., 100.),
+            Point::new(160., 160.),
+            Point::new(100., 160.),
+        ];
+        let hole = vec![
+            Point::new(120., 120.),
+            Point::new(120., 140.),
+            Point::new(140., 140.),
+            Point::new(140., 120.),
+        ];
         e.doc.strokes[0].contours = Some(vec![ring, hole]);
         e.cache();
-        assert!(e.paths_in_rect(kurbo::Rect::new(125., 125., 135., 135.)).is_empty());
-        assert_eq!(e.paths_in_rect(kurbo::Rect::new(90., 125., 110., 135.)), vec![1]);
+        assert!(e
+            .paths_in_rect(kurbo::Rect::new(125., 125., 135., 135.))
+            .is_empty());
+        assert_eq!(
+            e.paths_in_rect(kurbo::Rect::new(90., 125., 110., 135.)),
+            vec![1]
+        );
     }
+
     fn command_key(key: egui::Key) -> egui::Event {
         egui::Event::Key {
             key,
