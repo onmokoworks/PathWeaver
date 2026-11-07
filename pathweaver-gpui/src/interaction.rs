@@ -32,6 +32,11 @@ impl Workspace {
         } else {
             self.session.cancel();
         }
+        if let Some(selection) = self.node_placement_selection.take()
+            && !commit
+        {
+            self.node_selection = selection;
+        }
         self.drag = Drag::None;
         self.node_move_modal = false;
         self.numeric_before = None;

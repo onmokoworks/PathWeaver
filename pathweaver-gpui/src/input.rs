@@ -4,11 +4,11 @@ use crate::theme::{Role, color as ui_color};
 use std::ops::Range;
 
 use gpui::{
-    App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
-    EntityInputHandler, FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine,
-    SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div, fill, hsla,
-    point, prelude::*, px, relative, rgb, rgba, size,
+    App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, ElementId, ElementInputHandler,
+    Entity, EntityInputHandler, FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
+    ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div,
+    fill, hsla, point, prelude::*, px, relative, rgb, rgba, size,
 };
 use unicode_segmentation::*;
 
@@ -29,8 +29,65 @@ actions!(
         Cut,
         Copy,
         Quit,
+        Undo,
+        Redo,
     ]
 );
+
+#[derive(Clone, Debug, PartialEq)]
+struct TextState {
+    content: SharedString,
+    selected_range: Range<usize>,
+    selection_reversed: bool,
+}
+
+#[derive(Default)]
+struct TextHistory {
+    undo: Vec<TextState>,
+    redo: Vec<TextState>,
+}
+impl TextHistory {
+    fn record(&mut self, before: TextState) {
+        self.undo.push(before);
+        self.undo.drain(..self.undo.len().saturating_sub(100));
+        self.redo.clear();
+    }
+    fn record_replacement(
+        &mut self,
+        before: TextState,
+        range: Range<usize>,
+        text: &str,
+        composing: bool,
+    ) {
+        if !composing && before.content[range] != *text {
+            self.record(before);
+        }
+    }
+    fn step(&mut self, current: TextState, redo: bool) -> Option<TextState> {
+        let (from, to) = if redo {
+            (&mut self.redo, &mut self.undo)
+        } else {
+            (&mut self.undo, &mut self.redo)
+        };
+        let previous = from.pop()?;
+        to.push(current);
+        Some(previous)
+    }
+}
+
+// Keep the active selection endpoint in view, including space for its caret.
+fn scroll_for_caret(scroll: Pixels, caret: Pixels, width: Pixels, text_width: Pixels) -> Pixels {
+    let visible = (width - px(2.)).max(px(0.));
+    let max_scroll = (text_width - visible).max(px(0.));
+    let scroll = scroll.clamp(px(0.), max_scroll);
+    if caret < scroll {
+        caret.max(px(0.))
+    } else if caret > scroll + visible {
+        (caret - visible).min(max_scroll)
+    } else {
+        scroll
+    }
+}
 
 pub struct TextInput {
     focus_handle: FocusHandle,
@@ -42,9 +99,33 @@ pub struct TextInput {
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
+    scroll_x: Pixels,
+    history: TextHistory,
 }
 
 impl TextInput {
+    fn state(&self) -> TextState {
+        TextState {
+            content: self.content.clone(),
+            selected_range: self.selected_range.clone(),
+            selection_reversed: self.selection_reversed,
+        }
+    }
+    fn history_step(&mut self, redo: bool, cx: &mut Context<Self>) {
+        if let Some(state) = self.history.step(self.state(), redo) {
+            self.content = state.content;
+            self.selected_range = state.selected_range;
+            self.selection_reversed = state.selection_reversed;
+            self.marked_range = None;
+            cx.notify();
+        }
+    }
+    fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
+        self.history_step(false, cx);
+    }
+    fn redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
+        self.history_step(true, cx);
+    }
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             self.move_to(self.previous_boundary(self.cursor_offset()), cx);
@@ -83,17 +164,21 @@ impl TextInput {
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_range.is_empty() {
-            self.select_to(self.previous_boundary(self.cursor_offset()), cx)
-        }
-        self.replace_text_in_range(None, "", window, cx)
+        let range = if self.selected_range.is_empty() {
+            self.previous_boundary(self.cursor_offset())..self.cursor_offset()
+        } else {
+            self.selected_range.clone()
+        };
+        self.replace_text_in_range(Some(self.range_to_utf16(&range)), "", window, cx)
     }
 
     fn delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_range.is_empty() {
-            self.select_to(self.next_boundary(self.cursor_offset()), cx)
-        }
-        self.replace_text_in_range(None, "", window, cx)
+        let range = if self.selected_range.is_empty() {
+            self.cursor_offset()..self.next_boundary(self.cursor_offset())
+        } else {
+            self.selected_range.clone()
+        };
+        self.replace_text_in_range(Some(self.range_to_utf16(&range)), "", window, cx)
     }
 
     fn on_mouse_down(
@@ -155,6 +240,7 @@ impl TextInput {
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
+        self.selection_reversed = false;
         cx.notify()
     }
 
@@ -181,7 +267,7 @@ impl TextInput {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
-        line.closest_index_for_x(position.x - bounds.left())
+        line.closest_index_for_x(position.x - bounds.left() + self.scroll_x)
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -292,9 +378,18 @@ impl EntityInputHandler for TextInput {
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
 
+        // One IME composition is one history entry, even when marked text updates
+        // repeatedly before it is committed.
+        self.history.record_replacement(
+            self.state(),
+            range.clone(),
+            new_text,
+            self.marked_range.is_some(),
+        );
         self.content =
             (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
                 .into();
+        self.selection_reversed = false;
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         self.marked_range.take();
         cx.notify();
@@ -314,9 +409,18 @@ impl EntityInputHandler for TextInput {
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
 
+        // One IME composition is one history entry, even when marked text updates
+        // repeatedly before it is committed.
+        self.history.record_replacement(
+            self.state(),
+            range.clone(),
+            new_text,
+            self.marked_range.is_some(),
+        );
         self.content =
             (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
                 .into();
+        self.selection_reversed = false;
         if !new_text.is_empty() {
             self.marked_range = Some(range.start..range.start + new_text.len());
         } else {
@@ -342,11 +446,13 @@ impl EntityInputHandler for TextInput {
         let range = self.range_from_utf16(&range_utf16);
         Some(Bounds::from_corners(
             point(
-                bounds.left() + last_layout.x_for_index(range.start),
+                (bounds.left() + last_layout.x_for_index(range.start) - self.scroll_x)
+                    .clamp(bounds.left(), bounds.right()),
                 bounds.top(),
             ),
             point(
-                bounds.left() + last_layout.x_for_index(range.end),
+                (bounds.left() + last_layout.x_for_index(range.end) - self.scroll_x)
+                    .clamp(bounds.left(), bounds.right()),
                 bounds.bottom(),
             ),
         ))
@@ -364,7 +470,7 @@ impl EntityInputHandler for TextInput {
         }
         let last_layout = self.last_layout.as_ref()?;
 
-        let utf8_index = last_layout.index_for_x(local.x)?;
+        let utf8_index = last_layout.index_for_x(local.x + self.scroll_x)?;
         Some(self.offset_to_utf16(utf8_index))
     }
 }
@@ -377,6 +483,7 @@ struct PrepaintState {
     line: Option<ShapedLine>,
     cursor: Option<PaintQuad>,
     selection: Option<PaintQuad>,
+    scroll_x: Pixels,
 }
 
 impl IntoElement for TextElement {
@@ -474,12 +581,14 @@ impl Element for TextElement {
             .shape_line(display_text, font_size, &runs, None);
 
         let cursor_pos = line.x_for_index(cursor);
+        let scroll_x = scroll_for_caret(input.scroll_x, cursor_pos, bounds.size.width, line.width);
+        let origin_x = bounds.left() - scroll_x;
         let (selection, cursor) = if selected_range.is_empty() {
             (
                 None,
                 Some(fill(
                     Bounds::new(
-                        point(bounds.left() + cursor_pos, bounds.top()),
+                        point(origin_x + cursor_pos, bounds.top()),
                         size(px(2.), bounds.bottom() - bounds.top()),
                     ),
                     rgb(ui_color(Role::Accent)),
@@ -490,11 +599,11 @@ impl Element for TextElement {
                 Some(fill(
                     Bounds::from_corners(
                         point(
-                            bounds.left() + line.x_for_index(selected_range.start),
+                            origin_x + line.x_for_index(selected_range.start),
                             bounds.top(),
                         ),
                         point(
-                            bounds.left() + line.x_for_index(selected_range.end),
+                            origin_x + line.x_for_index(selected_range.end),
                             bounds.bottom(),
                         ),
                     ),
@@ -507,6 +616,7 @@ impl Element for TextElement {
             line: Some(line),
             cursor,
             selection,
+            scroll_x,
         }
     }
 
@@ -526,22 +636,29 @@ impl Element for TextElement {
             ElementInputHandler::new(bounds, self.input.clone()),
             cx,
         );
-        if let Some(selection) = prepaint.selection.take() {
-            window.paint_quad(selection)
-        }
         let line = prepaint.line.take().unwrap();
-        line.paint(bounds.origin, window.line_height(), window, cx)
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            if let Some(selection) = prepaint.selection.take() {
+                window.paint_quad(selection)
+            }
+            line.paint(
+                point(bounds.left() - prepaint.scroll_x, bounds.top()),
+                window.line_height(),
+                window,
+                cx,
+            )
             .unwrap();
-
-        if focus_handle.is_focused(window)
-            && let Some(cursor) = prepaint.cursor.take()
-        {
-            window.paint_quad(cursor);
-        }
+            if focus_handle.is_focused(window)
+                && let Some(cursor) = prepaint.cursor.take()
+            {
+                window.paint_quad(cursor);
+            }
+        });
 
         self.input.update(cx, |input, _cx| {
             input.last_layout = Some(line);
             input.last_bounds = Some(bounds);
+            input.scroll_x = prepaint.scroll_x;
         });
     }
 }
@@ -550,6 +667,8 @@ impl Render for TextInput {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
+            .min_w_0()
+            .overflow_hidden()
             .key_context("TextInput")
             .track_focus(&self.focus_handle(cx))
             .cursor(CursorStyle::IBeam)
@@ -566,6 +685,8 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::undo))
+            .on_action(cx.listener(Self::redo))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -578,7 +699,8 @@ impl Render for TextInput {
                 div()
                     .h(px(24.))
                     .w_full()
-                    .p(px(4.))
+                    .px(px(4.))
+                    .py(px(1.))
                     .bg(rgb(ui_color(Role::Input)))
                     .child(TextElement { input: cx.entity() }),
             )
@@ -606,9 +728,14 @@ impl TextInput {
             last_layout: None,
             last_bounds: None,
             is_selecting: false,
+            scroll_x: px(0.),
+            history: TextHistory::default(),
         }
     }
     pub fn set(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.history = TextHistory::default();
+        self.scroll_x = px(0.);
+        self.is_selecting = false;
         self.content = text.into();
         self.selected_range = 0..self.content.len();
         self.marked_range = None;
@@ -631,6 +758,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-v", Paste, Some("TextInput")),
         KeyBinding::new("cmd-c", Copy, Some("TextInput")),
         KeyBinding::new("cmd-x", Cut, Some("TextInput")),
+        KeyBinding::new("cmd-z", Undo, Some("TextInput")),
+        KeyBinding::new("cmd-shift-z", Redo, Some("TextInput")),
+        KeyBinding::new("cmd-left", Home, Some("TextInput")),
+        KeyBinding::new("cmd-right", End, Some("TextInput")),
         KeyBinding::new("home", Home, Some("TextInput")),
         KeyBinding::new("end", End, Some("TextInput")),
         KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, Some("TextInput")),
@@ -649,7 +780,96 @@ fn utf8_offset(text: &str, offset: usize) -> usize {
 }
 #[cfg(test)]
 mod tests {
-    use super::utf8_offset;
+    use super::*;
+    #[test]
+    fn horizontal_scroll_tracks_caret_and_resets_when_text_shrinks() {
+        assert_eq!(
+            scroll_for_caret(px(0.), px(240.), px(100.), px(240.)),
+            px(142.)
+        );
+        assert_eq!(
+            scroll_for_caret(px(142.), px(170.), px(100.), px(240.)),
+            px(142.)
+        );
+        assert_eq!(
+            scroll_for_caret(px(142.), px(0.), px(100.), px(240.)),
+            px(0.)
+        );
+        assert_eq!(
+            scroll_for_caret(px(142.), px(20.), px(100.), px(20.)),
+            px(0.)
+        );
+        assert_eq!(
+            scroll_for_caret(px(0.), px(240.), px(400.), px(240.)),
+            px(0.)
+        );
+        assert_eq!(scroll_for_caret(px(0.), px(20.), px(0.), px(20.)), px(20.));
+    }
+    #[test]
+    fn text_history_restores_unicode_selection_and_discards_redo_branch() {
+        let initial = TextState {
+            content: "紙😀質感".into(),
+            selected_range: 3..7,
+            selection_reversed: true,
+        };
+        let replaced = TextState {
+            content: "紙A質感".into(),
+            selected_range: 4..4,
+            selection_reversed: false,
+        };
+        let mut history = TextHistory::default();
+        history.record(initial.clone());
+        assert_eq!(history.step(replaced.clone(), false), Some(initial.clone()));
+        assert_eq!(history.step(initial.clone(), true), Some(replaced.clone()));
+        assert_eq!(history.step(replaced.clone(), false), Some(initial.clone()));
+        history.record(initial);
+        assert!(history.step(replaced, true).is_none());
+    }
+    #[test]
+    fn composition_updates_and_commit_form_one_undo_step() {
+        let initial = TextState {
+            content: "prefix".into(),
+            selected_range: 6..6,
+            selection_reversed: false,
+        };
+        let mut history = TextHistory::default();
+        history.record_replacement(initial.clone(), 6..6, "", false);
+        assert!(history.undo.is_empty());
+        history.record_replacement(initial.clone(), 6..6, "か", false);
+        let composing = TextState {
+            content: "prefixか".into(),
+            selected_range: 9..9,
+            selection_reversed: false,
+        };
+        history.record_replacement(composing, 6..9, "漢字", true);
+        let committed = TextState {
+            content: "prefix漢字".into(),
+            selected_range: 12..12,
+            selection_reversed: false,
+        };
+        history.record_replacement(committed.clone(), 6..12, "漢字", true);
+        assert_eq!(history.undo.len(), 1);
+        assert_eq!(
+            history.step(committed.clone(), false),
+            Some(initial.clone())
+        );
+        assert_eq!(history.step(initial, true), Some(committed));
+    }
+    #[test]
+    fn text_history_is_bounded_and_does_not_add_noop_steps() {
+        let state = TextState {
+            content: "value".into(),
+            selected_range: 5..5,
+            selection_reversed: false,
+        };
+        let mut history = TextHistory::default();
+        assert!(history.step(state.clone(), false).is_none());
+        assert!(history.redo.is_empty());
+        for _ in 0..120 {
+            history.record(state.clone());
+        }
+        assert_eq!(history.undo.len(), 100);
+    }
     #[test]
     fn composition_offsets_are_relative_to_inserted_text_and_unicode_safe() {
         let text = "紙😀質感";

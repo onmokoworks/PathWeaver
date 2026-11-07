@@ -35,6 +35,35 @@ const KINDS: [Kind; 23] = [
     Kind::Math,
     Kind::Measure,
 ];
+fn matching_kinds(query: &str) -> Vec<Kind> {
+    let query = query.trim().to_lowercase();
+    KINDS
+        .into_iter()
+        .filter(|kind| {
+            kind.label().to_lowercase().contains(&query)
+                || format!("{kind:?}").to_lowercase().contains(&query)
+        })
+        .collect()
+}
+fn popup_origin(
+    anchor: Point<Pixels>,
+    popup: Size<Pixels>,
+    viewport: Size<Pixels>,
+) -> Point<Pixels> {
+    point(
+        anchor
+            .x
+            .max(px(8.))
+            .min((viewport.width - popup.width - px(8.)).max(px(8.))),
+        anchor
+            .y
+            .max(px(8.))
+            .min((viewport.height - popup.height - px(8.)).max(px(8.))),
+    )
+}
+fn add_unconnected(graph: &mut Graph, kind: Kind, at: KPoint) -> Result<u64, String> {
+    graph.add(kind, [at.x as f32, at.y as f32])
+}
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Socket {
     Shape(usize),
@@ -198,13 +227,11 @@ fn duplicate_selection(g: &mut Graph, ids: &[u64]) -> Result<Vec<u64>, String> {
     let mut copy_graph = g.clone();
     let mut map = std::collections::HashMap::new();
     for n in &originals {
-        let id = copy_graph.add(n.kind, [n.position[0] + 30., n.position[1] + 30.])?;
+        let id = copy_graph.add(n.kind, n.position)?;
         map.insert(n.id, id);
     }
     for mut copy in originals {
         copy.id = map[&copy.id];
-        copy.position[0] += 30.;
-        copy.position[1] += 30.;
         for source in copy.inputs.iter_mut().flatten() {
             *source = *map.get(source).unwrap_or(source);
         }
@@ -295,6 +322,7 @@ impl Workspace {
         }
         self.focus.focus(w);
         self.node_region = true;
+        self.active_nodes = true;
         let p = self.node_view.world(e.position, self.node_bounds.get());
         if e.button == MouseButton::Middle {
             self.drag = Drag::Pan {
@@ -578,9 +606,7 @@ impl Workspace {
         let k = &e.keystroke;
         match k.key.as_str() {
             "a" if k.modifiers.shift => {
-                self.add_open = !self.add_open;
-                self.library_open = false;
-                self.search.clear();
+                self.open_node_add(w, cx);
             }
             "n" => self.inspector = !self.inspector,
             "home" | "f" => self.fit_nodes(),
@@ -599,31 +625,9 @@ impl Workspace {
                     add: k.modifiers.shift,
                 };
             }
-            "d" if k.modifiers.shift => self.duplicate_nodes(),
-            "m" => {
-                let ids = self.node_selection.clone();
-                self.session.edit(|s| {
-                    if let Some(g) = s.graph_mut() {
-                        for n in &mut g.nodes {
-                            if ids.contains(&n.id) && !matches!(n.kind, Kind::Input | Kind::Output)
-                            {
-                                n.bypass = !n.bypass;
-                            }
-                        }
-                    }
-                });
-            }
-            "x" | "backspace" | "delete" => {
-                let ids = self.node_selection.clone();
-                self.session.edit(|s| {
-                    if let Some(g) = s.graph_mut() {
-                        for id in ids {
-                            g.remove(id);
-                        }
-                    }
-                });
-                self.node_selection.clear();
-            }
+            "d" if k.modifiers.shift => self.duplicate_nodes(cx),
+            "m" => self.toggle_nodes_bypass(),
+            "x" | "backspace" | "delete" => self.delete_nodes(),
             "f2" => {
                 if let Some(n) = self
                     .node_selection
@@ -637,61 +641,140 @@ impl Workspace {
         }
         self.refresh(cx);
     }
-    fn duplicate_nodes(&mut self) {
+    pub fn toggle_nodes_bypass(&mut self) {
         let ids = self.node_selection.clone();
-        self.session.begin();
-        if let Some(g) = self.session.graph_mut() {
-            match duplicate_selection(g, &ids) {
-                Ok(ids) => self.node_selection = ids,
-                Err(error) => self.status = error,
-            }
-        }
-        self.session.commit();
-    }
-    fn add_node(&mut self, kind: Kind, cx: &mut Context<Self>) {
-        self.session.begin();
-        let source = self.node_selection.last().copied();
-        let mut new_id = None;
-        if let Some(g) = self.session.graph_mut() {
-            let source = source
-                .filter(|id| g.node(*id).is_some_and(|n| n.kind != Kind::Output))
-                .unwrap_or(1);
-            let pos = g
-                .node(source)
-                .map(|n| [n.position[0] + 230., n.position[1]])
-                .unwrap_or([250., 100.]);
-            match g.add(kind, pos) {
-                Ok(id) => {
-                    new_id = Some(id);
-                    if kind.inputs() > 0 && g.node(source).is_some_and(|n| !n.kind.is_number()) {
-                        let destinations: Vec<_> = g
-                            .nodes
-                            .iter()
-                            .filter(|n| n.id != id)
-                            .flat_map(|n| {
-                                n.inputs.iter().enumerate().filter_map(move |(port, from)| {
-                                    (*from == Some(source)).then_some((n.id, port))
-                                })
-                            })
-                            .collect();
-                        let _ = g.connect(source, id, 0);
-                        if !kind.is_number() {
-                            for (to, port) in destinations {
-                                let _ = g.connect(id, to, port);
-                            }
-                        }
+        self.session.edit(|s| {
+            if let Some(g) = s.graph_mut() {
+                for n in &mut g.nodes {
+                    if ids.contains(&n.id) && !matches!(n.kind, Kind::Input | Kind::Output) {
+                        n.bypass = !n.bypass;
                     }
                 }
-                Err(e) => self.status = e,
+            }
+        });
+    }
+    pub fn delete_nodes(&mut self) {
+        let ids = self.node_selection.clone();
+        self.session.edit(|s| {
+            if let Some(g) = s.graph_mut() {
+                for id in ids {
+                    g.remove(id);
+                }
+            }
+        });
+        self.node_selection.clear();
+    }
+    pub fn duplicate_nodes(&mut self, cx: &mut Context<Self>) {
+        let ids = self.node_selection.clone();
+        self.session.begin();
+        let result = self
+            .session
+            .graph_mut()
+            .map(|g| duplicate_selection(g, &ids));
+        match result {
+            Some(Ok(new_ids)) if !new_ids.is_empty() => {
+                self.node_placement_selection = Some(ids);
+                self.node_selection = new_ids;
+                self.node_move_modal = true;
+                self.drag = Drag::Nodes {
+                    last: self.node_view.world(self.cursor, self.node_bounds.get()),
+                };
+            }
+            Some(Err(error)) => {
+                self.session.cancel();
+                self.status = error;
+            }
+            _ => self.session.cancel(),
+        }
+        self.refresh(cx);
+    }
+    fn add_node(&mut self, kind: Kind, w: &mut Window, cx: &mut Context<Self>) {
+        let at = self.node_view.world(self.cursor, self.node_bounds.get());
+        self.session.begin();
+        let result = self
+            .session
+            .graph_mut()
+            .map(|g| add_unconnected(g, kind, at));
+        match result {
+            Some(Ok(id)) => {
+                self.node_placement_selection = Some(self.node_selection.clone());
+                self.node_selection = vec![id];
+                self.node_move_modal = true;
+                self.drag = Drag::Nodes { last: at };
+                self.status = "クリック／Enter：配置　Esc／右クリック：取消".into();
+            }
+            Some(Err(error)) => {
+                self.session.cancel();
+                self.status = error;
+            }
+            _ => self.session.cancel(),
+        }
+        self.close_node_add(w, cx);
+        self.refresh(cx);
+    }
+    pub fn open_node_add(&mut self, w: &mut Window, cx: &mut Context<Self>) {
+        if self.session.graph().is_none() {
+            self.status = "パスを選択し、ノードを有効にしてください".into();
+            cx.notify();
+            return;
+        }
+        if self.editing.is_some() {
+            self.commit_edit(w, cx);
+            if self.editing.is_some() {
+                return;
             }
         }
-        if let Some(id) = new_id {
-            self.node_selection = vec![id];
-        }
-        self.session.commit();
+        self.finish_interaction(true, cx);
+        self.nodes_open = true;
+        self.add_open = true;
+        self.active_nodes = true;
+        self.library_open = false;
+        self.add_anchor = self.cursor;
+        self.add_index = 0;
+        self.search.clear();
+        self.add_input
+            .update(cx, |i, cx| i.set(String::new(), w, cx));
+        cx.defer_in(w, |s, w, cx| {
+            if s.add_open {
+                s.add_input.focus_handle(cx).focus(w);
+            }
+        });
+        cx.notify();
+    }
+    fn close_node_add(&mut self, w: &mut Window, cx: &mut Context<Self>) {
         self.add_open = false;
-        self.fit_nodes();
-        self.refresh(cx);
+        self.focus.focus(w);
+        cx.notify();
+    }
+    pub fn node_add_key(
+        &mut self,
+        e: &KeyDownEvent,
+        w: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.add_open {
+            return false;
+        }
+        let k = &e.keystroke;
+        let results = matching_kinds(&self.search);
+        if self.add_input.read(cx).is_composing() {
+            return true;
+        }
+        match k.key.as_str() {
+            "escape" => self.close_node_add(w, cx),
+            "down" if !results.is_empty() => self.add_index = (self.add_index + 1) % results.len(),
+            "up" if !results.is_empty() => {
+                self.add_index = (self.add_index + results.len() - 1) % results.len()
+            }
+            "enter" => {
+                if let Some(kind) = results.get(self.add_index) {
+                    self.add_node(*kind, w, cx);
+                }
+            }
+            _ => {}
+        }
+        cx.notify();
+        true
     }
     fn preset(&self) -> Result<Preset, String> {
         Preset::new(
@@ -990,42 +1073,66 @@ impl Workspace {
         {
             let id = n.id;
             let label = n.label.clone();
-            col = col
-                .child(
-                    div()
-                        .text_color(rgb(ui_color(Role::Muted)))
-                        .child(n.kind.label()),
-                )
-                .child(self.button_with_id(
-                    ("node-name", id),
-                    if label.is_empty() {
-                        "名前を付ける".into()
-                    } else {
-                        label.clone()
-                    },
-                    false,
-                    cx,
-                    move |s, w, cx| s.start_node_edit(Editing::NodeName, id, label.clone(), w, cx),
-                ));
+            let mut header = div().flex().items_center().gap_1().child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(rgb(ui_color(Role::Muted)))
+                    .child(n.kind.label()),
+            );
             if !matches!(n.kind, Kind::Input | Kind::Output) {
-                col = col.child(self.button(
-                    if n.bypass {
-                        "無効（M）"
-                    } else {
-                        "有効（M）"
-                    },
-                    !n.bypass,
-                    cx,
-                    move |s, _, cx| {
-                        s.session.edit(|s| {
-                            if let Some(n) = s.graph_mut().and_then(|g| g.node_mut(id)) {
-                                n.bypass = !n.bypass;
-                            }
-                        });
-                        s.refresh(cx);
-                    },
-                ));
+                header = header
+                    .child(self.icon_button(
+                        ("node-bypass", id),
+                        "power",
+                        if n.bypass {
+                            "このノードを有効にする（M）"
+                        } else {
+                            "このノードを無効にする（M）"
+                        },
+                        !n.bypass,
+                        cx,
+                        move |s, _, cx| {
+                            s.session.edit(|s| {
+                                if let Some(n) = s.graph_mut().and_then(|g| g.node_mut(id)) {
+                                    n.bypass = !n.bypass;
+                                }
+                            });
+                            s.refresh(cx);
+                        },
+                    ))
+                    .child(self.icon_button(
+                        "inspector-duplicate-nodes",
+                        "copy",
+                        "選択ノードを複製（Shift+D）",
+                        false,
+                        cx,
+                        |s, _, cx| s.duplicate_nodes(cx),
+                    ))
+                    .child(self.icon_button(
+                        "inspector-delete-nodes",
+                        "trash",
+                        "選択ノードを削除（Delete）",
+                        false,
+                        cx,
+                        |s, _, cx| {
+                            s.delete_nodes();
+                            s.refresh(cx);
+                        },
+                    ));
             }
+            col = col.child(header).child(self.button_with_id(
+                ("node-name", id),
+                if label.is_empty() {
+                    "名前を付ける".into()
+                } else {
+                    label.clone()
+                },
+                false,
+                cx,
+                move |s, w, cx| s.start_node_edit(Editing::NodeName, id, label.clone(), w, cx),
+            ));
             for spec in n.parameters() {
                 let p = spec.key;
                 let bound = n.bindings.iter().any(|(k, _)| *k == p);
@@ -1215,44 +1322,145 @@ impl Workspace {
         }
         col.into_any_element()
     }
-    fn add_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut col = div()
-            .id("add-nodes")
-            .w(px(205.))
+    pub fn node_add_popup(&self, w: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let matches = matching_kinds(&self.search);
+        let visible = matches.len().clamp(1, 8);
+        let popup_size = size(px(270.), px(90. + visible as f32 * 28.));
+        let origin = popup_origin(self.add_anchor, popup_size, w.viewport_size());
+        let mut list = div()
+            .h(px(visible as f32 * 28.))
             .flex_shrink_0()
-            .h_full()
-            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap_0();
+        if matches.is_empty() {
+            list = list.child(
+                div()
+                    .h(px(28.))
+                    .px_2()
+                    .text_color(rgb(ui_color(Role::Muted)))
+                    .child("一致するノードがありません"),
+            );
+        }
+        let start = self.add_index.saturating_sub(7);
+        for (index, kind) in matches.iter().copied().enumerate().skip(start).take(8) {
+            list = list.child(
+                div()
+                    .id(("node-add-result", index))
+                    .h(px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .rounded(px(3.))
+                    .cursor_pointer()
+                    .bg(rgb(ui_color(if index == self.add_index {
+                        Role::Selected
+                    } else {
+                        Role::Surface
+                    })))
+                    .text_color(rgb(ui_color(if index == self.add_index {
+                        Role::OnAccent
+                    } else {
+                        Role::Text
+                    })))
+                    .hover(|style| {
+                        style
+                            .bg(rgb(ui_color(Role::Hover)))
+                            .text_color(rgb(ui_color(Role::Text)))
+                    })
+                    .child(kind.label())
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |s, _, w, cx| {
+                            cx.stop_propagation();
+                            s.add_node(kind, w, cx);
+                        }),
+                    ),
+            );
+        }
+        let popup = div()
+            .id("node-add-popup")
+            .absolute()
+            .left(origin.x)
+            .top(origin.y)
+            .w(popup_size.width)
+            .h(popup_size.height)
             .p_2()
             .flex()
             .flex_col()
             .gap_1()
+            .rounded(px(6.))
+            .border_1()
+            .border_color(rgb(ui_color(Role::Border)))
             .bg(rgb(ui_color(Role::Surface)))
-            .child(self.button(
-                format!(
-                    "検索：{}",
-                    if self.search.is_empty() {
-                        "すべて"
-                    } else {
-                        &self.search
+            .shadow_lg()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+            .on_scroll_wheel(cx.listener(|s, e: &ScrollWheelEvent, _, cx| {
+                cx.stop_propagation();
+                let count = matching_kinds(&s.search).len();
+                if count > 0 {
+                    let delta = e.delta.pixel_delta(px(28.)).y;
+                    if delta < px(0.) {
+                        s.add_index = (s.add_index + 1).min(count - 1);
                     }
-                ),
-                false,
-                cx,
-                |s, w, cx| s.start_edit(Editing::Search, s.search.clone(), w, cx),
-            ));
-        for kind in KINDS {
-            if self.search.is_empty()
-                || kind.label().contains(&self.search)
-                || format!("{kind:?}")
-                    .to_lowercase()
-                    .contains(&self.search.to_lowercase())
-            {
-                col = col.child(self.button(kind.label(), false, cx, move |s, _, cx| {
-                    s.add_node(kind, cx)
-                }));
-            }
-        }
-        col.into_any_element()
+                    if delta > px(0.) {
+                        s.add_index = s.add_index.saturating_sub(1);
+                    }
+                    cx.notify();
+                }
+            }))
+            .child(
+                div()
+                    .h(px(16.))
+                    .flex_shrink_0()
+                    .line_height(px(16.))
+                    .text_size(px(11.))
+                    .text_color(rgb(ui_color(Role::Muted)))
+                    .child("ノードを検索"),
+            )
+            .child(
+                div()
+                    .h(px(30.))
+                    .flex_shrink_0()
+                    .border_1()
+                    .rounded(px(3.))
+                    .border_color(rgb(ui_color(Role::Accent)))
+                    .child(self.add_input.clone()),
+            )
+            .child(list)
+            .child(
+                div()
+                    .h(px(14.))
+                    .flex_shrink_0()
+                    .line_height(px(14.))
+                    .text_size(px(10.))
+                    .text_color(rgb(ui_color(Role::Muted)))
+                    .child(format!(
+                        "↑↓ 選択　Enter 追加　Esc 取消　{}件",
+                        matches.len()
+                    )),
+            );
+        div()
+            .absolute()
+            .inset_0()
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|s, _, w, cx| {
+                    cx.stop_propagation();
+                    s.close_node_add(w, cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|s, _, w, cx| {
+                    cx.stop_propagation();
+                    s.close_node_add(w, cx);
+                }),
+            )
+            .child(popup)
+            .into_any_element()
     }
     fn library_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut col = div()
@@ -1379,34 +1587,64 @@ impl Workspace {
             .items_center()
             .gap_1()
             .bg(rgb(ui_color(Role::Toolbar)))
-            .child(div().w(px(135.)).child("ノードエディター"))
-            .child(self.button("追加 ⇧A", self.add_open, cx, |s, _, _| {
-                s.add_open = !s.add_open;
-                s.library_open = false;
-            }))
-            .child(self.button("セット", self.library_open, cx, |s, _, _| {
-                s.library_open = !s.library_open;
-                s.add_open = false;
-                if let Some(g) = s.session.graph() {
-                    s.set_name = g.name.clone();
-                }
-            }))
-            .child(self.button("全ノード Home", false, cx, |s, _, _| s.fit_nodes()))
-            .child(self.button("設定 N", self.inspector, cx, |s, _, _| {
-                s.inspector = !s.inspector
-            }))
+            .child(div().flex_shrink_0().px_1().child("ノード"))
+            .child(self.icon_button(
+                "node-add",
+                "plus",
+                "ノードを追加（Shift+A）",
+                self.add_open,
+                cx,
+                |s, w, cx| {
+                    s.open_node_add(w, cx);
+                },
+            ))
+            .child(self.icon_button(
+                "node-library-toggle",
+                "library",
+                "名前付きセット",
+                self.library_open,
+                cx,
+                |s, _, _| {
+                    s.library_open = !s.library_open;
+                    s.add_open = false;
+                    if let Some(g) = s.session.graph() {
+                        s.set_name = g.name.clone();
+                    }
+                },
+            ))
+            .child(self.icon_button(
+                "node-fit",
+                "fit",
+                "全ノードを表示（Home）",
+                false,
+                cx,
+                |s, _, _| s.fit_nodes(),
+            ))
+            .child(self.icon_button(
+                "node-inspector-toggle",
+                "sliders",
+                "ノード設定（N）",
+                self.inspector,
+                cx,
+                |s, _, _| s.inspector = !s.inspector,
+            ))
             .child(
                 div()
                     .ml_2()
+                    .min_w_0()
+                    .max_w(px(320.))
+                    .truncate()
                     .text_color(rgb(ui_color(Role::Muted)))
                     .child(name.to_string()),
             );
         if let Some(g) = self.session.graph() {
-            bar = bar.child(self.button(
+            bar = bar.child(self.icon_button(
+                "node-graph-enabled",
+                "power",
                 if g.enabled {
-                    "効果：オン"
+                    "このパスのノード効果を無効にする"
                 } else {
-                    "効果：オフ"
+                    "このパスのノード効果を有効にする"
                 },
                 g.enabled,
                 cx,
@@ -1420,13 +1658,15 @@ impl Workspace {
                 },
             ));
         }
-        bar = bar
-            .child(div().flex_1())
-            .child(self.button("閉じる", false, cx, |s, _, _| s.nodes_open = false));
+        bar = bar.child(div().flex_1()).child(self.icon_button(
+            "node-panel-collapse",
+            "chevron-down",
+            "ノードエディターを折りたたむ",
+            false,
+            cx,
+            |s, _, _| s.nodes_open = false,
+        ));
         let mut body = div().flex().flex_1().min_h_0();
-        if self.add_open {
-            body = body.child(self.add_sidebar(cx));
-        }
         if self.library_open {
             body = body.child(self.library_sidebar(cx));
         }
@@ -1545,6 +1785,62 @@ mod tests {
         wire_crosses,
     };
     #[test]
+    fn add_search_matches_japanese_english_and_reports_no_results() {
+        assert_eq!(super::matching_kinds(" rough "), vec![Kind::Rough]);
+        assert_eq!(super::matching_kinds("ラフ"), vec![Kind::Rough]);
+        assert_eq!(super::matching_kinds("VaLuE"), vec![Kind::Value]);
+        assert!(super::matching_kinds("zz-no-such-node").is_empty());
+        assert_eq!(super::matching_kinds("").len(), super::KINDS.len());
+    }
+    #[test]
+    fn add_popup_stays_inside_viewport_at_every_corner() {
+        let viewport = gpui::size(px(980.), px(640.));
+        let popup = gpui::size(px(270.), px(90. + 8. * 28.));
+        for anchor in [
+            point(px(-10.), px(-20.)),
+            point(px(979.), px(639.)),
+            point(px(300.), px(200.)),
+        ] {
+            let p = super::popup_origin(anchor, popup, viewport);
+            assert!(p.x >= px(8.) && p.y >= px(8.));
+            assert!(p.x + popup.width <= viewport.width - px(8.));
+            assert!(p.y + popup.height <= viewport.height - px(8.));
+        }
+        assert_eq!(
+            super::popup_origin(point(px(300.), px(200.)), popup, viewport),
+            point(px(300.), px(200.))
+        );
+    }
+    #[test]
+    fn adding_node_preserves_existing_wires_and_cancels_atomically() {
+        let mut session = crate::session::Session::default();
+        let path = session.new_path(KPoint::ZERO);
+        session.selected = vec![path];
+        session.active_mut().unwrap().appearance = Some(Graph::rough());
+        let before = session.doc.clone();
+        session.begin();
+        let graph = session.graph_mut().unwrap();
+        let id = super::add_unconnected(graph, Kind::Offset, KPoint::new(-123., 456.)).unwrap();
+        assert_eq!(graph.node(id).unwrap().position, [-123., 456.]);
+        assert!(graph.node(id).unwrap().inputs.iter().all(Option::is_none));
+        assert_eq!(
+            &graph.nodes[..graph.nodes.len() - 1],
+            before.strokes[0]
+                .appearance
+                .as_ref()
+                .unwrap()
+                .nodes
+                .as_slice()
+        );
+        session.cancel();
+        assert_eq!(session.doc, before);
+        session.begin();
+        super::add_unconnected(session.graph_mut().unwrap(), Kind::Value, KPoint::ZERO).unwrap();
+        session.commit();
+        session.undo();
+        assert_eq!(session.doc, before);
+    }
+    #[test]
     fn front_node_blocks_hidden_sockets() {
         let mut g = Graph::default();
         let hidden_output = output(g.node(1).unwrap());
@@ -1616,6 +1912,15 @@ mod tests {
         assert_eq!(g.node(copies[0]).unwrap().inputs[0], Some(copies[1]));
         assert_eq!(g.node(copies[1]).unwrap().inputs[0], Some(1));
         assert_eq!(g.node(next).unwrap().inputs[0], Some(3));
+        // Shift+D starts a modal move at the originals, without a forced offset.
+        assert_eq!(
+            g.node(copies[0]).unwrap().position,
+            g.node(next).unwrap().position
+        );
+        assert_eq!(
+            g.node(copies[1]).unwrap().position,
+            g.node(3).unwrap().position
+        );
     }
     #[test]
     fn lazy_connection_respects_socket_types_and_cycles() {

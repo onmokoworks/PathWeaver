@@ -14,6 +14,24 @@ use pathweaver_core::{
 };
 use std::{cell::Cell, rc::Rc};
 
+pub(crate) struct IconTooltip(pub SharedString);
+impl Render for IconTooltip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded(px(4.))
+            .shadow_md()
+            .bg(rgb(ui_color(Role::Surface)))
+            .border_1()
+            .border_color(rgb(ui_color(Role::Border)))
+            .text_color(rgb(ui_color(Role::Text)))
+            .text_size(px(11.))
+            .font_family(crate::assets::UI_FONT)
+            .child(self.0.clone())
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Tool {
     Select,
@@ -99,7 +117,6 @@ pub enum Editing {
     Color,
     SetName,
     Category,
-    Search,
     Width,
     Rotation,
     Scale,
@@ -186,8 +203,13 @@ pub struct Workspace {
     pub node_height: f32,
     pub node_selection: Vec<u64>,
     pub node_region: bool,
+    pub active_nodes: bool,
     pub inspector: bool,
     pub add_open: bool,
+    pub add_input: Entity<TextInput>,
+    pub add_anchor: Point<Pixels>,
+    pub add_index: usize,
+    pub node_placement_selection: Option<Vec<u64>>,
     pub library_open: bool,
     pub search: String,
     pub set_name: String,
@@ -218,6 +240,16 @@ impl Workspace {
             }
         })
         .detach();
+        let add_input = cx.new(TextInput::new);
+        cx.observe(&add_input, |s, input, cx| {
+            let query = input.read(cx).content.to_string();
+            if s.search != query {
+                s.search = query;
+                s.add_index = 0;
+                cx.notify();
+            }
+        })
+        .detach();
         Self {
             session: Session::default(),
             dialog_open: false,
@@ -239,8 +271,13 @@ impl Workspace {
             node_height: 300.,
             node_selection: vec![],
             node_region: false,
+            active_nodes: false,
             inspector: true,
             add_open: false,
+            add_input,
+            add_anchor: point(px(0.), px(0.)),
+            add_index: 0,
+            node_placement_selection: None,
             library_open: false,
             search: String::new(),
             set_name: String::new(),
@@ -376,6 +413,8 @@ impl Workspace {
     }
     fn reset_document_interaction(&mut self) {
         // Called only after a successful document replacement.
+        self.node_region = false;
+        self.active_nodes = false;
         self.drag = Drag::None;
         self.node_move_modal = false;
         self.pen_path = None;
@@ -395,6 +434,8 @@ impl Workspace {
         self.set_name.clear();
         self.category.clear();
         self.search.clear();
+        self.add_index = 0;
+        self.node_placement_selection = None;
         self.add_open = false;
         self.library_open = false;
         self.merge_open = false;
@@ -520,6 +561,61 @@ impl Workspace {
             f,
         )
     }
+    pub fn icon_button(
+        &self,
+        id: impl Into<ElementId>,
+        icon: &'static str,
+        label: impl Into<SharedString>,
+        active: bool,
+        cx: &mut Context<Self>,
+        f: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
+        let label = label.into();
+        div()
+            .id(id.into())
+            .size(px(28.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(4.))
+            .cursor_pointer()
+            .bg(rgb(ui_color(if active {
+                Role::Selected
+            } else {
+                Role::Toolbar
+            })))
+            .hover(move |s| {
+                s.bg(rgb(ui_color(if active {
+                    Role::Selected
+                } else {
+                    Role::Hover
+                })))
+            })
+            .child(
+                svg()
+                    .path(format!("icons/{icon}.svg"))
+                    .size(px(18.))
+                    .text_color(rgb(ui_color(if active {
+                        Role::OnAccent
+                    } else {
+                        Role::Text
+                    }))),
+            )
+            .tooltip(move |_, cx| cx.new(|_| IconTooltip(label.clone())).into())
+            .on_click(cx.listener(move |s, _, w, cx| {
+                if s.editing.is_some() {
+                    s.commit_edit(w, cx);
+                    if s.editing.is_some() {
+                        return;
+                    }
+                }
+                s.finish_interaction(true, cx);
+                f(s, w, cx);
+                cx.notify();
+            }))
+            .into_any_element()
+    }
     fn edit_button(
         &self,
         id: ElementId,
@@ -644,7 +740,6 @@ impl Workspace {
                     let value = crate::controls::expression(&text, self.edit_initial)?;
                     self.apply_numeric(&kind, value)?;
                 }
-                Editing::Search => self.search = text,
                 Editing::SetName => {
                     if text.chars().count() > 80 {
                         return Err("名前は80文字以内です".into());
@@ -767,6 +862,7 @@ impl Workspace {
         }
         self.focus.focus(w);
         self.node_region = false;
+        self.active_nodes = false;
         let p = self.art_view.world(e.position, self.art_bounds.get());
         if e.button == MouseButton::Middle {
             self.drag = Drag::Pan {
@@ -896,7 +992,16 @@ impl Workspace {
             return;
         }
         if matches!(self.drag, Drag::None) {
-            self.node_region = self.nodes_open && e.position.y >= self.art_bounds.get().bottom();
+            // Menus and inspectors preserve the last canvas context.
+            let before = self.node_region;
+            if self.nodes_open && self.node_bounds.get().contains(&e.position) {
+                self.node_region = true;
+            } else if self.art_bounds.get().contains(&e.position) {
+                self.node_region = false;
+            }
+            if before != self.node_region {
+                cx.notify();
+            }
             return;
         }
         let raw = self.art_view.world(e.position, self.art_bounds.get());
@@ -1182,6 +1287,9 @@ impl Workspace {
         cx.notify();
     }
     fn key(&mut self, e: &KeyDownEvent, w: &mut Window, cx: &mut Context<Self>) {
+        if self.node_add_key(e, w, cx) {
+            return;
+        }
         let k = &e.keystroke;
         let cmd = k.modifiers.platform || k.modifiers.control;
         if matches!(self.drag, Drag::Numeric { .. }) && k.key != "escape" {
@@ -1239,68 +1347,12 @@ impl Workspace {
             self.refresh(cx);
             return;
         }
-        if cmd && k.key == "z" {
-            self.history_step(k.modifiers.shift, cx);
+        // Native menu actions and shortcuts share one command path. TextInput
+        // handles local editing actions before workspace actions bubble here.
+        if cmd {
             return;
         }
         if !matches!(self.drag, Drag::None) {
-            if cmd && matches!(k.key.as_str(), "s" | "o" | "q" | "w") {
-                self.finish_interaction(true, cx);
-            } else {
-                return;
-            }
-        }
-        if cmd {
-            match k.key.as_str() {
-                "s" => self.save(k.modifiers.shift, cx),
-                "o" => self.open(w, cx),
-                "e" => self.export(cx),
-                "a" => {
-                    if !self.node_region && matches!(self.tool, Tool::Direct | Tool::Convert) {
-                        self.session.anchors.clear();
-                        let hits: Vec<_> = self
-                            .session
-                            .doc
-                            .strokes
-                            .iter()
-                            .filter(|s| s.visible && s.contours.is_none())
-                            .flat_map(|s| {
-                                s.nodes.iter().map(|n| Anchor {
-                                    stroke: s.id,
-                                    node: n.id,
-                                })
-                            })
-                            .collect();
-                        for at in hits {
-                            self.session.select_anchor(at, true);
-                        }
-                    } else if self.node_region {
-                        self.node_selection = self
-                            .session
-                            .graph()
-                            .map(|g| g.nodes.iter().map(|n| n.id).collect())
-                            .unwrap_or_default();
-                    } else {
-                        self.session.selected = self
-                            .session
-                            .doc
-                            .strokes
-                            .iter()
-                            .filter(|s| s.visible)
-                            .map(|s| s.id)
-                            .collect();
-                    }
-                }
-                "d" if !self.node_region => {
-                    self.session.duplicate();
-                    self.refresh(cx);
-                }
-                "q" | "w" => {
-                    self.confirm_discard(w, cx, |_, w, _| w.remove_window());
-                }
-                _ => {}
-            }
-            cx.notify();
             return;
         }
         if self.node_region {
@@ -1345,63 +1397,206 @@ impl Workspace {
         }
         cx.notify();
     }
+    pub(crate) fn menu_command(
+        &mut self,
+        command: crate::menus::Command,
+        w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::menus::Command;
+        use crate::path_edit::Operation;
+        if self.dialog_open {
+            return;
+        }
+        if self.editing.is_some() {
+            if self.input.read(cx).is_composing() {
+                return;
+            }
+            self.commit_edit(w, cx);
+            if self.editing.is_some() {
+                return;
+            }
+        }
+        self.finish_interaction(true, cx);
+        self.add_open = false;
+        self.focus.focus(w);
+        match command {
+            Command::New => self.confirm_discard(w, cx, |s, _, cx| {
+                s.session = Session::default();
+                s.reset_document_interaction();
+                s.art_view = View::default();
+                s.refresh(cx);
+            }),
+            Command::Open => self.open(w, cx),
+            Command::Save => self.save(false, cx),
+            Command::SaveAs => self.save(true, cx),
+            Command::Export => self.export(cx),
+            Command::Close => self.confirm_discard(w, cx, |_, w, _| w.remove_window()),
+            Command::Undo => self.history_step(false, cx),
+            Command::Redo => self.history_step(true, cx),
+            Command::SelectAll => {
+                if self.active_nodes && self.nodes_open {
+                    self.node_selection = self
+                        .session
+                        .graph()
+                        .map(|g| g.nodes.iter().map(|n| n.id).collect())
+                        .unwrap_or_default();
+                } else if matches!(self.tool, Tool::Direct | Tool::Convert) {
+                    self.session.anchors.clear();
+                    let hits: Vec<_> = self
+                        .session
+                        .doc
+                        .strokes
+                        .iter()
+                        .filter(|s| s.visible && s.contours.is_none())
+                        .flat_map(|s| {
+                            s.nodes.iter().map(|n| Anchor {
+                                stroke: s.id,
+                                node: n.id,
+                            })
+                        })
+                        .collect();
+                    for at in hits {
+                        self.session.select_anchor(at, true);
+                    }
+                } else {
+                    self.session.selected = self
+                        .session
+                        .doc
+                        .strokes
+                        .iter()
+                        .filter(|s| s.visible)
+                        .map(|s| s.id)
+                        .collect();
+                }
+            }
+            Command::Duplicate => {
+                if self.active_nodes && self.nodes_open {
+                    self.duplicate_nodes(cx);
+                } else {
+                    self.session.duplicate();
+                }
+            }
+            Command::Delete => {
+                if self.active_nodes && self.nodes_open {
+                    self.delete_nodes();
+                } else if matches!(self.tool, Tool::Direct | Tool::Convert) {
+                    self.path_operation(Operation::Delete, cx);
+                } else {
+                    self.session.remove();
+                }
+            }
+            Command::FitArt => self.fit_art(),
+            Command::ActualSize => self.art_view.zoom_at(
+                self.art_bounds.get().center(),
+                self.art_bounds.get(),
+                1. / self.art_view.zoom,
+            ),
+            Command::ToggleNodes => self.nodes_open = !self.nodes_open,
+            Command::ToggleTheme => {
+                self.status = crate::theme::toggle().err().unwrap_or_default();
+                self.input.update(cx, |_, cx| cx.notify());
+            }
+            Command::SelectTool
+            | Command::DirectTool
+            | Command::ConvertTool
+            | Command::PenTool
+            | Command::WidthTool => {
+                self.tool = match command {
+                    Command::SelectTool => Tool::Select,
+                    Command::DirectTool => Tool::Direct,
+                    Command::ConvertTool => Tool::Convert,
+                    Command::PenTool => Tool::Pen,
+                    _ => Tool::Width,
+                };
+                self.pen_path = None;
+                self.node_region = false;
+                self.active_nodes = false;
+                self.focus.focus(w);
+            }
+            Command::Separate => self.path_operation(Operation::Separate, cx),
+            Command::Join => self.path_operation(Operation::Join, cx),
+            Command::MergeCenter => self.path_operation(
+                Operation::Merge(pathweaver_core::editing::MergeTarget::Center),
+                cx,
+            ),
+            Command::Straighten => self.path_operation(Operation::Straighten, cx),
+            Command::Union => self.path_operation(Operation::Union, cx),
+            Command::AddNode => {
+                self.nodes_open = true;
+                self.open_node_add(w, cx);
+            }
+            Command::FitNodes => {
+                self.nodes_open = true;
+                self.fit_nodes();
+            }
+            Command::DuplicateNodes => {
+                self.active_nodes = true;
+                self.duplicate_nodes(cx);
+            }
+            Command::DeleteNodes => {
+                self.active_nodes = true;
+                self.delete_nodes();
+            }
+            Command::ToggleNode => {
+                self.active_nodes = true;
+                self.toggle_nodes_bypass();
+            }
+        }
+        self.refresh(cx);
+    }
     fn toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
         div()
             .flex()
             .items_center()
             .gap_1()
-            .h(px(40.))
+            .h(px(36.))
             .px_2()
             .bg(rgb(ui_color(Role::Toolbar)))
             .border_b_1()
             .border_color(rgb(ui_color(Role::Border)))
             .child(
                 div()
-                    .w(px(145.))
-                    .text_size(px(15.))
+                    .text_size(px(13.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child("PathWeaver"),
             )
-            .child(self.button("開く", false, cx, |s, w, cx| s.open(w, cx)))
-            .child(self.button("保存", false, cx, |s, _, cx| s.save(false, cx)))
-            .child(self.button("SVG書き出し", false, cx, |s, _, cx| s.export(cx)))
-            .child(self.button("サンプル", false, cx, |s, w, cx| {
-                s.confirm_discard(w, cx, |s, _, cx| {
-                    s.session = Session::default();
-                    s.session.doc = Document::example();
-                    s.session.selected = vec![s.session.doc.strokes[0].id];
-                    s.reset_document_interaction();
-                    s.fit_art();
-                    s.refresh(cx);
-                })
-            }))
-            .child(div().w(px(16.)))
-            .child(self.button("元に戻す", false, cx, |s, _, cx| {
-                s.history_step(false, cx);
-            }))
-            .child(self.button("やり直す", false, cx, |s, _, cx| {
-                s.history_step(true, cx);
-            }))
             .child(div().flex_1())
-            .child(self.button(
+            .child(self.icon_button(
+                "theme",
                 if crate::theme::is_dark() {
-                    "配色：ダーク"
+                    "sun"
                 } else {
-                    "配色：ライト"
+                    "moon"
+                },
+                if crate::theme::is_dark() {
+                    "ライトに切り替え"
+                } else {
+                    "ダークに切り替え"
                 },
                 false,
                 cx,
                 |s, _, cx| {
-                    s.status = crate::theme::toggle()
-                        .err()
-                        .unwrap_or_else(|| "配色を変更しました".into());
+                    s.status = crate::theme::toggle().err().unwrap_or_default();
                     s.input.update(cx, |_, cx| cx.notify());
                 },
             ))
-            .child(self.button("全体表示", false, cx, |s, _, _| s.fit_art()))
-            .child(self.button("ノード", self.nodes_open, cx, |s, _, _| {
-                s.nodes_open = !s.nodes_open
-            }))
+            .child(self.icon_button(
+                "fit-art",
+                "fit",
+                "作品全体を表示  F",
+                false,
+                cx,
+                |s, _, _| s.fit_art(),
+            ))
+            .child(self.icon_button(
+                "toggle-nodes",
+                "nodes",
+                "ノードエディターを表示／隠す",
+                self.nodes_open,
+                cx,
+                |s, _, _| s.nodes_open = !s.nodes_open,
+            ))
             .into_any_element()
     }
     fn tool_palette(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1424,59 +1619,20 @@ impl Workspace {
             (Tool::Pen, "pen", "ペン P"),
             (Tool::Width, "width", "幅 W"),
         ] {
-            let active = self.tool == tool;
-            tools = tools.child(
-                div()
-                    .id(SharedString::from(format!("tool-{icon}")))
-                    .size(px(28.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.))
-                    .cursor_pointer()
-                    .bg(rgb(if self.tool == tool {
-                        ui_color(Role::Selected)
-                    } else {
-                        ui_color(Role::Toolbar)
-                    }))
-                    .hover(move |s| {
-                        s.bg(rgb(ui_color(if active {
-                            Role::Selected
-                        } else {
-                            Role::Hover
-                        })))
-                    })
-                    .child(
-                        svg()
-                            .path(format!("icons/{icon}.svg"))
-                            .size(px(19.))
-                            .text_color(rgb(ui_color(if self.tool == tool {
-                                Role::OnAccent
-                            } else {
-                                Role::Text
-                            }))),
-                    )
-                    .on_hover(cx.listener(move |s, hover: &bool, _, cx| {
-                        if *hover {
-                            s.status = label.into();
-                            cx.notify();
-                        }
-                    }))
-                    .on_click(cx.listener(move |s, _, w, cx| {
-                        if s.editing.is_some() {
-                            s.commit_edit(w, cx);
-                            if s.editing.is_some() {
-                                return;
-                            }
-                        }
-                        s.finish_interaction(true, cx);
-                        s.tool = tool;
-                        s.pen_path = None;
-                        s.node_region = false;
-                        s.focus.focus(w);
-                        cx.notify();
-                    })),
-            );
+            tools = tools.child(self.icon_button(
+                SharedString::from(format!("tool-{icon}")),
+                icon,
+                label,
+                self.tool == tool,
+                cx,
+                move |s, w, _| {
+                    s.tool = tool;
+                    s.pen_path = None;
+                    s.node_region = false;
+                    s.active_nodes = false;
+                    s.focus.focus(w);
+                },
+            ));
         }
         tools.into_any_element()
     }
@@ -1495,11 +1651,13 @@ impl Workspace {
                     .flex()
                     .gap_1()
                     .mb_1()
-                    .child(self.button(
+                    .child(self.icon_button(
+                        ("path-visibility", id),
+                        if path.visible { "eye" } else { "eye-off" },
                         if path.visible {
-                            format!("◉ {id}")
+                            "パスを隠す"
                         } else {
-                            format!("○ {id}")
+                            "パスを表示"
                         },
                         false,
                         cx,
@@ -1520,6 +1678,7 @@ impl Workspace {
                         move |s, w, cx| {
                             s.session.select(id, w.modifiers().shift);
                             s.node_region = false;
+                            s.active_nodes = false;
                             s.pen_path = None;
                             s.focus.focus(w);
                             cx.notify();
@@ -1545,12 +1704,20 @@ impl Workspace {
                     .items_center()
                     .justify_between()
                     .child("パス")
-                    .child(self.button("＋ 新規", false, cx, |s, w, _| {
-                        s.tool = Tool::Pen;
-                        s.pen_path = None;
-                        s.node_region = false;
-                        s.focus.focus(w);
-                    })),
+                    .child(self.icon_button(
+                        "new-path",
+                        "plus",
+                        "新しいパスを描く  P",
+                        false,
+                        cx,
+                        |s, w, _| {
+                            s.tool = Tool::Pen;
+                            s.pen_path = None;
+                            s.node_region = false;
+                            s.active_nodes = false;
+                            s.focus.focus(w);
+                        },
+                    )),
             )
             .child(list)
             .into_any_element()
@@ -1661,6 +1828,7 @@ impl Workspace {
                     cx,
                     move |s, w, cx| {
                         s.node_region = false;
+                        s.active_nodes = false;
                         s.start_edit(
                             Editing::Color,
                             format!("{:02X}{:02X}{:02X}", color[0], color[1], color[2]),
@@ -1739,6 +1907,7 @@ impl Workspace {
                     self.button("ノードを編集", self.nodes_open, cx, |s, w, cx| {
                         s.nodes_open = true;
                         s.node_region = true;
+                        s.active_nodes = true;
                         s.focus.focus(w);
                         if s.session.graph().is_none() {
                             s.session.edit(|s| {
@@ -1813,7 +1982,8 @@ impl Render for Workspace {
             .child(self.tool_palette(cx))
             .child(canvas)
             .child(self.inspector(cx));
-        let mut root = div()
+        let mut root = crate::menus::handlers(div(), self, cx)
+            .relative()
             .key_context("PathWeaver")
             .track_focus(&self.focus)
             .size_full()
@@ -1849,7 +2019,7 @@ impl Render for Workspace {
         if self.nodes_open {
             root = root.child(self.nodes_panel(cx));
         }
-        root.child(
+        root = root.child(
             div()
                 .h(px(25.))
                 .flex_shrink_0()
@@ -1865,7 +2035,11 @@ impl Render for Workspace {
                     self.session.doc.strokes.len(),
                     self.art_view.zoom * 100.
                 )),
-        )
+        );
+        if self.add_open {
+            root = root.child(self.node_add_popup(window, cx));
+        }
+        root
     }
 }
 pub fn segment_hits_rect(a: KPoint, b: KPoint, r: Rect) -> bool {

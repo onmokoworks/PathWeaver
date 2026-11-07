@@ -7,6 +7,16 @@ use pathweaver_core::{
 };
 use std::path::{Path, PathBuf};
 
+// History restores the editing target as well as the document. Selection-only
+// changes do not create history entries or make the document dirty.
+#[derive(Clone)]
+struct Snapshot {
+    doc: Document,
+    selected: Vec<u64>,
+    anchors: Vec<Anchor>,
+    segment: Option<Anchor>,
+}
+
 pub struct Session {
     pub doc: Document,
     pub selected: Vec<u64>,
@@ -14,9 +24,9 @@ pub struct Session {
     pub segment: Option<Anchor>,
     pub path: Option<PathBuf>,
     saved: Document,
-    undo: Vec<Document>,
-    redo: Vec<Document>,
-    pending: Option<Document>,
+    undo: Vec<Snapshot>,
+    redo: Vec<Snapshot>,
+    pending: Option<Snapshot>,
 }
 impl Default for Session {
     fn default() -> Self {
@@ -38,14 +48,31 @@ impl Session {
     pub fn dirty(&self) -> bool {
         self.doc != self.saved
     }
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+            || self
+                .pending
+                .as_ref()
+                .is_some_and(|before| before.doc != self.doc)
+    }
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+            && !self
+                .pending
+                .as_ref()
+                .is_some_and(|before| before.doc != self.doc)
+    }
     pub fn active(&self) -> Option<&Stroke> {
         self.selected
             .last()
-            .and_then(|id| self.doc.strokes.iter().find(|s| s.id == *id))
+            .and_then(|id| self.doc.strokes.iter().find(|s| s.id == *id && s.visible))
     }
     pub fn active_mut(&mut self) -> Option<&mut Stroke> {
         let id = *self.selected.last()?;
-        self.doc.strokes.iter_mut().find(|s| s.id == id)
+        self.doc
+            .strokes
+            .iter_mut()
+            .find(|s| s.id == id && s.visible)
     }
     pub fn graph(&self) -> Option<&Graph> {
         self.active()?.appearance.as_ref()
@@ -53,13 +80,30 @@ impl Session {
     pub fn graph_mut(&mut self) -> Option<&mut Graph> {
         self.active_mut()?.appearance.as_mut()
     }
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            doc: self.doc.clone(),
+            selected: self.selected.clone(),
+            anchors: self.anchors.clone(),
+            segment: self.segment,
+        }
+    }
+    fn restore(&mut self, snapshot: Snapshot) {
+        self.doc = snapshot.doc;
+        self.selected = snapshot.selected;
+        self.anchors = snapshot.anchors;
+        self.segment = snapshot.segment;
+        self.reconcile();
+    }
     pub fn begin(&mut self) {
+        self.reconcile();
         if self.pending.is_none() {
-            self.pending = Some(self.doc.clone());
+            self.pending = Some(self.snapshot());
         }
     }
     pub fn commit(&mut self) {
-        if let Some(before) = self.pending.take().filter(|before| *before != self.doc) {
+        self.reconcile();
+        if let Some(before) = self.pending.take().filter(|before| before.doc != self.doc) {
             self.undo.push(before);
             self.undo.drain(..self.undo.len().saturating_sub(100));
             self.redo.clear();
@@ -67,7 +111,7 @@ impl Session {
     }
     pub fn cancel(&mut self) {
         if let Some(before) = self.pending.take() {
-            self.doc = before;
+            self.restore(before);
         }
         self.reconcile();
     }
@@ -78,20 +122,22 @@ impl Session {
     }
     pub fn undo(&mut self) {
         self.commit();
-        if let Some(d) = self.undo.pop() {
-            self.redo.push(std::mem::replace(&mut self.doc, d));
+        if let Some(before) = self.undo.pop() {
+            self.redo.push(self.snapshot());
+            self.restore(before);
         }
-        self.reconcile();
     }
     pub fn redo(&mut self) {
         // A new gesture invalidates the old redo branch before restoring history.
         self.commit();
-        if let Some(d) = self.redo.pop() {
-            self.undo.push(std::mem::replace(&mut self.doc, d));
+        if let Some(after) = self.redo.pop() {
+            self.undo.push(self.snapshot());
+            self.restore(after);
         }
-        self.reconcile();
     }
     pub fn reconcile(&mut self) {
+        self.selected
+            .retain(|id| self.doc.strokes.iter().any(|s| s.id == *id && s.visible));
         self.anchors.retain(|a| {
             self.doc.strokes.iter().any(|s| {
                 s.id == a.stroke
@@ -103,16 +149,18 @@ impl Session {
         if self.segment.is_some_and(|a| {
             !self.doc.strokes.iter().any(|s| {
                 s.id == a.stroke
+                    && s.visible
                     && self.selected.contains(&s.id)
                     && s.segment_index(a.node).is_some()
             })
         }) {
             self.segment = None;
         }
-        self.selected
-            .retain(|id| self.doc.strokes.iter().any(|s| s.id == *id));
     }
     pub fn select(&mut self, id: u64, add: bool) {
+        if !self.doc.strokes.iter().any(|s| s.id == id && s.visible) {
+            return;
+        }
         self.anchors.clear();
         self.segment = None;
         if add {
@@ -121,11 +169,23 @@ impl Session {
             } else {
                 self.selected.push(id);
             }
-        } else if !self.selected.contains(&id) {
-            self.selected = vec![id];
+        } else {
+            if !self.selected.contains(&id) {
+                self.selected.clear();
+            }
+            self.selected.retain(|s| *s != id);
+            self.selected.push(id);
         }
     }
     pub fn select_anchor(&mut self, at: Anchor, add: bool) {
+        if !self
+            .doc
+            .strokes
+            .iter()
+            .any(|s| s.id == at.stroke && s.visible && s.nodes.iter().any(|n| n.id == at.node))
+        {
+            return;
+        }
         self.segment = None;
         if add && self.anchors.contains(&at) {
             self.anchors.retain(|a| *a != at);
@@ -209,10 +269,9 @@ impl Session {
     pub fn duplicate(&mut self) {
         self.edit(|s| {
             let originals: Vec<_> = s
-                .doc
-                .strokes
+                .selected
                 .iter()
-                .filter(|p| s.selected.contains(&p.id))
+                .filter_map(|id| s.doc.strokes.iter().find(|p| p.id == *id && p.visible))
                 .cloned()
                 .collect();
             s.selected.clear();
@@ -366,7 +425,7 @@ mod tests {
         s.undo();
         s.doc.validate().unwrap();
         assert_eq!(s.doc, before);
-        assert_eq!(s.anchors, vec![b]);
+        assert_eq!(s.anchors, vec![a, b]);
         s.redo();
         assert_eq!(s.doc.strokes.len(), 2);
         s.select(a.stroke, false);
@@ -435,6 +494,113 @@ mod tests {
         s.undo();
         assert_eq!(s.active().unwrap().nodes[0].p.x, 0.);
     }
+    #[test]
+    fn history_availability_accounts_for_pending_edits() {
+        let mut s = Session::default();
+        assert!(!s.can_undo());
+        assert!(!s.can_redo());
+        s.begin();
+        s.new_path(Point::ZERO);
+        assert!(s.can_undo());
+        assert!(!s.can_redo());
+        s.commit();
+        s.undo();
+        assert!(!s.can_undo());
+        assert!(s.can_redo());
+        s.begin();
+        assert!(s.can_redo());
+        s.new_path(Point::new(10., 20.));
+        assert!(s.can_undo());
+        assert!(!s.can_redo());
+        s.cancel();
+        assert!(!s.can_undo());
+        assert!(s.can_redo());
+    }
+
+    #[test]
+    fn hide_clears_edit_targets_and_undo_restores_them() {
+        let mut s = Session::default();
+        let first = s.new_path(Point::ZERO);
+        s.add_point(Point::new(50., 0.));
+        let at = Anchor {
+            stroke: first,
+            node: s.doc.strokes[0].nodes[0].id,
+        };
+        s.select_anchor(at, false);
+        s.segment = Some(at);
+        s.edit(|s| s.doc.strokes[0].visible = false);
+        assert!(s.selected.is_empty());
+        assert!(s.anchors.is_empty());
+        assert!(s.segment.is_none());
+        assert!(s.active().is_none());
+        s.select(first, false);
+        s.select_anchor(at, false);
+        assert!(s.selected.is_empty());
+        assert!(s.anchors.is_empty());
+        s.undo();
+        assert!(s.doc.strokes[0].visible);
+        assert_eq!(s.selected, vec![first]);
+        assert_eq!(s.anchors, vec![at]);
+        assert_eq!(s.segment, Some(at));
+        s.redo();
+        assert!(!s.doc.strokes[0].visible);
+        assert!(s.selected.is_empty());
+        assert!(s.anchors.is_empty());
+        assert!(s.segment.is_none());
+    }
+
+    #[test]
+    fn delete_undo_restores_selection_order_and_cancel_restores_targets() {
+        let mut s = Session::default();
+        let first = s.new_path(Point::ZERO);
+        let second = s.new_path(Point::new(100., 0.));
+        s.select(first, true);
+        assert_eq!(s.selected, vec![second, first]);
+        s.remove();
+        assert!(s.doc.strokes.is_empty());
+        assert!(s.selected.is_empty());
+        s.undo();
+        assert_eq!(s.selected, vec![second, first]);
+        assert_eq!(s.active().unwrap().id, first);
+        s.redo();
+        assert!(s.doc.strokes.is_empty());
+        assert!(s.selected.is_empty());
+        s.undo();
+        let before = s.doc.clone();
+        s.begin();
+        s.doc.strokes.clear();
+        s.selected.clear();
+        s.cancel();
+        assert_eq!(s.doc, before);
+        assert_eq!(s.selected, vec![second, first]);
+    }
+
+    #[test]
+    fn clicking_selected_path_changes_active_without_losing_multiselection() {
+        let mut s = Session::default();
+        let first = s.new_path(Point::ZERO);
+        let second = s.new_path(Point::new(100., 0.));
+        s.select(first, true);
+        assert_eq!(s.selected, vec![second, first]);
+        s.select(second, false);
+        assert_eq!(s.selected, vec![first, second]);
+        assert_eq!(s.active().unwrap().id, second);
+        s.select(first, false);
+        assert_eq!(s.selected, vec![second, first]);
+        s.duplicate();
+        assert_eq!(s.active().unwrap().nodes[0].p, Point::new(20., 20.));
+        s.undo();
+        assert_eq!(s.selected, vec![second, first]);
+        // Clicking and dragging without changing geometry does not add undo steps.
+        let undo_len = s.undo.len();
+        s.begin();
+        s.select(second, false);
+        s.commit();
+        assert_eq!(s.undo.len(), undo_len);
+        s.select(second, true);
+        assert_eq!(s.selected, vec![first]);
+    }
+
     #[test]
     fn saved_document_roundtrips_and_failed_load_keeps_work() {
         let dir = std::env::temp_dir().join(format!("pathweaver-test-{}", std::process::id()));

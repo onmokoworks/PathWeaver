@@ -4,6 +4,7 @@ mod controls;
 mod drawing;
 mod input;
 mod interaction;
+mod menus;
 mod nodes;
 mod path_edit;
 mod session;
@@ -13,6 +14,7 @@ fn main() {
     theme::initialize();
     Application::new().with_assets(assets::Assets).run(|cx| {
         input::bind_keys(cx);
+        menus::initialize(cx);
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
                 cx.quit();
