@@ -202,6 +202,8 @@ impl Operation {
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Node {
+    #[serde(default)]
+    pub label: String,
     pub id: u64,
     pub kind: Kind,
     pub position: [f32; 2],
@@ -247,6 +249,7 @@ impl Node {
             ..Default::default()
         };
         Self {
+            label: String::new(),
             id,
             kind,
             position,
@@ -454,6 +457,8 @@ impl Node {
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Graph {
+    #[serde(default)]
+    pub name: String,
     pub enabled: bool,
     pub nodes: Vec<Node>,
     pub output: u64,
@@ -464,6 +469,7 @@ impl Default for Graph {
         let mut output = Node::new(2, Kind::Output, [520., 90.]);
         output.inputs[0] = Some(1);
         Self {
+            name: String::new(),
             enabled: true,
             nodes: vec![input, output],
             output: 2,
@@ -479,6 +485,8 @@ impl Graph {
             && self.nodes.iter().zip(&other.nodes).all(|(a, b)| {
                 let mut a = a.clone();
                 let mut b = b.clone();
+                a.label.clear();
+                b.label.clear();
                 a.position = [0., 0.];
                 b.position = [0., 0.];
                 a == b
@@ -574,6 +582,9 @@ impl Graph {
         }
     }
     pub fn validate(&self) -> Result<(), String> {
+        if self.name.chars().count() > 80 || self.nodes.iter().any(|n| n.label.chars().count() > 80) {
+            return Err("ノードとセットの名前は80文字以内で指定してください".into());
+        }
         if self.nodes.len() > MAX_NODES
             || self.nodes.iter().filter(|n| n.kind == Kind::Input).count() != 1
             || self.nodes.iter().filter(|n| n.kind == Kind::Output).count() != 1

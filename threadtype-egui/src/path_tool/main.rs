@@ -3,6 +3,7 @@ mod appearance;
 mod appearance_effects;
 mod appearance_paint;
 mod appearance_ui;
+mod appearance_assets;
 mod editor;
 mod icons;
 mod corners;

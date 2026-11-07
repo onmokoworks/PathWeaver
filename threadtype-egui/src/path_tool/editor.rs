@@ -143,6 +143,8 @@ pub struct Editor {
     appearance_editor: super::appearance_ui::GraphEditor,
     appearance_open: bool,
     appearance_target: Option<u64>,
+    appearance_pinned: bool,
+    appearance_rect: egui::Rect,
     width_selected: Option<WidthTarget>,
     node_selected: Option<usize>,
     handle_selected: Option<(u64, bool)>,
@@ -862,6 +864,7 @@ impl Editor {
                         }
                     });
                     ui.menu_button("パネル", |ui| {
+                        ui.checkbox(&mut self.appearance_open, "ノードエディター");
                         if ui.button("配置をリセット").clicked() {
                             self.dock = Self::default_dock();
                             ui.close();
@@ -1057,27 +1060,50 @@ impl Editor {
             self.appearance_editor = super::appearance_ui::GraphEditor::default();
         }
     }
-    fn appearance_window(&mut self, ctx: &egui::Context) {
-        if !self.appearance_open || self.pending.is_some() {
-            return;
+    fn appearance_panel(&mut self, ctx: &egui::Context) {
+        self.appearance_rect = egui::Rect::NOTHING;
+        if !self.appearance_pinned && self.appearance_target != self.selected {
+            self.appearance_target = self.selected;
+            self.appearance_editor = super::appearance_ui::GraphEditor::default();
         }
-        let graph = self
-            .doc
-            .strokes
-            .iter_mut()
-            .find(|s| Some(s.id) == self.appearance_target)
-            .and_then(|s| s.appearance.as_mut());
-        if let Some(graph) = graph {
-            let before = graph.clone();
-            self.appearance_editor
-                .show(ctx, &mut self.appearance_open, graph);
-            if *graph != before { ctx.request_repaint(); }
-        } else {
-            self.appearance_open = false;
-            self.appearance_target = None;
-        }
+        let max_height = (ctx.available_rect().height() * 0.6).max(180.);
+        let response = egui::TopBottomPanel::bottom("appearance_editor_panel")
+            .resizable(true).default_height(300.).height_range(180. ..=max_height)
+            .show_animated(ctx, self.appearance_open, |ui| {
+                ui.horizontal(|ui| {
+                    ui.strong("ノードエディター");
+                    ui.separator();
+                    let name = self.doc.strokes.iter().find(|s| Some(s.id) == self.appearance_target)
+                        .map_or("パスを選択してください", |s| s.name.as_str());
+                    ui.label(name);
+                    ui.checkbox(&mut self.appearance_pinned, "対象を固定")
+                        .on_hover_text("オフの場合はキャンバスで選んだパスを編集します");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("閉じる").clicked() { self.appearance_open = false; }
+                    });
+                });
+                ui.separator();
+                ui.add_enabled_ui(self.pending.is_none(), |ui| {
+                    let stroke = self.doc.strokes.iter_mut().find(|s| Some(s.id) == self.appearance_target);
+                    if let Some(stroke) = stroke {
+                        if let Some(graph) = &mut stroke.appearance {
+                            let before = graph.clone();
+                            self.appearance_editor.show(ui, graph, &mut self.doc.appearance_presets);
+                            if *graph != before { ctx.request_repaint(); }
+                        } else {
+                            ui.label("このパスにノード効果を追加します。");
+                            if ui.button("ノードを使う").clicked() {
+                                stroke.appearance = Some(super::appearance::Graph::default());
+                                self.appearance_editor = super::appearance_ui::GraphEditor::default();
+                            }
+                        }
+                    } else {
+                        ui.label("上のキャンバスまたはレイヤーから、編集するパスを選択してください。");
+                    }
+                });
+            });
+        if let Some(response) = response { self.appearance_rect = response.response.rect; }
     }
-
     fn properties_ui(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().show(ui, |ui| self.properties_contents(ui));
     }
@@ -1088,7 +1114,7 @@ impl Editor {
                 ui.small(format!("外観の編集対象：{}", s.name));
             }
         }
-        if ui.add_enabled(self.stroke().is_some(), egui::Button::new("ノードで外観を編集…")).clicked() {
+        if ui.add_enabled(self.stroke().is_some(), egui::Button::new("ノードエディターを開く")).clicked() {
             self.open_appearance_editor();
         }
         if let Some(s) = self.stroke_mut() {
@@ -2506,7 +2532,8 @@ impl Editor {
                 .collect()
         });
         let text_focus = ctx.wants_keyboard_input();
-        let canvas_keys = !text_focus && !self.appearance_open;
+        let over_nodes = self.appearance_open && ctx.pointer_hover_pos().is_some_and(|p| self.appearance_rect.contains(p));
+        let canvas_keys = !text_focus && !over_nodes;
         for (key, m) in keys {
             if self.pending.is_some() || self.allow_close {
                 break;
@@ -3151,13 +3178,11 @@ impl Editor {
             let mut y = (top.y / spacing).ceil() * spacing;
             while y <= bottom.y {
                 let p = self.screen(Point::new(0., y), rect);
-                painter.text(
-                    Pos2::new(rect.left() + 1., p.y + 2.),
-                    egui::Align2::LEFT_TOP,
-                    format!("{y:.0}"),
-                    egui::FontId::proportional(8.),
-                    ink,
-                );
+                let galley = painter.layout_no_wrap(format!("{y:.0}"), egui::FontId::proportional(9.), ink);
+                let label = egui::epaint::TextShape::new(Pos2::new(rect.left() + 2., p.y - 2.), galley, ink)
+                    .with_angle(-std::f32::consts::FRAC_PI_2);
+                painter.with_clip_rect(egui::Rect::from_min_max(rect.min + EVec2::new(0., 18.),
+                    Pos2::new(rect.left() + 13., rect.bottom()))).add(label);
                 painter.line_segment(
                     [
                         Pos2::new(rect.left() + 13., p.y),
@@ -3224,6 +3249,7 @@ impl Editor {
                     }
                 });
             });
+        self.appearance_panel(ctx);
         let mut dock = std::mem::replace(&mut self.dock, Self::default_dock());
         egui_dock::DockArea::new(&mut dock)
             .style(crate::shared_ui::dock_style(ctx, Self::theme()))
@@ -3232,7 +3258,6 @@ impl Editor {
             .show_leaf_collapse_buttons(false)
             .show(ctx, &mut Viewer { editor: self });
         self.dock = dock;
-        self.appearance_window(ctx);
         self.confirmation(ctx);
         self.tool_changed = false;
         if ctx.input(|i| i.pointer.any_released()) {
@@ -3274,6 +3299,8 @@ impl Default for Editor {
             appearance_editor: super::appearance_ui::GraphEditor::default(),
             appearance_open: false,
             appearance_target: None,
+            appearance_pinned: false,
+            appearance_rect: egui::Rect::NOTHING,
             width_selected: None,
             node_selected: None,
             handle_selected: None,
@@ -4482,6 +4509,51 @@ mod tests {
             .any(|n| n.kind == Kind::Transform));
     }
     #[test]
+    fn node_panel_reserves_space_and_canvas_shortcuts_remain_available() {
+        let (ctx, mut e) = setup();
+        let original_height = e.canvas_rect.height();
+        e.open_appearance_editor();
+        frame(&ctx, &mut e, 0.1, vec![], egui::Modifiers::NONE);
+        let output = frame(&ctx, &mut e, 0.6, vec![], egui::Modifiers::NONE);
+        assert!(e.appearance_rect.height() >= 180.);
+        assert!(e.canvas_rect.height() < original_height - 100.);
+        assert!(e.canvas_rect.bottom() <= e.appearance_rect.top());
+        assert!(output.shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Text(t) if (t.angle + std::f32::consts::FRAC_PI_2).abs() < 0.001)));
+        let pointer = e.canvas_rect.center();
+        frame(&ctx, &mut e, 0.7, vec![egui::Event::PointerMoved(pointer), egui::Event::Key {
+            key: egui::Key::V, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE,
+        }], egui::Modifiers::NONE);
+        assert!(e.tool == Tool::Select);
+        assert!(e.appearance_open);
+        e.appearance_open = false;
+        frame(&ctx, &mut e, 0.8, vec![], egui::Modifiers::NONE);
+        frame(&ctx, &mut e, 1.3, vec![], egui::Modifiers::NONE);
+        assert!((e.canvas_rect.height() - original_height).abs() < 2.);
+    }
+    #[test]
+    fn named_sets_survive_project_save_and_old_documents_still_load() {
+        use super::super::appearance_assets::{self, Preset};
+        let mut e = example_editor();
+        let original = e.doc.clone();
+        let preset = Preset::new("紙の輪郭", "文字", &super::super::appearance::Graph::rough()).unwrap();
+        appearance_assets::register(&mut e.doc.appearance_presets, preset.clone()).unwrap();
+        e.stroke_mut().unwrap().appearance = Some(preset.apply());
+        e.doc.validate().unwrap();
+        let saved = serde_json::to_vec(&e.doc).unwrap();
+        let read: Document = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(read, e.doc);
+        e.record(original.clone()); e.undo();
+        assert_eq!(e.doc, original);
+        let mut old = serde_json::to_value(&read).unwrap();
+        old.as_object_mut().unwrap().remove("appearance_presets");
+        let graph = &mut old["strokes"][0]["appearance"];
+        graph.as_object_mut().unwrap().remove("name");
+        for n in graph["nodes"].as_array_mut().unwrap() { n.as_object_mut().unwrap().remove("label"); }
+        let migrated: Document = serde_json::from_value(old).unwrap();
+        migrated.validate().unwrap();
+        assert!(migrated.appearance_presets.is_empty());
+    }
+    #[test]
     fn graph_editor_opens_for_primary_path_and_is_part_of_document_undo() {
         let (ctx, mut e) = setup();
         let before = e.doc.clone();
@@ -4490,7 +4562,8 @@ mod tests {
         assert_eq!(e.appearance_target, e.selected);
         assert!(e.stroke().unwrap().appearance.is_some());
         e.record(before.clone());
-        // Canvas shortcuts must not delete a path while editing graph nodes.
+        // Canvas shortcuts must not delete a path while the pointer is over the node area.
+        e.appearance_rect = egui::Rect::from_min_size(Pos2::ZERO, EVec2::splat(500.));
         let event = egui::Event::Key {
             key: egui::Key::Delete,
             physical_key: None,
@@ -4500,7 +4573,7 @@ mod tests {
         };
         let _ = ctx.run(
             egui::RawInput {
-                events: vec![event],
+                events: vec![egui::Event::PointerMoved(Pos2::new(20., 20.)), event],
                 ..Default::default()
             },
             |ctx| e.shortcuts(ctx),
@@ -4508,8 +4581,9 @@ mod tests {
         assert_eq!(e.doc.strokes.len(), before.strokes.len());
         e.undo();
         assert_eq!(e.doc, before);
-        e.appearance_window(&ctx);
-        assert!(!e.appearance_open);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| e.appearance_panel(ctx));
+        assert!(e.appearance_open); // dock stays available to add nodes again
+        assert!(e.stroke().unwrap().appearance.is_none());
     }
     #[test]
     fn marquee_uses_painted_geometry_instead_of_only_bounds() {

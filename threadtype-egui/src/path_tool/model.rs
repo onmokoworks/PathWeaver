@@ -380,6 +380,8 @@ pub struct Document {
     pub next_id: u64,
     #[serde(default = "default_angle_step")]
     pub angle_step: f64,
+    #[serde(default)]
+    pub appearance_presets: Vec<super::appearance_assets::Preset>,
     pub strokes: Vec<Stroke>,
 }
 fn default_angle_step() -> f64 {
@@ -396,6 +398,7 @@ impl Default for Document {
             version: 3,
             next_id: 1,
             angle_step: default_angle_step(),
+            appearance_presets: vec![],
             strokes: vec![],
         }
     }
@@ -470,6 +473,8 @@ impl Document {
         self.validate()
     }
     pub fn validate(&self) -> Result<(), String> {
+        if self.appearance_presets.len() > 32 { return Err("ノードセットは32個までです".into()); }
+        for preset in &self.appearance_presets { preset.validate()?; }
         if self.format != "pathweaver" || self.version != 3 {
             return Err("対応していないプロジェクト形式です".into());
         }
