@@ -1,3 +1,4 @@
+use crate::theme::{Role, color as ui_color};
 use crate::{
     app::{Drag, Editing, Workspace},
     drawing::{View, dot, line, normal_bounds, rect, text, wire},
@@ -44,11 +45,13 @@ fn height(n: &Node) -> f32 {
 }
 fn color(k: Kind) -> u32 {
     match k {
-        Kind::Input | Kind::Output => 0x75464c,
-        Kind::Value | Kind::Math | Kind::Measure => 0x62517b,
-        Kind::Fill | Kind::Opacity | Kind::Shadow | Kind::Glow | Kind::Blur => 0x796539,
-        Kind::Stack | Kind::Boolean | Kind::Pathfinder => 0x426c53,
-        _ => 0x3b5e78,
+        Kind::Input | Kind::Output => ui_color(Role::NodeIo),
+        Kind::Value | Kind::Math | Kind::Measure => ui_color(Role::NodeNumber),
+        Kind::Fill | Kind::Opacity | Kind::Shadow | Kind::Glow | Kind::Blur => {
+            ui_color(Role::NodePaint)
+        }
+        Kind::Stack | Kind::Boolean | Kind::Pathfinder => ui_color(Role::NodeCombine),
+        _ => ui_color(Role::NodeGeometry),
     }
 }
 fn output(n: &Node) -> KPoint {
@@ -697,7 +700,7 @@ impl Workspace {
     }
     pub fn paint_nodes(&self, b: Bounds<Pixels>, w: &mut Window, cx: &mut App) {
         w.with_content_mask(Some(ContentMask { bounds: b }), |w| {
-            rect(w, b, 0x202020, 0, 0., 0.);
+            rect(w, b, ui_color(Role::NodeCanvas), 0, 0., 0.);
             let step = 24. * self.node_view.zoom;
             let offsetx = self.node_view.pan[0].rem_euclid(step);
             let offsety = self.node_view.pan[1].rem_euclid(step);
@@ -708,7 +711,7 @@ impl Workspace {
                         b.origin
                             + point(px(offsetx + x as f32 * step), px(offsety + y as f32 * step)),
                         0.7,
-                        0x393939,
+                        ui_color(Role::Border),
                     );
                 }
             }
@@ -731,9 +734,9 @@ impl Workspace {
                             self.node_view.screen(output(src), b),
                             self.node_view.screen(pos, b),
                             if src.kind.is_number() {
-                                0xb29ed2
+                                ui_color(Role::NumberSocket)
                             } else {
-                                0x8ebd9e
+                                ui_color(Role::ShapeSocket)
                             },
                             2.,
                         );
@@ -749,11 +752,15 @@ impl Workspace {
                 rect(
                     w,
                     bounds,
-                    if n.bypass { 0x282828 } else { 0x363636 },
-                    if self.node_selection.contains(&n.id) {
-                        0xeea95d
+                    if n.bypass {
+                        ui_color(Role::NodeMuted)
                     } else {
-                        0x121212
+                        ui_color(Role::Node)
+                    },
+                    if self.node_selection.contains(&n.id) {
+                        ui_color(Role::Accent)
+                    } else {
+                        ui_color(Role::Border)
                     },
                     if self.node_selection.contains(&n.id) {
                         2.
@@ -781,7 +788,7 @@ impl Workspace {
                     cx,
                     origin + point(px(9. * z), px(3. * z)),
                     title,
-                    0xf0f0f0,
+                    ui_color(Role::Text),
                     (12. * z).max(8.),
                 );
                 if !n.label.is_empty() {
@@ -790,7 +797,7 @@ impl Workspace {
                         cx,
                         origin + point(px(9. * z), px(28. * z)),
                         n.kind.label(),
-                        0xaaaaaa,
+                        ui_color(Role::Muted),
                         (9. * z).max(7.),
                     );
                 }
@@ -800,7 +807,7 @@ impl Workspace {
                         cx,
                         origin + point(px(130. * z), px(28. * z)),
                         "無効",
-                        0xaaaaaa,
+                        ui_color(Role::Muted),
                         (10. * z).max(7.),
                     );
                 }
@@ -811,7 +818,11 @@ impl Workspace {
                         w,
                         at,
                         4. * z.max(0.6),
-                        if numeric { 0xb3a0d1 } else { 0x91bea2 },
+                        if numeric {
+                            ui_color(Role::NumberSocket)
+                        } else {
+                            ui_color(Role::ShapeSocket)
+                        },
                     );
                     let label = match socket {
                         Socket::Number(p) => format!("{}  {:.2}", label, n.number(p)),
@@ -822,7 +833,7 @@ impl Workspace {
                         cx,
                         at + point(px(10. * z), px(-8. * z)),
                         label,
-                        0xd2d2d2,
+                        ui_color(Role::Text),
                         (11. * z).max(7.),
                     );
                 }
@@ -832,9 +843,9 @@ impl Workspace {
                         self.node_view.screen(output(n), b),
                         4. * z.max(0.6),
                         if n.kind.is_number() {
-                            0xb3a0d1
+                            ui_color(Role::NumberSocket)
                         } else {
-                            0x91bea2
+                            ui_color(Role::ShapeSocket)
                         },
                     );
                 }
@@ -842,7 +853,13 @@ impl Workspace {
             match self.drag {
                 Drag::Connect { from, at, .. } => {
                     if let Some(n) = g.node(from) {
-                        wire(w, self.node_view.screen(output(n), b), at, 0xf1ba77, 2.);
+                        wire(
+                            w,
+                            self.node_view.screen(output(n), b),
+                            at,
+                            ui_color(Role::Accent),
+                            2.,
+                        );
                     }
                 }
                 Drag::NodeBox { start, current, .. } => w.paint_quad(quad(
@@ -853,10 +870,12 @@ impl Workspace {
                     px(0.),
                     rgba(0x78a8db18),
                     px(1.),
-                    rgb(0x78a8db),
+                    rgb(ui_color(Role::Accent)),
                     Default::default(),
                 )),
-                Drag::Cut { start, current } => line(w, &[start, current], 0xed947a, 2.),
+                Drag::Cut { start, current } => {
+                    line(w, &[start, current], ui_color(Role::Error), 2.)
+                }
                 _ => {}
             }
         });
@@ -864,7 +883,7 @@ impl Workspace {
     fn node_inspector(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut col = div()
             .id("node-inspector")
-            .w(px(240.))
+            .w(px(280.))
             .flex_shrink_0()
             .h_full()
             .overflow_y_scroll()
@@ -872,7 +891,7 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap_2()
-            .bg(rgb(0x2c2c2c));
+            .bg(rgb(ui_color(Role::Surface)));
         if let Some(n) = self
             .node_selection
             .last()
@@ -881,7 +900,11 @@ impl Workspace {
             let id = n.id;
             let label = n.label.clone();
             col = col
-                .child(div().text_color(rgb(0xaaaabb)).child(n.kind.label()))
+                .child(
+                    div()
+                        .text_color(rgb(ui_color(Role::Muted)))
+                        .child(n.kind.label()),
+                )
                 .child(self.button(
                     if label.is_empty() {
                         "名前を付ける".into()
@@ -913,19 +936,18 @@ impl Workspace {
             }
             for spec in n.parameters() {
                 let p = spec.key;
-                let value = n.number(p);
                 let bound = n.bindings.iter().any(|(k, _)| *k == p);
-                col = col.child(self.button(
-                    format!(
-                        "{}  {:.3}{}",
-                        spec.label,
-                        value,
-                        if bound { " ← 接続" } else { "" }
-                    ),
-                    false,
-                    cx,
-                    move |s, w, cx| s.start_edit(Editing::Parameter(p), format!("{value}"), w, cx),
-                ));
+                if bound {
+                    col = col.child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .child(spec.label)
+                            .child("接続元で調整"),
+                    );
+                } else {
+                    col = col.child(self.numeric_field(spec.label, Editing::Parameter(p), cx));
+                }
             }
             if matches!(n.kind, Kind::Fill | Kind::Shadow | Kind::Glow) {
                 let c = n.color;
@@ -1111,7 +1133,7 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap_1()
-            .bg(rgb(0x2c2c2c))
+            .bg(rgb(ui_color(Role::Surface)))
             .child(self.button(
                 format!(
                     "検索：{}",
@@ -1150,7 +1172,7 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap_1()
-            .bg(rgb(0x2c2c2c))
+            .bg(rgb(ui_color(Role::Surface)))
             .child(self.button(
                 format!(
                     "名前：{}",
@@ -1189,7 +1211,7 @@ impl Workspace {
             .child(
                 div()
                     .py_2()
-                    .text_color(rgb(0xaaaaaa))
+                    .text_color(rgb(ui_color(Role::Muted)))
                     .child("保存済みセット / クリックで適用"),
             );
         for (i, p) in self.session.doc.appearance_presets.iter().enumerate() {
@@ -1262,7 +1284,7 @@ impl Workspace {
             .flex()
             .items_center()
             .gap_1()
-            .bg(rgb(0x333333))
+            .bg(rgb(ui_color(Role::Toolbar)))
             .child(div().w(px(135.)).child("ノードエディター"))
             .child(self.button("追加 ⇧A", self.add_open, cx, |s, _, _| {
                 s.add_open = !s.add_open;
@@ -1282,7 +1304,7 @@ impl Workspace {
             .child(
                 div()
                     .ml_2()
-                    .text_color(rgb(0xb6b6b6))
+                    .text_color(rgb(ui_color(Role::Muted)))
                     .child(name.to_string()),
             );
         if let Some(g) = self.session.graph() {
@@ -1354,15 +1376,15 @@ impl Workspace {
             .flex()
             .flex_col()
             .border_t_1()
-            .border_color(rgb(0x111111))
+            .border_color(rgb(ui_color(Role::Border)))
             .child(
                 div()
                     .id("node-resize")
                     .h(px(5.))
                     .flex_shrink_0()
                     .cursor(CursorStyle::ResizeUpDown)
-                    .bg(rgb(0x484848))
-                    .hover(|s| s.bg(rgb(0x819bb0)))
+                    .bg(rgb(ui_color(Role::Border)))
+                    .hover(|s| s.bg(rgb(ui_color(Role::Accent))))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|s, _, _, _| s.drag = Drag::Resize),

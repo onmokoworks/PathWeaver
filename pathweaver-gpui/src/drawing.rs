@@ -1,4 +1,5 @@
 use crate::app::{Drag, Tool, Workspace};
+use crate::theme::{Role, color as ui_color};
 use gpui::*;
 use kurbo::Point as KPoint;
 use pathweaver_core::outline;
@@ -79,7 +80,7 @@ pub fn text(
     let value = value.into();
     let run = TextRun {
         len: value.len(),
-        font: font("Hiragino Sans"),
+        font: font(crate::assets::UI_FONT),
         color: rgb(color).into(),
         background_color: None,
         underline: None,
@@ -115,7 +116,7 @@ pub fn wire(window: &mut Window, a: Point<Pixels>, b: Point<Pixels>, color: u32,
 impl Workspace {
     pub fn paint_art(&self, b: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
         window.with_content_mask(Some(ContentMask { bounds: b }), |window| {
-            rect(window, b, 0x242424, 0, 0., 0.);
+            rect(window, b, ui_color(Role::Canvas), 0, 0., 0.);
             let step = self.session.doc.grid_spacing as f32;
             let lo = self.art_view.world(b.origin, b);
             let hi = self.art_view.world(b.bottom_right(), b);
@@ -130,7 +131,7 @@ impl Workspace {
                             self.art_view.screen(KPoint::new(x, lo.y), b),
                             self.art_view.screen(KPoint::new(x, hi.y), b),
                         ],
-                        0x2d2d2d,
+                        ui_color(Role::Grid),
                         1.,
                     );
                 }
@@ -144,7 +145,7 @@ impl Workspace {
                             self.art_view.screen(KPoint::new(lo.x, y), b),
                             self.art_view.screen(KPoint::new(hi.x, y), b),
                         ],
-                        0x2d2d2d,
+                        ui_color(Role::Grid),
                         1.,
                     );
                 }
@@ -164,7 +165,7 @@ impl Workspace {
                 line(
                     window,
                     &[self.art_view.screen(a, b), self.art_view.screen(z, b)],
-                    0x536f7b,
+                    ui_color(Role::Guide),
                     1.,
                 );
             }
@@ -202,7 +203,7 @@ impl Workspace {
                         if let Some(p) = points.first().copied() {
                             points.push(p);
                         }
-                        line(window, &points, 0xe69b53, 1.);
+                        line(window, &points, ui_color(Role::Accent), 1.);
                     }
                 }
             }
@@ -218,22 +219,22 @@ impl Workspace {
                         .iter()
                         .map(|p| self.art_view.screen(p.p, b))
                         .collect();
-                    line(window, &points, 0x78a8db, 1.);
+                    line(window, &points, ui_color(Role::Accent), 1.);
                     if let Some(at) = self.session.segment.filter(|at| at.stroke == s.id)
                         && let Some(i) = s.segment_index(at.node)
                     {
                         let points: Vec<_> = (0..=40)
                             .map(|n| self.art_view.screen(s.eval(i, n as f64 / 40.), b))
                             .collect();
-                        line(window, &points, 0xf0a85b, 2.5);
+                        line(window, &points, ui_color(Role::Accent), 2.5);
                     }
                     for n in &s.nodes {
                         let p = self.art_view.screen(n.p, b);
                         for v in [n.incoming, n.outgoing] {
                             if v.hypot() > 0.1 {
                                 let q = self.art_view.screen(n.p + v, b);
-                                line(window, &[p, q], 0x859bb1, 1.);
-                                dot(window, q, 3., 0x9fb9d5);
+                                line(window, &[p, q], ui_color(Role::Accent), 1.);
+                                dot(window, q, 3., ui_color(Role::Accent));
                             }
                         }
                         rect(
@@ -247,11 +248,11 @@ impl Workspace {
                                     node: n.id,
                                 })
                             {
-                                0xf0a85b
+                                ui_color(Role::Accent)
                             } else {
-                                0xe1e1e1
+                                ui_color(Role::Text)
                             },
-                            0x242424,
+                            ui_color(Role::Canvas),
                             1.,
                             1.,
                         );
@@ -263,9 +264,9 @@ impl Workspace {
                             let w = s.width(target).unwrap();
                             let a = self.art_view.screen(center + direction * w.left, b);
                             let z = self.art_view.screen(center - direction * w.right, b);
-                            line(window, &[a, z], 0x86b5d4, 1.);
-                            dot(window, a, 4., 0x85b8e7);
-                            dot(window, z, 4., 0x85b8e7);
+                            line(window, &[a, z], ui_color(Role::Accent), 1.);
+                            dot(window, a, 4., ui_color(Role::Accent));
+                            dot(window, z, 4., ui_color(Role::Accent));
                         }
                     }
                 }
@@ -279,7 +280,7 @@ impl Workspace {
                         px(0.),
                         transparent_black(),
                         px(1.),
-                        rgb(0x81705c),
+                        rgb(ui_color(Role::Warning)),
                         Default::default(),
                     ));
                 }
@@ -292,7 +293,7 @@ impl Workspace {
                     px(0.),
                     rgba(0x78a8db18),
                     px(1.),
-                    rgb(0x78a8db),
+                    rgb(ui_color(Role::Accent)),
                     Default::default(),
                 ));
             }
@@ -305,7 +306,7 @@ impl Workspace {
                             self.art_view.screen(g.origin - g.direction * reach, b),
                             self.art_view.screen(g.origin + g.direction * reach, b),
                         ],
-                        0x7bcbb8,
+                        ui_color(Role::Guide),
                         1.,
                     );
                     if g.kind == pathweaver_core::snapping::Kind::Intersection {
@@ -317,7 +318,7 @@ impl Workspace {
                                 self.art_view
                                     .screen(g.origin + kurbo::Vec2::new(reach, 0.), b),
                             ],
-                            0x7bcbb8,
+                            ui_color(Role::Guide),
                             1.,
                         );
                     }
@@ -332,8 +333,8 @@ impl Workspace {
                     rect(
                         window,
                         Bounds::new(center - point(px(4.), px(4.)), size(px(8.), px(8.))),
-                        0x7bcbb8,
-                        0x202020,
+                        ui_color(Role::Guide),
+                        ui_color(Role::Input),
                         1.,
                         1.,
                     );
@@ -350,7 +351,7 @@ impl Workspace {
                     cx,
                     self.cursor + point(px(14.), px(14.)),
                     label,
-                    0x7bcbb8,
+                    ui_color(Role::Guide),
                     12.,
                 );
             }
@@ -358,7 +359,7 @@ impl Workspace {
             rect(
                 window,
                 Bounds::new(b.origin, size(b.size.width, px(20.))),
-                0x303030,
+                ui_color(Role::Toolbar),
                 0,
                 0.,
                 0.,
@@ -366,7 +367,7 @@ impl Workspace {
             rect(
                 window,
                 Bounds::new(b.origin, size(px(20.), b.size.height)),
-                0x303030,
+                ui_color(Role::Toolbar),
                 0,
                 0.,
                 0.,
@@ -380,7 +381,7 @@ impl Workspace {
                     cx,
                     point(p.x + px(3.), b.top() + px(1.)),
                     format!("{x:.0}"),
-                    0xaaaaaa,
+                    ui_color(Role::Muted),
                     10.,
                 );
             }
@@ -399,7 +400,7 @@ impl Workspace {
                     cx,
                     b.center() - point(px(170.), px(12.)),
                     "P：ペンで描く   /   サンプルを開く",
-                    0x999999,
+                    ui_color(Role::Muted),
                     15.,
                 );
             }
@@ -440,7 +441,7 @@ fn vertical_digits(window: &mut Window, at: Point<Pixels>, s: &str) {
         for (j, seg) in segments.iter().enumerate() {
             if mask & (1 << j) != 0 {
                 let p = seg.map(|(x, y)| at + point(px(y), px(-x - i as f32 * 6.)));
-                line(window, &p, 0xaaaaaa, 0.8);
+                line(window, &p, ui_color(Role::Muted), 0.8);
             }
         }
     }

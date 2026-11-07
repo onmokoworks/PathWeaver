@@ -1,3 +1,4 @@
+use crate::theme::{Role, color as ui_color};
 // Adapted from Zed GPUI 0.2.2 examples/input.rs (Apache-2.0).
 // Copyright Zed Industries. See THIRD_PARTY_NOTICES.md.
 use std::ops::Range;
@@ -481,7 +482,7 @@ impl Element for TextElement {
                         point(bounds.left() + cursor_pos, bounds.top()),
                         size(px(2.), bounds.bottom() - bounds.top()),
                     ),
-                    rgb(0x72a6df),
+                    rgb(ui_color(Role::Accent)),
                 )),
             )
         } else {
@@ -569,16 +570,16 @@ impl Render for TextInput {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .bg(rgb(0x1f1f1f))
+            .bg(rgb(ui_color(Role::Input)))
             .line_height(px(22.))
             .text_size(px(12.))
-            .text_color(rgb(0xe4e4e4))
+            .text_color(rgb(ui_color(Role::Text)))
             .child(
                 div()
-                    .h(px(30.))
+                    .h(px(24.))
                     .w_full()
                     .p(px(4.))
-                    .bg(rgb(0x1f1f1f))
+                    .bg(rgb(ui_color(Role::Input)))
                     .child(TextElement { input: cx.entity() }),
             )
     }

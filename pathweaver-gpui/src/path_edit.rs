@@ -1,4 +1,5 @@
 use crate::app::{Drag, Editing, Tool, Workspace};
+use crate::theme::{Role, color as ui_color};
 use gpui::{prelude::*, *};
 use kurbo::Point as KPoint;
 use pathweaver_core::{
@@ -333,12 +334,16 @@ impl Workspace {
     pub fn anchor_properties(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut col = div().flex().flex_col().gap_2();
         if matches!(self.tool, Tool::Direct | Tool::Convert) {
-            col = col.child(div().text_color(rgb(0x9fb9d5)).child(format!(
+            col = col.child(div().text_color(rgb(ui_color(Role::Accent))).child(format!(
                 "制御点  ·  {} 点を選択",
                 self.session.anchors.len()
             )));
             if self.merge_open {
-                col = col.child(div().text_color(rgb(0xf0a85b)).child("点のマージ先"));
+                col = col.child(
+                    div()
+                        .text_color(rgb(ui_color(Role::Accent)))
+                        .child("点のマージ先"),
+                );
                 for (label, target) in [
                     ("中心へ", MergeTarget::Center),
                     ("最初に選択した点へ", MergeTarget::First),
@@ -351,21 +356,14 @@ impl Workspace {
                 col = col.child(
                     div()
                         .text_size(px(11.))
-                        .text_color(rgb(0xaaaaaa))
+                        .text_color(rgb(ui_color(Role::Muted)))
                         .child("中心＝選択点の平均座標。最初／最後は点を選んだ順番です。"),
                 );
             }
-            if let Some(p) = self.session.anchor_position() {
-                for (kind, label, value) in
-                    [(Editing::AnchorX, "X", p.x), (Editing::AnchorY, "Y", p.y)]
-                {
-                    col = col.child(self.button(
-                        format!("{label}  {value:.3}"),
-                        false,
-                        cx,
-                        move |s, w, cx| s.start_edit(kind.clone(), value.to_string(), w, cx),
-                    ));
-                }
+            if self.session.anchor_position().is_some() {
+                col = col
+                    .child(self.numeric_field("X", Editing::AnchorX, cx))
+                    .child(self.numeric_field("Y", Editing::AnchorY, cx));
                 if self.session.anchors.len() > 1 {
                     col = col.child("座標は最後の点を基準に一緒に移動");
                 }
@@ -399,7 +397,7 @@ impl Workspace {
                     s.path_operation(Operation::Straighten, cx)
                 }));
             }
-            col=col.child(div().text_size(px(11.)).text_color(rgb(0xaaaaaa)).child("Shift：点を複数選択\n曲線をダブルクリック：点を追加\n⌥＋線分クリック：直線化\nアンカー ⇧C：クリックで角、ドラッグで曲線"));
+            col=col.child(div().text_size(px(11.)).text_color(rgb(ui_color(Role::Muted))).child("Shift：点を複数選択\n曲線をダブルクリック：点を追加\n⌥＋線分クリック：直線化\nアンカー ⇧C：クリックで角、ドラッグで曲線"));
         }
         if self.session.selected.len() > 1 {
             col = col
@@ -409,26 +407,26 @@ impl Workspace {
                 .child(
                     div()
                         .text_size(px(11.))
-                        .text_color(rgb(0xaaaaaa))
+                        .text_color(rgb(ui_color(Role::Muted)))
                         .child("効果を焼き込み、最初のパスの単色に変換"),
                 );
         }
         col.into_any_element()
     }
     pub fn snap_properties(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut col = div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(div().text_color(rgb(0xaaaaaa)).child("スナップ"));
+        let mut col = div().flex().flex_col().gap_1().child(
+            div()
+                .text_color(rgb(ui_color(Role::Muted)))
+                .child("スナップ"),
+        );
         for (index, label, on) in [
             (0, "接線", self.session.doc.snap_tangent),
             (1, "法線", self.session.doc.snap_normal),
             (2, "ガイド", self.session.doc.snap_guides),
             (3, "グリッド", self.session.doc.snap_grid),
         ] {
-            col = col.child(self.button(
-                format!("{label}吸着：{}", if on { "オン" } else { "オフ" }),
+            col = col.child(self.toggle_field(
+                format!("{label}にスナップ"),
                 on,
                 cx,
                 move |s, _, _| {
@@ -444,23 +442,17 @@ impl Workspace {
                 },
             ));
         }
-        let spacing = self.session.doc.grid_spacing;
-        col = col.child(self.button(
-            format!("グリッド間隔  {spacing}"),
-            false,
-            cx,
-            move |s, w, cx| s.start_edit(Editing::GridSpacing, spacing.to_string(), w, cx),
-        ));
+        col = col.child(self.numeric_field("間隔", Editing::GridSpacing, cx));
         col.child(
             div()
                 .text_size(px(11.))
-                .text_color(rgb(0xaaaaaa))
+                .text_color(rgb(ui_color(Role::Muted)))
                 .child("定規からドラッグ：ガイド追加\nVでガイド移動、外へ戻すと削除"),
         )
         .child(
             div()
                 .text_size(px(11.))
-                .text_color(rgb(0xaaaaaa))
+                .text_color(rgb(ui_color(Role::Muted)))
                 .child("Control：一時的に吸着を解除"),
         )
         .into_any_element()

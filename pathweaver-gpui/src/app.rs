@@ -1,3 +1,4 @@
+use crate::theme::{Role, color as ui_color};
 use crate::{
     drawing::View,
     input::TextInput,
@@ -23,6 +24,17 @@ pub enum Tool {
 }
 #[derive(Clone)]
 pub enum Drag {
+    Numeric {
+        key: Editing,
+        start: Point<Pixels>,
+        last: Point<Pixels>,
+        value: f64,
+        initial: f64,
+        step: f64,
+        min: f64,
+        max: f64,
+        moved: bool,
+    },
     None,
     Pan {
         nodes: bool,
@@ -71,7 +83,7 @@ pub enum Drag {
         current: Point<Pixels>,
     },
 }
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum Editing {
     GridSpacing,
     AnchorX,
@@ -116,6 +128,11 @@ pub struct Workspace {
     pub pen_path: Option<u64>,
     pub cursor: Point<Pixels>,
     pub merge_open: bool,
+    pub numeric_before: Option<Document>,
+    pub numeric_error: bool,
+    pub numeric_snap: bool,
+    pub edit_initial: f64,
+    pub inspector_tab: usize,
     pub snap_frames: Vec<snapping::Frame>,
     pub snap_guide: Option<snapping::Guide>,
 }
@@ -155,6 +172,11 @@ impl Workspace {
             pen_path: None,
             cursor: point(px(0.), px(0.)),
             merge_open: false,
+            numeric_before: None,
+            numeric_error: false,
+            numeric_snap: false,
+            edit_initial: 0.,
+            inspector_tab: 0,
             snap_frames: vec![],
             snap_guide: None,
         }
@@ -359,11 +381,26 @@ impl Workspace {
             .id(label.clone())
             .px_2()
             .py_1()
-            .rounded(px(3.))
+            .rounded(px(4.))
             .text_size(px(12.))
             .cursor_pointer()
-            .bg(rgb(if active { 0x526777 } else { 0x383838 }))
-            .hover(|s| s.bg(rgb(0x4b4b4b)))
+            .bg(rgb(if active {
+                ui_color(Role::Selected)
+            } else {
+                ui_color(Role::Button)
+            }))
+            .hover(move |s| {
+                s.bg(rgb(ui_color(if active {
+                    Role::Selected
+                } else {
+                    Role::Hover
+                })))
+            })
+            .text_color(rgb(ui_color(if active {
+                Role::OnAccent
+            } else {
+                Role::Text
+            })))
             .child(label)
             .on_click(cx.listener(move |s, _, w, cx| {
                 if s.editing.is_some() && !completes_edit {
@@ -384,6 +421,8 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.edit_initial = self.numeric_meta(&kind).map(|v| v.0).unwrap_or(0.);
+        self.numeric_error = false;
         self.editing = Some(kind);
         self.input.update(cx, |i, cx| i.set(value, window, cx));
         cx.notify();
@@ -397,30 +436,15 @@ impl Workspace {
         self.session.begin();
         let result = (|| -> Result<(), String> {
             match kind {
-                Editing::GridSpacing => {
-                    let value = text
-                        .parse::<f64>()
-                        .map_err(|_| "間隔を数値で入力してください")?;
-                    if !value.is_finite() || !(1.0..=10000.0).contains(&value) {
-                        return Err("間隔は1〜10000で入力してください".into());
-                    }
-                    self.session.doc.grid_spacing = value;
-                }
-                Editing::AnchorX | Editing::AnchorY => {
-                    let v = text
-                        .parse::<f64>()
-                        .map_err(|_| "座標を数値で入力してください")?;
-                    if !v.is_finite() || v.abs() > 1e6 {
-                        return Err("座標は ±1,000,000 の範囲です".into());
-                    }
-                    if let Some(p) = self.session.anchor_position() {
-                        let delta = if matches!(kind, Editing::AnchorX) {
-                            kurbo::Vec2::new(v - p.x, 0.)
-                        } else {
-                            kurbo::Vec2::new(0., v - p.y)
-                        };
-                        self.session.move_anchors(delta);
-                    }
+                Editing::GridSpacing
+                | Editing::AnchorX
+                | Editing::AnchorY
+                | Editing::Width
+                | Editing::Parameter(_)
+                | Editing::Rotation
+                | Editing::Scale => {
+                    let value = crate::controls::expression(&text, self.edit_initial)?;
+                    self.apply_numeric(&kind, value)?;
                 }
                 Editing::Search => self.search = text,
                 Editing::SetName => {
@@ -455,18 +479,6 @@ impl Workspace {
                         n.label = text;
                     }
                 }
-                Editing::Parameter(key) => {
-                    let v = text.parse::<f64>().map_err(|_| "数値を入力してください")?;
-                    let id = self.node_selection.last().copied();
-                    if let Some(n) = id.and_then(|id| self.session.graph_mut()?.node_mut(id)) {
-                        if let Some(spec) = n.parameters().iter().find(|p| p.key == key)
-                            && (!v.is_finite() || v < spec.min || v > spec.max)
-                        {
-                            return Err(format!("{}〜{}で入力してください", spec.min, spec.max));
-                        }
-                        n.set_number(key, v);
-                    }
-                }
                 Editing::Color => {
                     let hex = text.trim().trim_start_matches('#');
                     if hex.len() != 6 {
@@ -484,38 +496,6 @@ impl Workspace {
                         s.edge = Some(rgb);
                     }
                 }
-                Editing::Width => {
-                    let v = text.parse::<f64>().map_err(|_| "数値を入力してください")?;
-                    if !v.is_finite() || !(0.1..=1000.).contains(&v) {
-                        return Err("幅は0.1〜1000です".into());
-                    }
-                    for s in &mut self.session.doc.strokes {
-                        if self.session.selected.contains(&s.id) {
-                            s.set_line_width(v);
-                        }
-                    }
-                }
-                Editing::Rotation | Editing::Scale => {
-                    let v = text.parse::<f64>().map_err(|_| "数値を入力してください")?;
-                    if !v.is_finite() {
-                        return Err("有限の数値を入力してください".into());
-                    }
-                    if let Some(r) = self.session.bounds(true) {
-                        let transform = if matches!(kind, Editing::Scale) {
-                            if !(0.01..=100.).contains(&v) {
-                                return Err("拡大率は0.01〜100です".into());
-                            }
-                            Affine::scale(v)
-                        } else {
-                            Affine::rotate(v.to_radians())
-                        };
-                        self.session.transform(
-                            Affine::translate(r.center().to_vec2())
-                                * transform
-                                * Affine::translate(-r.center().to_vec2()),
-                        );
-                    }
-                }
             }
             self.session.doc.validate()?;
             Ok(())
@@ -524,9 +504,12 @@ impl Workspace {
             self.session.doc = before;
             self.session.commit();
             self.status = e;
+            self.numeric_error = true;
+            cx.notify();
             return;
         }
         self.session.commit();
+        self.numeric_error = false;
         self.editing = None;
         self.focus.focus(window);
         self.refresh(cx);
@@ -537,7 +520,7 @@ impl Workspace {
             .gap_1()
             .items_center()
             .p_2()
-            .bg(rgb(0x343d45))
+            .bg(rgb(ui_color(Role::Soft)))
             .child(div().flex_1().min_w_0().child(self.input.clone()))
             .child(self.button("適用", true, cx, |s, w, cx| s.commit_edit(w, cx)))
             .child(self.button("取消", false, cx, |s, w, _| {
@@ -568,7 +551,10 @@ impl Workspace {
     }
     fn art_down(&mut self, e: &MouseDownEvent, w: &mut Window, cx: &mut Context<Self>) {
         if self.editing.is_some() {
-            return;
+            self.commit_edit(w, cx);
+            if self.editing.is_some() {
+                return;
+            }
         }
         self.focus.focus(w);
         self.node_region = false;
@@ -704,6 +690,9 @@ impl Workspace {
     }
     pub fn mouse_move(&mut self, e: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.cursor = e.position;
+        if self.numeric_move(e, cx) {
+            return;
+        }
         if matches!(self.drag, Drag::None) {
             self.node_region = self.nodes_open && e.position.y >= self.art_bounds.get().bottom();
             return;
@@ -862,7 +851,26 @@ impl Workspace {
             cx.notify();
         }
     }
-    pub fn mouse_up(&mut self, e: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+    pub fn mouse_up(&mut self, e: &MouseUpEvent, w: &mut Window, cx: &mut Context<Self>) {
+        if let Drag::Numeric {
+            key,
+            initial,
+            moved,
+            ..
+        } = self.drag.clone()
+        {
+            self.session.commit();
+            self.drag = Drag::None;
+            self.numeric_before = None;
+            self.numeric_snap = false;
+            if !moved {
+                self.start_edit(key, initial.to_string(), w, cx);
+            } else {
+                self.status = "値を変更しました（⌘Zで元に戻す）".into();
+                self.refresh(cx);
+            }
+            return;
+        }
         match self.drag.clone() {
             Drag::Guide { index } => {
                 let b = self.art_bounds.get();
@@ -956,7 +964,34 @@ impl Workspace {
     fn key(&mut self, e: &KeyDownEvent, w: &mut Window, cx: &mut Context<Self>) {
         let k = &e.keystroke;
         let cmd = k.modifiers.platform || k.modifiers.control;
+        if matches!(self.drag, Drag::Numeric { .. }) && k.key != "escape" {
+            if k.key == "q" {
+                self.numeric_snap = true;
+            }
+            return;
+        }
         if self.editing.is_some() {
+            if matches!(k.key.as_str(), "up" | "down")
+                && let Some(kind) = self.editing.clone()
+                && let Some((_, min, max, step)) = self.numeric_meta(&kind)
+            {
+                let current = crate::controls::expression(
+                    self.input.read(cx).content.as_ref(),
+                    self.edit_initial,
+                )
+                .unwrap_or(self.edit_initial);
+                let value = crate::controls::adjusted(
+                    current,
+                    if k.key == "up" { 1. } else { -1. },
+                    step,
+                    min,
+                    max,
+                    (k.modifiers.alt, k.modifiers.shift, false),
+                );
+                self.input
+                    .update(cx, |i, cx| i.set(value.to_string(), w, cx));
+                return;
+            }
             if k.key == "enter" {
                 if self.input.read(cx).is_composing() {
                     return;
@@ -971,6 +1006,8 @@ impl Workspace {
         }
         if k.key == "escape" {
             self.session.cancel();
+            self.numeric_before = None;
+            self.numeric_snap = false;
             self.drag = Drag::None;
             self.snap_guide = None;
             self.pen_path = None;
@@ -1083,15 +1120,15 @@ impl Workspace {
         cx.notify();
     }
     fn toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
-        div()
+        let files = div()
             .flex()
             .items_center()
             .gap_1()
             .h(px(40.))
             .px_2()
-            .bg(rgb(0x303030))
+            .bg(rgb(ui_color(Role::Toolbar)))
             .border_b_1()
-            .border_color(rgb(0x171717))
+            .border_color(rgb(ui_color(Role::Border)))
             .child(
                 div()
                     .w(px(145.))
@@ -1112,12 +1149,128 @@ impl Workspace {
                 s.refresh(cx);
             }))
             .child(div().flex_1())
+            .child(self.button(
+                if crate::theme::is_dark() {
+                    "配色：ダーク"
+                } else {
+                    "配色：ライト"
+                },
+                false,
+                cx,
+                |s, _, cx| {
+                    s.status = crate::theme::toggle()
+                        .err()
+                        .unwrap_or_else(|| "配色を変更しました".into());
+                    s.input.update(cx, |_, cx| cx.notify());
+                },
+            ))
             .child(self.button("全体表示", false, cx, |s, _, _| s.fit_art()))
             .child(self.button("ノード", self.nodes_open, cx, |s, _, _| {
                 s.nodes_open = !s.nodes_open
             }))
+            .into_any_element();
+        let mut tools = div()
+            .h(px(36.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .bg(rgb(ui_color(Role::Surface)))
+            .border_b_1()
+            .border_color(rgb(ui_color(Role::Border)));
+        for (tool, icon, label) in [
+            (Tool::Select, "select", "選択 V"),
+            (Tool::Direct, "direct", "制御点 A"),
+            (Tool::Convert, "anchor", "アンカー ⇧C"),
+            (Tool::Pen, "pen", "ペン P"),
+            (Tool::Width, "width", "幅 W"),
+        ] {
+            let active = self.tool == tool;
+            tools = tools.child(
+                div()
+                    .id(SharedString::from(format!("tool-{icon}")))
+                    .size(px(28.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .bg(rgb(if self.tool == tool {
+                        ui_color(Role::Selected)
+                    } else {
+                        ui_color(Role::Toolbar)
+                    }))
+                    .hover(move |s| {
+                        s.bg(rgb(ui_color(if active {
+                            Role::Selected
+                        } else {
+                            Role::Hover
+                        })))
+                    })
+                    .child(
+                        svg()
+                            .path(format!("icons/{icon}.svg"))
+                            .size(px(19.))
+                            .text_color(rgb(ui_color(if self.tool == tool {
+                                Role::OnAccent
+                            } else {
+                                Role::Text
+                            }))),
+                    )
+                    .on_hover(cx.listener(move |s, hover: &bool, _, cx| {
+                        if *hover {
+                            s.status = label.into();
+                            cx.notify();
+                        }
+                    }))
+                    .on_click(cx.listener(move |s, _, w, cx| {
+                        if s.editing.is_some() {
+                            s.commit_edit(w, cx);
+                            if s.editing.is_some() {
+                                return;
+                            }
+                        }
+                        s.tool = tool;
+                        s.pen_path = None;
+                        s.node_region = false;
+                        s.focus.focus(w);
+                        cx.notify();
+                    })),
+            );
+        }
+        tools = tools
+            .child(
+                div()
+                    .ml_2()
+                    .text_color(rgb(ui_color(Role::Muted)))
+                    .child(match self.tool {
+                        Tool::Select => "選択",
+                        Tool::Direct => "制御点",
+                        Tool::Convert => "アンカー",
+                        Tool::Pen => "ペン",
+                        Tool::Width => "幅",
+                    }),
+            )
+            .child(div().flex_1())
+            .child(self.button("サンプル", false, cx, |s, w, cx| {
+                s.confirm_discard(w, cx, |s, _, cx| {
+                    s.session = Session::default();
+                    s.session.doc = Document::example();
+                    s.session.selected = vec![s.session.doc.strokes[0].id];
+                    s.fit_art();
+                    s.refresh(cx);
+                })
+            }));
+        div()
+            .flex()
+            .flex_col()
+            .flex_shrink_0()
+            .child(files)
+            .child(tools)
             .into_any_element()
     }
+
     fn paths_panel(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut list = div()
             .id("paths-list")
@@ -1164,57 +1317,94 @@ impl Workspace {
             );
         }
         div()
-            .w(px(205.))
+            .h(relative(0.26))
+            .max_h(px(132.))
+            .min_h(px(70.))
             .flex_shrink_0()
             .flex()
             .flex_col()
-            .bg(rgb(0x2b2b2b))
-            .border_r_1()
-            .border_color(rgb(0x171717))
-            .child(div().p_3().text_color(rgb(0xaaaaaa)).child("パス"))
-            .child(
-                div().flex().flex_wrap().gap_1().px_2().children(
-                    [
-                        (Tool::Select, "選択 V"),
-                        (Tool::Direct, "制御点 A"),
-                        (Tool::Convert, "アンカー ⇧C"),
-                        (Tool::Pen, "ペン P"),
-                        (Tool::Width, "幅 W"),
-                    ]
-                    .into_iter()
-                    .map(|(tool, label)| {
-                        self.button(label, self.tool == tool, cx, move |s, w, _| {
-                            s.tool = tool;
-                            s.pen_path = None;
-                            s.node_region = false;
-                            s.focus.focus(w);
-                        })
-                    }),
-                ),
-            )
-            .child(list)
-            .child(div().p_2().child(self.snap_properties(cx)))
+            .bg(rgb(ui_color(Role::Surface)))
+            .border_b_1()
+            .border_color(rgb(ui_color(Role::Border)))
             .child(
                 div()
-                    .p_2()
+                    .h(px(32.))
+                    .px_3()
                     .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(self.button("新規パス", false, cx, |s, w, _| {
+                    .items_center()
+                    .justify_between()
+                    .child("パス")
+                    .child(self.button("＋ 新規", false, cx, |s, w, _| {
                         s.tool = Tool::Pen;
                         s.pen_path = None;
+                        s.node_region = false;
                         s.focus.focus(w);
-                    }))
-                    .child(self.button("サンプルを開く", false, cx, |s, w, cx| {
-                        s.confirm_discard(w, cx, |s, _, cx| {
-                            s.session = Session::default();
-                            s.session.doc = Document::example();
-                            s.session.selected = vec![s.session.doc.strokes[0].id];
-                            s.fit_art();
-                            s.refresh(cx);
-                        });
                     })),
             )
+            .child(list)
+            .into_any_element()
+    }
+    fn inspector(&self, cx: &mut Context<Self>) -> AnyElement {
+        let tabs = div()
+            .flex()
+            .gap_1()
+            .p_2()
+            .border_b_1()
+            .border_color(rgb(ui_color(Role::Border)))
+            .child(
+                self.button("プロパティ", self.inspector_tab == 0, cx, |s, _, _| {
+                    s.inspector_tab = 0
+                }),
+            )
+            .child(self.button(
+                "グリッド・ガイド",
+                self.inspector_tab == 1,
+                cx,
+                |s, _, _| s.inspector_tab = 1,
+            ));
+        let content = if self.inspector_tab == 0 {
+            self.properties(cx)
+        } else {
+            div()
+                .id("grid-panel")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .p_3()
+                .child(self.snap_properties(cx))
+                .into_any_element()
+        };
+        div()
+            .w(px(280.))
+            .flex_shrink_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            .bg(rgb(ui_color(Role::Surface)))
+            .border_l_1()
+            .border_color(rgb(ui_color(Role::Border)))
+            .child(self.paths_panel(cx))
+            .child(tabs)
+            .child(
+                div().h(px(42.)).flex_shrink_0().child(
+                    if self
+                        .editing
+                        .as_ref()
+                        .is_some_and(|k| !crate::controls::is_numeric(k))
+                    {
+                        self.edit_strip(cx)
+                    } else {
+                        div()
+                            .px_3()
+                            .py_2()
+                            .text_size(px(11.))
+                            .text_color(rgb(ui_color(Role::Muted)))
+                            .child("クリックで入力 · ドラッグで調整")
+                            .into_any_element()
+                    },
+                ),
+            )
+            .child(content)
             .into_any_element()
     }
     fn properties(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1224,33 +1414,32 @@ impl Workspace {
             } else {
                 "properties"
             })
-            .w(px(225.))
-            .flex_shrink_0()
-            .h_full()
+            .w_full()
+            .flex_1()
+            .min_h_0()
             .overflow_y_scroll()
-            .bg(rgb(0x2b2b2b))
+            .bg(rgb(ui_color(Role::Surface)))
             .border_l_1()
-            .border_color(rgb(0x171717))
+            .border_color(rgb(ui_color(Role::Border)))
             .p_3()
             .flex()
             .flex_col()
             .gap_2()
-            .child(div().text_color(rgb(0xaaaaaa)).child("パスの設定"));
+            .child(
+                div()
+                    .text_color(rgb(ui_color(Role::Muted)))
+                    .child("パスの設定"),
+            );
         col = col.child(self.anchor_properties(cx));
         if let Some(path) = self.session.active() {
             let name = path.name.clone();
-            let width = path.start_width.left + path.start_width.right;
             let color = path.edge.unwrap_or([224; 3]);
             col = col
                 .child(self.button(name.clone(), false, cx, move |s, w, cx| {
                     s.start_edit(Editing::PathName, name.clone(), w, cx)
                 }))
                 .child(format!("{} パスを選択", self.session.selected.len()))
-                .child(
-                    self.button(format!("線幅  {width:.1}"), false, cx, move |s, w, cx| {
-                        s.start_edit(Editing::Width, format!("{width:.1}"), w, cx)
-                    }),
-                )
+                .child(self.numeric_field("線幅", Editing::Width, cx))
                 .child(self.button(
                     format!("線色  #{:02X}{:02X}{:02X}", color[0], color[1], color[2]),
                     false,
@@ -1320,12 +1509,8 @@ impl Workspace {
                         s.refresh(cx);
                     },
                 ))
-                .child(self.button("回転…", false, cx, |s, w, cx| {
-                    s.start_edit(Editing::Rotation, "15".into(), w, cx)
-                }))
-                .child(self.button("拡大・縮小…", false, cx, |s, w, cx| {
-                    s.start_edit(Editing::Scale, "1.2".into(), w, cx)
-                }))
+                .child(self.numeric_field("回転 °", Editing::Rotation, cx))
+                .child(self.numeric_field("拡大率", Editing::Scale, cx))
                 .child(self.button("複製 ⌘D", false, cx, |s, _, cx| {
                     s.session.duplicate();
                     s.refresh(cx);
@@ -1359,6 +1544,9 @@ impl Workspace {
 }
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.node_height = self
+            .node_height
+            .min((f32::from(window.viewport_size().height) * 0.48).max(180.));
         let owner = self.session.active().map(|s| s.id);
         if self.node_owner != owner {
             self.node_owner = owner;
@@ -1407,28 +1595,29 @@ impl Render for Workspace {
             .flex()
             .flex_1()
             .min_h_0()
-            .child(self.paths_panel(cx))
             .child(canvas)
-            .child(self.properties(cx));
+            .child(self.inspector(cx));
         let mut root = div()
             .key_context("PathWeaver")
             .track_focus(&self.focus)
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(0x252525))
-            .text_color(rgb(0xdddddd))
+            .bg(rgb(ui_color(Role::Background)))
+            .text_color(rgb(ui_color(Role::Text)))
             .text_size(px(12.))
-            .font_family("Hiragino Sans")
+            .font_family(crate::assets::UI_FONT)
             .on_key_down(cx.listener(Self::key))
+            .on_key_up(cx.listener(|s, e: &KeyUpEvent, _, _| {
+                if e.keystroke.key == "q" {
+                    s.numeric_snap = false;
+                }
+            }))
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up(MouseButton::Middle, cx.listener(Self::mouse_up))
             .on_mouse_up(MouseButton::Right, cx.listener(Self::mouse_up))
             .child(self.toolbar(cx));
-        if self.editing.is_some() {
-            root = root.child(self.edit_strip(cx));
-        }
         root = root.child(main);
         if self.nodes_open {
             root = root.child(self.nodes_panel(cx));
@@ -1441,8 +1630,8 @@ impl Render for Workspace {
                 .flex()
                 .items_center()
                 .justify_between()
-                .bg(rgb(0x323232))
-                .text_color(rgb(0xb8b8b8))
+                .bg(rgb(ui_color(Role::Toolbar)))
+                .text_color(rgb(ui_color(Role::Muted)))
                 .child(self.status.clone())
                 .child(format!(
                     "{} パス    {:.0}%",

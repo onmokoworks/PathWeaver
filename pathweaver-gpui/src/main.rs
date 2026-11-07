@@ -1,12 +1,16 @@
 mod app;
+mod assets;
+mod controls;
 mod drawing;
 mod input;
 mod nodes;
 mod path_edit;
 mod session;
+mod theme;
 use gpui::{prelude::*, *};
 fn main() {
-    Application::new().run(|cx| {
+    theme::initialize();
+    Application::new().with_assets(assets::Assets).run(|cx| {
         input::bind_keys(cx);
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {

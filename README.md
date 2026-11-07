@@ -42,6 +42,23 @@ GPUI版とegui版は別のbundle IDなので、従来版の作業を保ったま
 - Cmd+O／S／Shift+S：開く／保存／別名保存。Cmd+E：SVG書き出し。
 - Cmd+Z／Shift+Z：Undo／Redo。Cmd+D：パス複製。Cmd+Q／W：終了（未保存なら確認）。
 
+### 配置とパラメーター操作
+
+ThreadShapeを参考に、上部にツール、右側にパス一覧と「プロパティ／グリッド・ガイド」、下部にノードを配置しています。設定入力中もキャンバスの位置は変わりません。上部の「配色」でライト／ダークを切り替え、次回起動時にも選択を保持します。作品の色は変更しません。
+
+Tweeqのコンパクトなパラメーター操作を参考に、点のX/Y、線幅、回転、拡大率、グリッド間隔、各ノードの数値を共通の入力欄にしました。
+
+- 数値をクリック：その場で入力。Enterで適用、Escapeで取消。
+- 横ドラッグ：値を調整。Optionで0.1倍、Shiftで10倍。Qを押している間は刻みに合わせます。
+- 入力中の↑／↓：1段階ずつ増減（Option／Shiftも使用可）。
+- `100 / 3`、`(x + 10) * 2`のような四則演算に対応。`x`は編集開始時の値です。
+- ドラッグ中はプレビューし、離すと確定。ドラッグ全体を⌘Z 1回で戻せます。Escapeで開始前へ戻します。
+- 回転は現在の形からの角度、拡大率は現在の形に対する倍率です。適用後は0°／1倍に戻ります。
+- 他ノードから接続されたパラメーターは、接続元の数値ノードで調整します。
+
+TweeqのVueコンポーネント自体は組み込まず、GPUIで操作を実装しています。任意のJavaScript実行、複数パラメーターの範囲選択、縦方向での速度変更には未対応です。
+仮のツールアイコンは `pathweaver-gpui/assets/icons/*.svg`、UIフォントは `pathweaver-gpui/src/assets.rs` の `UI_FONT` を変更して再ビルドできます。現在はmacOSのHiragino Sansを使い、フォントファイルは同梱していません。
+
 ### 点の座標・分離・連結・マージ
 
 制御点を選ぶと右側にX/Y座標と編集ボタンが現れます。座標は文書単位です。複数点の座標入力は最後に選んだ点を基準に、相対位置を保って全選択点を移動します。
@@ -56,7 +73,7 @@ GPUI版とegui版は別のbundle IDなので、従来版の作業を保ったま
 
 ### 接線・法線スナップ
 
-左側の「スナップ」で接線・法線・ガイド・グリッドの吸着を切り替え、「グリッド間隔」で文書単位の間隔（1〜10000）を設定できます。ペン描画、点・ハンドルの編集、選択パスの移動に対応します。吸着中は種類と補助線／吸着点を表示し、Controlで一時解除できます。
+右側の「グリッド・ガイド」で接線・法線・ガイド・グリッドの吸着を切り替え、「間隔」で文書単位の間隔（1〜10000）を設定できます。ペン描画、点・ハンドルの編集、選択パスの移動に対応します。吸着中は種類と補助線／吸着点を表示し、Controlで一時解除できます。
 
 - 上の定規から下へドラッグすると横ガイド、左の定規から右へドラッグすると縦ガイドを作れます。
 - **V**でガイドの線をドラッグして移動。定規やキャンバス外へ戻して離すと削除します。パスと重なる場所ではパスの選択を優先します。
@@ -112,6 +129,7 @@ Windowsでは `run-pathweaver.ps1`、Linuxでは `./run-pathweaver.sh` が従来
 
 ## 参考とライセンス
 
+UIの参考：[ThreadShape](https://github.com/onmokoworks/ThreadShape)、[Tweeq](https://github.com/baku89/tweeq)（パラメーターの配置、ドラッグ・精密入力・式入力）。
 操作の参考：[Blenderの頂点マージ](https://docs.blender.org/manual/en/5.2/modeling/meshes/editing/mesh/merge.html)、[Blenderノード](https://docs.blender.org/manual/en/latest/interface/controls/nodes/index.html)、[Node Wrangler](https://docs.blender.org/manual/en/latest/addons/node_wrangler.html)。
 パス編集の設計参考：[Pave](https://baku89.github.io/pave/)（位置・接線・法線とパスの組み合わせ）。JSライブラリの組み込みではなく、文字・造形に必要な操作をRustの共通コアへ実装しています。
 文字入力の実装はGPUI公式サンプルを基にしています。詳細は [THIRD_PARTY_NOTICES.md](pathweaver-gpui/THIRD_PARTY_NOTICES.md) を参照してください。
