@@ -31,6 +31,7 @@ ensure_closed() {
     fi
 }
 ensure_closed
+if [[ "$frontend" == pathweaver-gpui ]]; then ./scripts/build-tweeq-ui.sh; fi
 export CARGO_TARGET_DIR="$PWD/$frontend/target"
 cargo build --manifest-path "$frontend/Cargo.toml" --locked --bin pathweaver ${build_flags[@]+"${build_flags[@]}"}
 ensure_closed
@@ -51,6 +52,12 @@ cat > "$app/Contents/Info.plist" <<PLIST
     <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
 </dict></plist>
 PLIST
+if [[ "$frontend" == pathweaver-gpui ]]; then
+    mkdir -p "$app/Contents/Resources/Licenses"
+    cp tweeq-ui/vendor/tweeq/LICENSE "$app/Contents/Resources/Licenses/Tweeq-MIT.txt"
+    cp tweeq-ui/vendor/icon-licenses/* "$app/Contents/Resources/Licenses/"
+    cp pathweaver-gpui/THIRD_PARTY_NOTICES.md "$app/Contents/Resources/Licenses/THIRD_PARTY_NOTICES.md"
+fi
 plutil -lint "$app/Contents/Info.plist"
 codesign --force --sign - "$app"
 printf 'Built %s (%s, %s)\n' "$app" "$(uname -m)" "$profile"

@@ -1,7 +1,7 @@
 # PathWeaver
 
 Rust製の、レタリング・ロゴ制作向け可変幅SVGパスエディターです。
-Macの新しいフロントエンドは **GPUI**。キャンバス、パス一覧、設定欄、下部ノードエディターをGPUIで描画します。
+Macアプリは **GPUI＋Tweeq**。キャンバス・パス一覧・下部ノードエディターをGPUIで描き、パス／ノード／グリッドの設定入力には **TweeqのVueコンポーネント本体**をWKWebViewで組み込んでいます。
 ベジェ曲線・可変幅・25種類のノード効果・保存形式は、UIに依存しない `pathweaver-core` で共通化しています。
 
 ## Macで開発する
@@ -16,7 +16,7 @@ Xcode（Metalツールチェーンを含む）と [Rust stable](https://rustup.r
 ./run-pathweaver.sh --legacy  # 互換確認用のegui版
 ```
 
-初回は依存ライブラリの取得とビルドに時間がかかります。GPUIは `0.2.2` に固定し、Macのテキスト表示に必要な `font-kit` 機能を有効にしています。日本語UIはmacOSのヒラギノを使用します。
+UIのビルドにはNode.jsとnpmも必要です（`npm ci`はスクリプトが実行します）。インストール後のアプリにはNode.js・開発サーバー・インターネット接続は不要です。初回は依存ライブラリの取得とビルドに時間がかかります。GPUIは `0.2.2` に固定し、Macのテキスト表示に必要な `font-kit` 機能を有効にしています。日本語UIはmacOSのヒラギノを使用します。
 
 ### Finderから起動する
 
@@ -52,20 +52,16 @@ macOSのメニューバーに「ファイル」「編集」「表示」「パス
 
 ThreadShapeを参考に、左側に縦並びのツール、macOSメニューバーにファイル操作、右側にパス一覧と「プロパティ／グリッド・ガイド」、下部にノードを配置しています。設定入力中もキャンバスの位置は変わりません。右上の太陽／月アイコンでライト／ダークを切り替え、次回起動時にも選択を保持します。作品の色は変更しません。
 
-Tweeqのコンパクトなパラメーター操作を参考に、点のX/Y、線幅、回転、拡大率、グリッド間隔、各ノードの数値を共通の入力欄にしました。
+数値・色・文字・チェックボックス・選択欄・操作ボタン・ParameterGridは、[Tweeq](https://github.com/baku89/tweeq)の実コンポーネントを直接使用します。固定元は `957ecf70ab51153faa0026314061820a57becfb4`。ソース・ライセンス・組み込み用アダプターは `tweeq-ui/`、生成HTMLはアプリ本体に埋め込みます。詳細と上流への互換修正は [tweeq-ui/README.md](tweeq-ui/README.md) を参照してください。
 
-- 数値をクリック：その場で入力。Enterで適用、Escapeで取消。
-- 横ドラッグ：値を調整。Optionで0.1倍、Shiftで10倍。Qを押している間は刻みに合わせます。
-- 入力中の↑／↓：1段階ずつ増減（Option／Shiftも使用可）。
-- `100 / 3`、`(x + 10) * 2`のような四則演算に対応。`x`は編集開始時の値です。
-- ドラッグ中はプレビューし、離すと確定。ドラッグ全体を⌘Z 1回で戻せます。Escapeで開始前へ戻します。
-- 回転は現在の形からの角度、拡大率は現在の形に対する倍率です。適用後は0°／1倍に戻ります。
-- 他ノードから接続されたパラメーターは `↗ 値` で実際の値を表示し、接続元の数値ノードで調整します。
-- シードは整数です。小数の入力はエラーにし、Option操作でも整数のまま調整します。
+- 数値をクリックして入力、横ドラッグで調整。TweeqのOption／Shift／Q、式入力、色選択を使用します。
+- 編集中はRustの描画へプレビューし、確定した1操作を1回のUndoで戻します。Escapeで開始時の値へ戻します。
+- 回転・拡大率は編集開始時の形に対する相対操作です。確定後は0°／1倍へ戻ります。
+- 接続パラメーターは評価済みの値を表示し、接続元で調整します。整数Seedや範囲制限はRust側でも検証します。
+- 線・塗りの有無、ノード色、名前、座標、グリッド間隔も実Tweeqの入力へ接続しています。
+- macOSメニューの保存・Undo、コピー／貼り付けは入力欄と連携します。文書形式とRust側の履歴は維持します。
 
-線色・塗り・ノード色は同じ色入力を使います。色見本を押すと色面・色相バー・HEXを開き、プレビューしながら調整できます。適用／Enter／欄外クリックで確定、取消／Escapeで元に戻し、確定した変更全体を1回のUndoで戻せます。目のアイコンで線／塗りの有無を切り替えます。
-
-TweeqのVueコンポーネント自体は組み込まず、GPUIで操作を実装しています。任意のJavaScript実行、複数パラメーターの範囲選択、縦方向での速度変更には未対応です。
+キャンバス上の描画・ノード配置・セット一覧は引き続きGPUIです。従来のGPUI入力は互換用コードとして残り、Macの設定欄ではTweeqを使います。
 仮のツールアイコンは `pathweaver-gpui/assets/icons/*.svg`、UIフォントは `pathweaver-gpui/src/assets.rs` の `UI_FONT` を変更して再ビルドできます。現在はmacOSのHiragino Sansを使い、フォントファイルは同梱していません。
 
 ### 点の座標・分離・連結・マージ
@@ -136,7 +132,8 @@ macOSのネイティブピンチと、画面端で止まらない数値ドラッ
 ## 構成
 
 - `pathweaver-core`：文書・ベジェ・可変幅・輪郭・SVG・外観グラフ。GUIライブラリに依存しません。
-- `pathweaver-gpui`：Mac用GPUIフロントエンド。入力、セッション履歴、キャンバス、ドック式ノードUI。
+- `pathweaver-gpui`：Mac用GPUIフロントエンド。セッション履歴、キャンバス、ドック式ノードUI、WKWebViewホスト。
+- `tweeq-ui`：実TweeqのVueコンポーネント、Rust文書とのアダプター、オフライン用生成HTML。
 - `threadtype-egui`：従来フロントエンドとThreadShape。共通コアを使用し、互換性のテストも維持しています。
 
 Windowsでは `run-pathweaver.ps1`、Linuxでは `./run-pathweaver.sh` が従来のegui版を起動します。GPUI版のWindows・Linux対応は未検証です。
@@ -144,7 +141,7 @@ Windowsでは `run-pathweaver.ps1`、Linuxでは `./run-pathweaver.sh` が従来
 
 ## 参考とライセンス
 
-UIの参考：[ThreadShape](https://github.com/onmokoworks/ThreadShape)、[Tweeq](https://github.com/baku89/tweeq)（パラメーターの配置、ドラッグ・精密入力・式入力）。
+UIの参考：[ThreadShape](https://github.com/onmokoworks/ThreadShape)。設定UIに使用：[Tweeq](https://github.com/baku89/tweeq)（MIT）。
 操作の参考：[Blenderの頂点マージ](https://docs.blender.org/manual/en/5.2/modeling/meshes/editing/mesh/merge.html)、[Blenderノード](https://docs.blender.org/manual/en/latest/interface/controls/nodes/index.html)、[Node Wrangler](https://docs.blender.org/manual/en/latest/addons/node_wrangler.html)。
 パス編集の設計参考：[Pave](https://baku89.github.io/pave/)（位置・接線・法線とパスの組み合わせ）。JSライブラリの組み込みではなく、文字・造形に必要な操作をRustの共通コアへ実装しています。
 文字入力の実装はGPUI公式サンプルを基にしています。詳細は [THIRD_PARTY_NOTICES.md](pathweaver-gpui/THIRD_PARTY_NOTICES.md) を参照してください。

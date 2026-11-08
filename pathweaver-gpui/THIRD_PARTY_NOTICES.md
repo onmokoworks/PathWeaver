@@ -11,9 +11,9 @@ Japanese placeholder, public field initialization and focus helpers, and a UTF-1
 composition selection-offset correction. The example's application/demo was removed.
 
 
-## Tweeq interaction reference
+## Tweeq Vue components
 
-The numeric controls in `src/controls.rs` are a native Rust implementation informed by Tweeq InputNumber and ParameterGrid interaction designs. Tweeq is not bundled as a Vue dependency. Its license is retained here for attribution.
+The Mac inspector bundles actual Tweeq Vue components in an embedded WKWebView. Sources are pinned to `957ecf70ab51153faa0026314061820a57becfb4` in `../tweeq-ui/vendor/tweeq/`, with selected-input lifecycle and embedded pointer-coordinate fixes documented in `../tweeq-ui/README.md`. The older `src/controls.rs` implementation remains for compatibility. Icon licenses are in `../tweeq-ui/vendor/icon-licenses/`.
 
 Source: https://github.com/baku89/tweeq
 

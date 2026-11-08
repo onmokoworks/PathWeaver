@@ -1,0 +1,17 @@
+import {
+	type InputAlign,
+	type InputBoxProps,
+	type InputFont,
+	type InputTheme,
+} from '../types'
+import {Validator} from '../validator'
+export interface InputStringProps extends InputBoxProps {
+	theme?: InputTheme
+	font?: InputFont
+	align?: InputAlign
+	validator?: Validator<string>
+	/** Shown while the input is empty. */
+	placeholder?: string
+	/** Value restored by the right-click "Reset to Default" menu item. */
+	default?: string
+}

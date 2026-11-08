@@ -204,10 +204,10 @@ pub fn handlers(mut root: Div, s: &Workspace, cx: &mut Context<Workspace>) -> Di
     on!(Close, Close);
     on!(Quit, Close);
     // Focused text inputs handle these first; workspace history is the fallback.
-    if s.session.can_undo() {
+    if s.session.can_undo() || s.tweeq_panels.focused() {
         on!(input::Undo, Undo);
     }
-    if s.session.can_redo() {
+    if s.session.can_redo() || s.tweeq_panels.focused() {
         on!(input::Redo, Redo);
     }
     on!(input::SelectAll, SelectAll);
@@ -220,7 +220,13 @@ pub fn handlers(mut root: Div, s: &Workspace, cx: &mut Context<Workspace>) -> Di
     on!(ConvertTool, ConvertTool);
     on!(PenTool, PenTool);
     on!(WidthTool, WidthTool);
-    let editing = s.editing.is_some() || s.add_open;
+    if s.tweeq_panels.focused() {
+        root = root
+            .on_action(cx.listener(|s, _: &input::Copy, _, _| s.tweeq_panels.command("copy")))
+            .on_action(cx.listener(|s, _: &input::Cut, _, _| s.tweeq_panels.command("cut")))
+            .on_action(cx.listener(|s, _: &input::Paste, _, _| s.tweeq_panels.command("paste")));
+    }
+    let editing = s.editing.is_some() || s.add_open || s.tweeq_panels.focused();
     let nodes_context = s.active_nodes && s.nodes_open;
     let editable_nodes = s.session.graph().is_some_and(|g| {
         s.session.node_selection.iter().any(|id| {

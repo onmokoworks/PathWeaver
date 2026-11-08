@@ -11,6 +11,9 @@ mod nodes;
 mod path_edit;
 mod session;
 mod theme;
+mod tweeq;
+mod tweeq_bridge;
+mod tweeq_host;
 mod viewport;
 use gpui::{prelude::*, *};
 fn main() {

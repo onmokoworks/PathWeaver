@@ -352,6 +352,8 @@ impl Workspace {
         }
     }
     pub fn node_down(&mut self, e: &MouseDownEvent, w: &mut Window, cx: &mut Context<Self>) {
+        self.tweeq_panels.release_focus();
+        self.finish_tweeq(true);
         if self.editing.is_some() {
             self.commit_edit(w, cx);
             if self.editing.is_some() {
@@ -1102,6 +1104,9 @@ impl Workspace {
         });
     }
     fn node_inspector(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.tweeq_panels.node.is_some() {
+            return self.tweeq_panel("node", cx);
+        }
         let mut col = div()
             .id("node-inspector")
             .w(px(280.))

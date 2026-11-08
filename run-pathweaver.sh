@@ -8,6 +8,11 @@ if ! command -v cargo >/dev/null 2>&1; then
 fi
 manifest=pathweaver-gpui/Cargo.toml
 if [[ "$(uname -s)" != Darwin ]]; then manifest=threadtype-egui/Cargo.toml; fi
+# The generated HTML is checked in so cargo also works without Node. Rebuild
+# source edits for interactive runs; tests/checks use the committed artifact.
+if [[ "$manifest" == pathweaver-gpui/Cargo.toml && ( "${1:-}" == "" || "${1:-}" == --release ) ]]; then
+    ./scripts/build-tweeq-ui.sh
+fi
 case "${1:-}" in
     '') exec cargo run --manifest-path "$manifest" --locked --bin pathweaver ;;
     --release) exec cargo run --manifest-path "$manifest" --locked --release --bin pathweaver ;;

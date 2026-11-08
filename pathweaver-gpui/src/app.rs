@@ -188,6 +188,8 @@ pub(crate) enum ButtonEditPolicy {
 }
 pub struct Workspace {
     pub session: Session,
+    pub(crate) tweeq_panels: crate::tweeq::TweeqPanels,
+    pub(crate) tweeq: crate::tweeq_bridge::TweeqBridge,
     pub dialog_open: bool,
     pub outlines: Vec<(u64, outline::Outline)>,
     rendered_strokes: Vec<pathweaver_core::model::Stroke>,
@@ -266,6 +268,8 @@ impl Workspace {
             .detach();
         Self {
             session: Session::default(),
+            tweeq_panels: crate::tweeq::TweeqPanels::new(window, cx),
+            tweeq: Default::default(),
             dialog_open: false,
             outlines: vec![],
             rendered_strokes: vec![],
@@ -467,6 +471,7 @@ impl Workspace {
         self.confirm_discard(window, cx, |s, _, cx| s.pick_document(cx));
     }
     fn reset_document_interaction(&mut self) {
+        self.tweeq = Default::default();
         self.numeric_capture = None;
         self.library_selection = None;
         self.color_picker = None;
@@ -756,6 +761,56 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let field = match &kind {
+            Editing::PathName => Some(("path", "path.name".to_string())),
+            Editing::NodeName => Some(("node", "node.name".to_string())),
+            Editing::Parameter(p) => Some(("node", format!("param:{p:?}"))),
+            _ => None,
+        };
+        if let Some((panel, field)) = field {
+            let available = if panel == "node" {
+                self.tweeq_panels.node.is_some()
+            } else {
+                self.tweeq_panels.path.is_some()
+            };
+            if available {
+                self.finish_interaction(true, cx);
+                if panel == "node" {
+                    if let Some(node) = node {
+                        self.session.node_selection = vec![node];
+                    }
+                    self.nodes_open = true;
+                    self.inspector = true;
+                    self.library_open = false;
+                } else {
+                    self.inspector_tab = 0;
+                }
+                let snapshot = self.tweeq_snapshot(panel);
+                let host = if panel == "node" {
+                    &mut self.tweeq_panels.node
+                } else {
+                    &mut self.tweeq_panels.path
+                };
+                if let Some(host) = host {
+                    host.refresh(&snapshot);
+                }
+                cx.on_next_frame(window, move |s, _, _| {
+                    let host = if panel == "node" {
+                        &s.tweeq_panels.node
+                    } else {
+                        &s.tweeq_panels.path
+                    };
+                    if let Some(host) = host {
+                        host.evaluate(&format!(
+                            "window.pathweaverFocusField?.({})",
+                            serde_json::to_string(&field).unwrap()
+                        ));
+                    }
+                });
+                cx.notify();
+                return;
+            }
+        }
         self.edit_initial = self.numeric_meta(&kind).map(|v| v.0).unwrap_or(0.);
         self.numeric_error = false;
         self.edit_target = Some(EditTarget::capture(&self.session, node));
@@ -920,6 +975,8 @@ impl Workspace {
             .map(|s| s.id)
     }
     fn art_down(&mut self, e: &MouseDownEvent, w: &mut Window, cx: &mut Context<Self>) {
+        self.tweeq_panels.release_focus();
+        self.finish_tweeq(true);
         if self.editing.is_some() {
             self.commit_edit(w, cx);
             if self.editing.is_some() {
@@ -1364,6 +1421,9 @@ impl Workspace {
         cx.notify();
     }
     fn key(&mut self, e: &KeyDownEvent, w: &mut Window, cx: &mut Context<Self>) {
+        if self.tweeq_panels.focused() {
+            return;
+        }
         if self.node_add_key(e, w, cx) {
             return;
         }
@@ -1493,6 +1553,25 @@ impl Workspace {
         use crate::path_edit::Operation;
         if self.dialog_open {
             return;
+        }
+        if self.tweeq_panels.focused() {
+            let web_command = match command {
+                Command::New => Some("new"),
+                Command::Open => Some("open"),
+                Command::Save => Some("save"),
+                Command::SaveAs => Some("saveAs"),
+                Command::Export => Some("export"),
+                Command::Close => Some("close"),
+                Command::Undo => Some("undo"),
+                Command::Redo => Some("redo"),
+                Command::SelectAll => Some("selectAll"),
+                _ => None,
+            };
+            if let Some(command) = web_command {
+                self.tweeq_panels.command(command);
+                return;
+            }
+            self.tweeq_panels.release_focus();
         }
         if self.editing.is_some() {
             if self.input.read(cx).is_composing() {
@@ -1987,7 +2066,16 @@ impl Workspace {
                 cx,
                 |s, _, _| s.inspector_tab = 1,
             ));
-        let content = if self.inspector_tab == 0 {
+        let content = if self.tweeq_panels.path.is_some() {
+            self.tweeq_panel(
+                if self.inspector_tab == 0 {
+                    "path"
+                } else {
+                    "grid"
+                },
+                cx,
+            )
+        } else if self.inspector_tab == 0 {
             self.properties(cx)
         } else {
             div()
@@ -2010,22 +2098,34 @@ impl Workspace {
             .border_color(rgb(ui_color(Role::Border)))
             .child(self.paths_panel(cx))
             .child(tabs)
-            .child(div().h(px(42.)).flex_shrink_0().child(
-                if self.editing.as_ref().is_some_and(|k| {
-                    !crate::controls::is_numeric(k)
-                        && !matches!(k, Editing::Color | Editing::FillColor)
-                }) {
-                    self.edit_strip(cx)
-                } else {
-                    div()
-                        .px_3()
-                        .py_2()
-                        .text_size(px(11.))
-                        .text_color(rgb(ui_color(Role::Muted)))
-                        .child("クリックで入力 · ドラッグで調整")
-                        .into_any_element()
-                },
-            ))
+            .child(
+                div()
+                    .h(px(
+                        if self.tweeq_panels.path.is_some() && self.editing.is_none() {
+                            0.
+                        } else {
+                            42.
+                        },
+                    ))
+                    .overflow_hidden()
+                    .flex_shrink_0()
+                    .child(
+                        if self.editing.as_ref().is_some_and(|k| {
+                            !crate::controls::is_numeric(k)
+                                && !matches!(k, Editing::Color | Editing::FillColor)
+                        }) {
+                            self.edit_strip(cx)
+                        } else {
+                            div()
+                                .px_3()
+                                .py_2()
+                                .text_size(px(11.))
+                                .text_color(rgb(ui_color(Role::Muted)))
+                                .child("クリックで入力 · ドラッグで調整")
+                                .into_any_element()
+                        },
+                    ),
+            )
             .child(content)
             .into_any_element()
     }
@@ -2147,6 +2247,20 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.session.reconcile();
+        if (!self.nodes_open
+            || !self.inspector
+            || self.library_open
+            || self.add_open
+            || self.dialog_open)
+            && let Some(host) = &mut self.tweeq_panels.node
+        {
+            host.set_bounds(None);
+        }
+        if (self.add_open || self.dialog_open)
+            && let Some(host) = &mut self.tweeq_panels.path
+        {
+            host.set_bounds(None);
+        }
         self.node_layout_height = crate::viewport::dock_height(
             self.node_height,
             f32::from(window.viewport_size().height),
@@ -2218,6 +2332,15 @@ impl Render for Workspace {
             .text_color(rgb(ui_color(Role::Text)))
             .text_size(px(12.))
             .font_family(crate::assets::UI_FONT)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|s, _, _, _| {
+                    if s.tweeq_panels.focused() {
+                        s.tweeq_panels.release_focus();
+                        s.finish_tweeq(true);
+                    }
+                }),
+            )
             .on_key_down(cx.listener(Self::key))
             .on_key_up(cx.listener(|s, e: &KeyUpEvent, _, _| {
                 if e.keystroke.key == "q" {

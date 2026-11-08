@@ -22,6 +22,7 @@ impl Drag {
 
 impl Workspace {
     pub(crate) fn finish_interaction(&mut self, commit: bool, cx: &mut Context<Self>) {
+        self.finish_tweeq(commit);
         self.numeric_capture = None;
         if commit {
             // An unfinished wire is a proposal, not a disconnected input to save.
