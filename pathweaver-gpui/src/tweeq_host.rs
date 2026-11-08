@@ -376,31 +376,6 @@ mod fallback {
         pub fn is_focused(&self) -> bool {
             false
         }
-        /// Route clipboard actions directly to WebKit's native first responder.
-        /// A nil target would fall back to the app menu and recurse into GPUI.
-        pub fn native_edit(&self, command: &str) -> bool {
-            if !self.is_focused() {
-                return false;
-            }
-            let selector = match command {
-                "cut" => sel!(cut:),
-                "copy" => sel!(copy:),
-                "paste" => sel!(paste:),
-                "selectAll" => sel!(selectAll:),
-                _ => return false,
-            };
-            unsafe {
-                let window: *mut Object = msg_send![self.parent, window];
-                let responder: *mut Object = msg_send![window, firstResponder];
-                let responds: bool = msg_send![responder, respondsToSelector:selector];
-                if !responds {
-                    return false;
-                }
-                let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
-                msg_send![app, sendAction:selector to:responder from:ptr::null_mut::<Object>()]
-            }
-        }
-
         pub fn native_edit(&self, _: &str) -> bool {
             false
         }

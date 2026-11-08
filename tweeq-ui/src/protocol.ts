@@ -63,7 +63,7 @@ declare global {
   interface Window {
     pathweaverUpdate: (snapshot: Snapshot) => void
     pathweaverCommand: (command: string, text?: string) => void
-    pathweaverFocusField: (id: string) => void
+    pathweaverFocusField: (id: string, revision?: string) => void
     webkit?: {messageHandlers?: {pathweaver?: {postMessage(message: string): void}}}
   }
 }

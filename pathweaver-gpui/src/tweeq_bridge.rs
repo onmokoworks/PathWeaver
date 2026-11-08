@@ -2,7 +2,7 @@
 //! The web view never owns the document: every message is checked against the
 //! selection and document revision which produced its controls.
 use crate::{
-    app::{Tool, Workspace},
+    app::{Drag, Tool, Workspace},
     session::Session,
 };
 use gpui::{Context, Window};
@@ -56,7 +56,7 @@ pub(crate) struct TweeqBridge {
     error: Option<String>,
 }
 impl TweeqBridge {
-    fn revision(&self, s: &Session, panel: &str) -> String {
+    pub(crate) fn revision(&self, s: &Session, panel: &str) -> String {
         if let Some(t) = &self.transaction
             && t.panel == panel
             && t.target == Target::capture(s)
@@ -101,6 +101,21 @@ impl TweeqBridge {
                 unchanged.then(|| (t.panel, t.revision, Target::capture(s), s.doc.clone()));
             self.error = None;
         }
+    }
+    fn leave_for_canvas(&mut self, s: &mut Session) {
+        self.finish(s, true);
+        // The DOM blur/confirm is asynchronous. Revoke its revision even if
+        // no field changed, so it cannot open a new transaction after a click.
+        self.completed = None;
+        self.epoch = self.epoch.wrapping_add(1);
+    }
+    fn accepts_canvas_safe_edit(&self, s: &Session, panel: &str, m: &Value, drag: &Drag) -> bool {
+        matches!(drag, Drag::None)
+            && matches!(
+                m["type"].as_str(),
+                Some("begin" | "change" | "commit" | "cancel")
+            )
+            && m["revision"].as_str() == Some(&self.revision(s, panel))
     }
     fn update(&mut self, s: &mut Session, panel: &str, m: &Value) -> Result<(), String> {
         let current = m["revision"].as_str() == Some(&self.revision(s, panel));
@@ -404,6 +419,10 @@ impl Workspace {
     pub(crate) fn finish_tweeq(&mut self, commit: bool) {
         self.tweeq.finish(&mut self.session, commit);
     }
+    pub(crate) fn leave_tweeq_for_canvas(&mut self) {
+        self.tweeq_panels.release_focus();
+        self.tweeq.leave_for_canvas(&mut self.session);
+    }
     pub(crate) fn tweeq_snapshot(&self, panel: &str) -> Value {
         let s = &self.session;
         let mut fields = vec![];
@@ -671,8 +690,29 @@ impl Workspace {
             return;
         }
         if kind == "focus" {
-            self.node_region = panel == "node";
-            self.active_nodes = panel == "node";
+            // A delayed focusout must not redirect Enter/Delete/shortcuts away
+            // from the canvas the user just clicked. Native focus is authoritative.
+            let focused = if panel == "node" {
+                self.tweeq_panels.node.as_ref()
+            } else {
+                self.tweeq_panels.path.as_ref()
+            }
+            .is_some_and(crate::tweeq_host::TweeqHost::is_focused);
+            if m["value"] == true && focused && matches!(self.drag, Drag::None) {
+                self.node_region = panel == "node";
+                self.active_nodes = panel == "node";
+            }
+            return;
+        }
+        if kind == "canvas_focus" {
+            if matches!(self.drag, Drag::None)
+                && self.tweeq.error.is_none()
+                && m["revision"].as_str() == Some(&self.tweeq.revision(&self.session, panel))
+            {
+                self.leave_tweeq_for_canvas();
+                self.focus.focus(window);
+                self.refresh(cx);
+            }
             return;
         }
         if kind == "action" {
@@ -706,7 +746,9 @@ impl Workspace {
                 self.menu_command(command, window, cx);
                 return;
             }
-            if m["revision"].as_str() != Some(&self.tweeq.revision(&self.session, panel)) {
+            if !matches!(self.drag, Drag::None)
+                || m["revision"].as_str() != Some(&self.tweeq.revision(&self.session, panel))
+            {
                 return;
             }
             if self.tweeq.transaction.is_some() && self.tweeq.error.is_some() {
@@ -762,6 +804,14 @@ impl Workspace {
             self.refresh(cx);
             return;
         }
+        // Validate BEFORE finishing a native gesture or committing another edit.
+        // Rejected IPC must have no effect on pen/handle drags or their history.
+        if !self
+            .tweeq
+            .accepts_canvas_safe_edit(&self.session, panel, &m, &self.drag)
+        {
+            return;
+        }
         if matches!(kind, "begin" | "change" | "commit") && self.tweeq.transaction.is_none() {
             if self.editing.is_some() {
                 self.commit_edit(window, cx);
@@ -771,8 +821,11 @@ impl Workspace {
             }
             self.finish_interaction(true, cx);
         }
+        let previous_error = self.tweeq.error.clone();
         if let Err(e) = self.tweeq.update(&mut self.session, panel, &m) {
             self.status = e;
+        } else if previous_error.as_ref() == Some(&self.status) {
+            self.status.clear();
         }
         self.refresh(cx);
     }
@@ -793,6 +846,62 @@ mod tests {
     fn message(kind: &str, revision: &str, id: &str, value: Value) -> Value {
         json!({"type":kind,"revision":revision,"id":id,"value":value})
     }
+    #[test]
+    fn leaving_field_revokes_queued_confirm_without_reopening_native_history() {
+        let mut s = session();
+        let mut b = TweeqBridge::default();
+        let revision = b.revision(&s, "path");
+        b.update(
+            &mut s,
+            "path",
+            &message("change", &revision, "path.width", json!(40.)),
+        )
+        .unwrap();
+        b.leave_for_canvas(&mut s);
+        let before_drag = s.doc.clone();
+        s.begin();
+        s.active_mut().unwrap().edge_width = 60.;
+        for kind in ["begin", "change", "commit", "cancel"] {
+            let late = message(kind, &revision, "path.width", json!(90.));
+            assert!(!b.accepts_canvas_safe_edit(&s, "path", &late, &Drag::None));
+        }
+        // The canvas owns the pending history: Escape still cancels its preview,
+        // and one Undo reverts the earlier completed width edit.
+        s.cancel();
+        assert_eq!(s.doc, before_drag);
+        assert_eq!(s.active().unwrap().edge_width, 40.);
+        s.undo();
+        assert_ne!(s.active().unwrap().edge_width, 40.);
+    }
+
+    #[test]
+    fn unchanged_field_and_native_gesture_reject_late_web_events() {
+        let mut s = session();
+        let mut b = TweeqBridge::default();
+        let revision = b.revision(&s, "path");
+        b.update(
+            &mut s,
+            "path",
+            &message("begin", &revision, "path.name", json!("A")),
+        )
+        .unwrap();
+        let before = s.doc.clone();
+        b.leave_for_canvas(&mut s);
+        assert_eq!(s.doc, before);
+        assert_ne!(b.revision(&s, "path"), revision);
+        let late = message("commit", &revision, "path.name", json!("A"));
+        assert!(!b.accepts_canvas_safe_edit(&s, "path", &late, &Drag::None));
+        let current = message("begin", &b.revision(&s, "path"), "path.name", json!("A"));
+        assert!(b.accepts_canvas_safe_edit(&s, "path", &current, &Drag::None));
+        // Even a current snapshot cannot interrupt a gesture with no geometry
+        // change yet (e.g. the first press of a handle or pan).
+        let drag = Drag::Pan {
+            nodes: false,
+            last: gpui::point(gpui::px(0.), gpui::px(0.)),
+        };
+        assert!(!b.accepts_canvas_safe_edit(&s, "path", &current, &drag));
+    }
+
     #[test]
     fn color_drag_is_one_undo_and_cancel_restores() {
         let mut s = session();

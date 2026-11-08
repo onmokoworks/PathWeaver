@@ -352,8 +352,7 @@ impl Workspace {
         }
     }
     pub fn node_down(&mut self, e: &MouseDownEvent, w: &mut Window, cx: &mut Context<Self>) {
-        self.tweeq_panels.release_focus();
-        self.finish_tweeq(true);
+        self.leave_tweeq_for_canvas();
         if self.editing.is_some() {
             self.commit_edit(w, cx);
             if self.editing.is_some() {

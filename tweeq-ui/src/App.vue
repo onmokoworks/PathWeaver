@@ -13,6 +13,7 @@ import TooltipRoot from '../vendor/tweeq/src/Tooltip/TooltipRoot.vue'
 import {useThemeStore} from '../vendor/tweeq/src/stores/theme'
 import {useAppConfigStore} from '../vendor/tweeq/src/stores/appConfig'
 import {useInputColor} from '../vendor/tweeq/src/InputColor/useInputColor'
+import {editingCompletion} from './editingCompletion'
 import {changeFromControl, numericStep} from './controlBridge'
 import {send, Transactions, type Snapshot, type Field, type Value} from './protocol'
 
@@ -52,7 +53,8 @@ window.pathweaverUpdate = snapshot => {
   }
   state.value = snapshot
 }
-window.pathweaverFocusField = id => nextTick(() => {
+window.pathweaverFocusField = (id, revision) => nextTick(() => {
+  if (revision !== undefined && revision !== state.value.revision) return
   const field = document.querySelector(`[data-field="${CSS.escape(id)}"]`)
   const input = field?.querySelector('input')
   if (input instanceof HTMLInputElement) { input.focus(); input.select() }
@@ -87,18 +89,25 @@ function blur(field: Field) {
   queueMicrotask(() => {
   if (!(document.activeElement instanceof HTMLInputElement)) tx.commit()
 }) }
-function cancel(event: KeyboardEvent) {
-  if (event.key !== 'Escape') return
-  const reverted = tx.cancel()
-  if (!reverted) return
-  event.preventDefault()
-  event.stopImmediatePropagation()
-  // Remount clears Tweeq's locally held text expression and temporary color state.
-  const field = fields.value.find(field => field.id === reverted.id)
-  if (field) field.value = reverted.value
-  focusedNumeric = null
-  generation.value++
-}
+let composing = false
+const completeEditing = editingCompletion({
+  tx,
+  revision: () => state.value.revision,
+  field: target => {
+    const id = target instanceof Element ? target.closest<HTMLElement>('[data-field]')?.dataset.field : undefined
+    return fields.value.find(field => field.id === id)
+  },
+  hasPopover: () => document.querySelector('.Popover:popover-open:not(:has(.TqTooltipContent))') !== null,
+  composing: () => composing,
+  revert: reverted => {
+    // Remount clears Tweeq's locally held expression and temporary color state.
+    const field = fields.value.find(field => field.id === reverted.id)
+    if (field) field.value = reverted.value
+    focusedNumeric = null
+    generation.value++
+  },
+  send,
+})
 function act(id: string) { tx.commit(); send({type: 'action', revision: state.value.revision, id}) }
 function actionIcon(id: string, icon?: string) {
   const aliases: Record<string, string> = {
@@ -114,16 +123,18 @@ function actionIcon(id: string, icon?: string) {
   return 'mdi:arrow-right'
 }
 onMounted(() => {
-  window.addEventListener('keydown', cancel, true)
+  window.addEventListener('keydown', completeEditing, true)
+  window.addEventListener('compositionstart', () => { composing = true }, true)
+  window.addEventListener('compositionend', () => queueMicrotask(() => { composing = false }), true)
   window.addEventListener('pointerup', () => queueMicrotask(() => {
     // Color channel pads do not forward confirm in upstream Tweeq. End their
     // gesture here while leaving a focused text editor's transaction intact.
     if (!(document.activeElement instanceof HTMLInputElement)) tx.commit()
   }))
   window.addEventListener('blur', () => tx.commit())
-  document.addEventListener('focusin', () => send({type: 'focus', value: true}))
+  document.addEventListener('focusin', () => send({type: 'focus', value: true, revision: state.value.revision}))
   document.addEventListener('focusout', () => nextTick(() => {
-    if (!document.hasFocus()) send({type: 'focus', value: false})
+    if (!document.hasFocus()) send({type: 'focus', value: false, revision: state.value.revision})
   }))
   send({type: 'ready'})
 })

@@ -794,7 +794,22 @@ impl Workspace {
                 if let Some(host) = host {
                     host.refresh(&snapshot);
                 }
+                let revision = self.tweeq.revision(&self.session, panel);
                 cx.on_next_frame(window, move |s, _, _| {
+                    // A newer canvas click/selection cancels this deferred focus.
+                    let visible = !s.add_open
+                        && !s.dialog_open
+                        && if panel == "node" {
+                            s.nodes_open && s.inspector && !s.library_open
+                        } else {
+                            s.inspector_tab == 0
+                        };
+                    if !visible
+                        || s.tweeq.revision(&s.session, panel) != revision
+                        || !matches!(s.drag, Drag::None)
+                    {
+                        return;
+                    }
                     let host = if panel == "node" {
                         &s.tweeq_panels.node
                     } else {
@@ -802,8 +817,9 @@ impl Workspace {
                     };
                     if let Some(host) = host {
                         host.evaluate(&format!(
-                            "window.pathweaverFocusField?.({})",
-                            serde_json::to_string(&field).unwrap()
+                            "window.pathweaverFocusField?.({}, {})",
+                            serde_json::to_string(&field).unwrap(),
+                            serde_json::to_string(&revision).unwrap()
                         ));
                     }
                 });
@@ -975,8 +991,7 @@ impl Workspace {
             .map(|s| s.id)
     }
     fn art_down(&mut self, e: &MouseDownEvent, w: &mut Window, cx: &mut Context<Self>) {
-        self.tweeq_panels.release_focus();
-        self.finish_tweeq(true);
+        self.leave_tweeq_for_canvas();
         if self.editing.is_some() {
             self.commit_edit(w, cx);
             if self.editing.is_some() {
@@ -2336,8 +2351,7 @@ impl Render for Workspace {
                 MouseButton::Left,
                 cx.listener(|s, _, _, _| {
                     if s.tweeq_panels.focused() {
-                        s.tweeq_panels.release_focus();
-                        s.finish_tweeq(true);
+                        s.leave_tweeq_for_canvas();
                     }
                 }),
             )
