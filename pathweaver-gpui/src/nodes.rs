@@ -293,6 +293,7 @@ impl Workspace {
             .and_then(|g| fitted_view(g, f32::from(b.size.width), f32::from(b.size.height)))
         {
             self.node_view = view;
+            self.node_view_needs_fit = false;
         }
     }
     fn node_at(&self, p: KPoint) -> Option<u64> {
@@ -462,7 +463,7 @@ impl Workspace {
                 self.refresh(cx);
                 return;
             }
-            if !select_node(&mut self.node_selection, id, e.modifiers.shift) {
+            if !select_node(&mut self.session.node_selection, id, e.modifiers.shift) {
                 cx.notify();
                 return;
             }
@@ -476,7 +477,7 @@ impl Workspace {
             self.drag = Drag::Nodes { last: p };
         } else {
             if !e.modifiers.shift {
-                self.node_selection.clear();
+                self.session.node_selection.clear();
             }
             self.drag = Drag::NodeBox {
                 start: p,
@@ -490,7 +491,7 @@ impl Workspace {
         let p = self.node_view.world(e.position, self.node_bounds.get());
         match self.drag.clone() {
             Drag::Nodes { last } => {
-                let selected = self.node_selection.clone();
+                let selected = self.session.node_selection.clone();
                 if let Some(g) = self.session.graph_mut() {
                     for n in &mut g.nodes {
                         if selected.contains(&n.id) {
@@ -584,7 +585,7 @@ impl Workspace {
                 add,
             } => {
                 if !add {
-                    self.node_selection.clear();
+                    self.session.node_selection.clear();
                 }
                 if let Some(g) = self.session.graph() {
                     let r = Rect::from_points(start, current);
@@ -604,8 +605,8 @@ impl Workspace {
                         .map(|n| n.id)
                         .collect();
                     for id in ids {
-                        if !self.node_selection.contains(&id) {
-                            self.node_selection.push(id);
+                        if !self.session.node_selection.contains(&id) {
+                            self.session.node_selection.push(id);
                         }
                     }
                 }
@@ -670,6 +671,7 @@ impl Workspace {
             "x" | "backspace" | "delete" => self.delete_nodes(),
             "f2" => {
                 if let Some(n) = self
+                    .session
                     .node_selection
                     .last()
                     .and_then(|id| self.session.graph()?.node(*id))
@@ -682,7 +684,7 @@ impl Workspace {
         self.refresh(cx);
     }
     pub fn toggle_nodes_bypass(&mut self) {
-        let ids = self.node_selection.clone();
+        let ids = self.session.node_selection.clone();
         self.session.edit(|s| {
             if let Some(g) = s.graph_mut() {
                 for n in &mut g.nodes {
@@ -694,7 +696,7 @@ impl Workspace {
         });
     }
     pub fn delete_nodes(&mut self) {
-        let ids = self.node_selection.clone();
+        let ids = self.session.node_selection.clone();
         self.session.edit(|s| {
             if let Some(g) = s.graph_mut() {
                 for id in ids {
@@ -702,10 +704,10 @@ impl Workspace {
                 }
             }
         });
-        self.node_selection.clear();
+        self.session.node_selection.clear();
     }
     pub fn duplicate_nodes(&mut self, cx: &mut Context<Self>) {
-        let ids = self.node_selection.clone();
+        let ids = self.session.node_selection.clone();
         self.session.begin();
         let result = self
             .session
@@ -713,8 +715,7 @@ impl Workspace {
             .map(|g| duplicate_selection(g, &ids));
         match result {
             Some(Ok(new_ids)) if !new_ids.is_empty() => {
-                self.node_placement_selection = Some(ids);
-                self.node_selection = new_ids;
+                self.session.node_selection = new_ids;
                 self.node_move_modal = true;
                 self.drag = Drag::Nodes {
                     last: self.node_view.world(self.cursor, self.node_bounds.get()),
@@ -737,8 +738,7 @@ impl Workspace {
             .map(|g| add_unconnected(g, kind, at));
         match result {
             Some(Ok(id)) => {
-                self.node_placement_selection = Some(self.node_selection.clone());
-                self.node_selection = vec![id];
+                self.session.node_selection = vec![id];
                 self.node_move_modal = true;
                 self.drag = Drag::Nodes { last: at };
                 self.status = "クリック／Enter：配置　Esc／右クリック：取消".into();
@@ -768,7 +768,6 @@ impl Workspace {
         self.nodes_open = true;
         self.add_open = true;
         self.active_nodes = true;
-        self.library_open = false;
         self.add_anchor = self.cursor;
         self.add_index = 0;
         self.search.clear();
@@ -874,7 +873,7 @@ impl Workspace {
                                         p,
                                     ) {
                                         Ok(()) => {
-                                            "セットを読み込みました。名前を押すと適用できます"
+                                            "セットを読み込みました。選択して置き換えを実行できます"
                                                 .into()
                                         }
                                         Err(e) => e,
@@ -952,12 +951,12 @@ impl Workspace {
                     } else {
                         ui_color(Role::Node)
                     },
-                    if self.node_selection.contains(&n.id) {
+                    if self.session.node_selection.contains(&n.id) {
                         ui_color(Role::Accent)
                     } else {
                         ui_color(Role::Border)
                     },
-                    if self.node_selection.contains(&n.id) {
+                    if self.session.node_selection.contains(&n.id) {
                         2.
                     } else {
                         1.
@@ -1115,6 +1114,7 @@ impl Workspace {
             .gap_2()
             .bg(rgb(ui_color(Role::Surface)));
         if let Some(n) = self
+            .session
             .node_selection
             .last()
             .and_then(|id| self.session.graph()?.node(*id))
@@ -1217,23 +1217,13 @@ impl Workspace {
                 }
             }
             if matches!(n.kind, Kind::Fill | Kind::Shadow | Kind::Glow) {
-                let c = n.color;
-                col = col.child(self.button(
-                    format!("色  #{:02X}{:02X}{:02X}", c[0], c[1], c[2]),
-                    false,
+                col = col.child(self.color_field(
+                    crate::color_picker::ColorSlot::Node(id),
+                    Some(n.color),
                     cx,
-                    move |s, w, cx| {
-                        s.node_region = true;
-                        s.start_node_edit(
-                            Editing::Color,
-                            id,
-                            format!("{:02X}{:02X}{:02X}", c[0], c[1], c[2]),
-                            w,
-                            cx,
-                        );
-                    },
                 ));
             }
+
             if matches!(n.kind, Kind::Rough | Kind::Zigzag) {
                 col = col.child(self.button(
                     if n.smooth {
@@ -1379,14 +1369,11 @@ impl Workspace {
                 }
             }
         } else {
-            col = col
-                .child("ノードを選択すると設定を編集できます。")
-                .child("Shift＋クリック：複数選択")
-                .child("中ボタンドラッグ：移動")
-                .child("⌘＋スクロール：拡大縮小")
-                .child("Option＋右ドラッグ：自動接続")
-                .child("⌘＋Shift＋クリック：出力へ接続")
-                .child("⌘＋右ドラッグ：接続を切る");
+            col = col.child(
+                div()
+                    .text_color(rgb(ui_color(Role::Muted)))
+                    .child("ノードを選択して編集"),
+            );
         }
         col.into_any_element()
     }
@@ -1581,42 +1568,96 @@ impl Workspace {
                 div()
                     .py_2()
                     .text_color(rgb(ui_color(Role::Muted)))
-                    .child("保存済みセット / クリックで適用"),
+                    .child("保存済みセット"),
             );
         for (i, p) in self.session.doc.appearance_presets.iter().enumerate() {
-            let preset = p.clone();
-            col = col
-                .child(self.button_with_id(
-                    ("preset", i),
-                    format!("{} / {}", p.category, p.name),
-                    false,
-                    cx,
-                    move |s, _, cx| {
-                        if s.session.active().is_none() {
-                            s.status = "適用先のパスを選択してください".into();
-                            return;
-                        }
-                        s.session.edit(|s| {
-                            if let Some(p) = s.active_mut() {
-                                p.appearance = Some(preset.apply());
+            let key = (p.category.clone(), p.name.clone());
+            let selected = self.library_selection.as_ref() == Some(&key);
+            col = col.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(div().flex_1().min_w_0().child(self.button_with_id(
+                        ("preset", i),
+                        format!("{} / {}", p.category, p.name),
+                        selected,
+                        cx,
+                        move |s, _, _| s.library_selection = Some(key.clone()),
+                    )))
+                    .child(self.icon_button(
+                        ("preset-delete", i),
+                        "trash",
+                        "このセットを文書から削除",
+                        false,
+                        cx,
+                        move |s, _, _| {
+                            if let Some(preset) = s.session.doc.appearance_presets.get(i) {
+                                let key = (preset.category.clone(), preset.name.clone());
+                                if s.library_selection.as_ref() == Some(&key) {
+                                    s.library_selection = None;
+                                }
+                                s.session.edit(|s| {
+                                    s.doc.appearance_presets.remove(i);
+                                });
                             }
-                        });
-                        s.set_name = preset.name.clone();
-                        s.category = preset.category.clone();
-                        s.fit_nodes();
-                        s.refresh(cx);
-                    },
-                ))
-                .child(self.button(
-                    format!("セット {} を削除", i + 1),
-                    false,
-                    cx,
-                    move |s, _, _| {
-                        s.session.edit(|s| {
-                            s.doc.appearance_presets.remove(i);
-                        })
-                    },
-                ));
+                        },
+                    )),
+            );
+        }
+        let selected = self
+            .library_selection
+            .as_ref()
+            .and_then(|(category, name)| {
+                self.session
+                    .doc
+                    .appearance_presets
+                    .iter()
+                    .find(|p| &p.category == category && &p.name == name)
+            });
+        if let Some(preset) = selected {
+            let preset = preset.clone();
+            col = col.child(
+                div()
+                    .mt_2()
+                    .pt_2()
+                    .border_t_1()
+                    .border_color(rgb(ui_color(Role::Border)))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(format!("{} ノード", preset.graph.nodes.len()))
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(ui_color(Role::Muted)))
+                            .child("選択中パスの効果全体を置き換えます。⌘Zで元に戻せます。"),
+                    )
+                    .when(self.session.active().is_some(), |d| {
+                        d.child(self.button(
+                            "ノードを置き換える",
+                            false,
+                            cx,
+                            move |s, _, cx| match s.session.replace_appearance(preset.apply()) {
+                                Ok(()) => {
+                                    s.set_name = preset.name.clone();
+                                    s.category = preset.category.clone();
+                                    s.status = "選択パスのノードをセットで置き換えました".into();
+                                    s.fit_nodes();
+                                    s.refresh(cx);
+                                }
+                                Err(error) => s.status = error,
+                            },
+                        ))
+                    })
+                    .when(self.session.active().is_none(), |d| {
+                        d.child(
+                            div()
+                                .text_color(rgb(ui_color(Role::Muted)))
+                                .child("適用先のパスを選択"),
+                        )
+                    }),
+            );
         }
         col.into_any_element()
     }
@@ -1635,7 +1676,21 @@ impl Workspace {
                     move |b, _, _| {
                         bounds.set(b);
                     },
-                    move |b, _, w, cx| view.update(cx, |s, cx| s.paint_nodes(b, w, cx)),
+                    move |b, _, w, cx| {
+                        view.update(cx, |s, cx| {
+                            // Wait for the reveal animation to reach the usable height.
+                            if s.node_view_needs_fit
+                                && f32::from(b.size.height) >= s.node_layout_height - 43.
+                            {
+                                s.node_bounds.set(b);
+                                s.fit_nodes();
+                                // The toolbar was laid out before this first fit.
+                                // Refresh its zoom label on the following frame.
+                                cx.on_next_frame(w, |_, _, cx| cx.notify());
+                            }
+                            s.paint_nodes(b, w, cx)
+                        })
+                    },
                 )
                 .size_full(),
             )
@@ -1668,7 +1723,8 @@ impl Workspace {
                 self.library_open,
                 cx,
                 |s, _, _| {
-                    s.library_open = !s.library_open;
+                    s.library_open = true;
+                    s.inspector = true;
                     s.add_open = false;
                     if let Some(g) = s.session.graph() {
                         s.set_name = g.name.clone();
@@ -1745,14 +1801,8 @@ impl Workspace {
                 |s, _, _| s.nodes_open = false,
             ));
         let mut body = div().flex().flex_1().min_h_0();
-        if self.library_open {
-            body = body.child(self.library_sidebar(cx));
-        }
         if self.session.graph().is_some() {
             body = body.child(node_canvas);
-            if self.inspector {
-                body = body.child(self.node_inspector(cx));
-            }
         } else {
             body = body.child(
                 div()
@@ -1780,8 +1830,42 @@ impl Workspace {
                     }),
             );
         }
+        if self.inspector {
+            let tabs = div()
+                .h(px(32.))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .px_2()
+                .gap_1()
+                .border_b_1()
+                .border_color(rgb(ui_color(Role::Border)))
+                .child(self.button("ノード", !self.library_open, cx, |s, _, _| {
+                    s.library_open = false
+                }))
+                .child(self.button("セット", self.library_open, cx, |s, _, _| {
+                    s.library_open = true
+                }));
+            let content = if self.library_open {
+                self.library_sidebar(cx)
+            } else {
+                self.node_inspector(cx)
+            };
+            body = body.child(
+                div()
+                    .w(px(280.))
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_col()
+                    .border_l_1()
+                    .border_color(rgb(ui_color(Role::Border)))
+                    .bg(rgb(ui_color(Role::Surface)))
+                    .child(tabs)
+                    .child(div().flex_1().min_h_0().overflow_hidden().child(content)),
+            );
+        }
         div()
-            .h(px(self.node_height))
+            .h(px(self.node_layout_height))
             .max_h(relative(0.6))
             .min_h(px(170.))
             .flex_shrink_0()
@@ -1813,7 +1897,7 @@ impl Workspace {
                 "node-dock-reveal",
                 Animation::new(std::time::Duration::from_millis(180)).with_easing(ease_in_out),
                 {
-                    let h = self.node_height;
+                    let h = self.node_layout_height;
                     move |d, t| d.min_h(px(0.)).h(px(h * t))
                 },
             )
@@ -1926,6 +2010,45 @@ mod tests {
             point(px(300.), px(200.))
         );
     }
+    #[test]
+    fn duplicate_placement_history_restores_original_and_copied_selection_order() {
+        let mut session = crate::session::Session::default();
+        session.new_path(KPoint::ZERO);
+        session.active_mut().unwrap().appearance = Some(Graph::rough());
+        session.reconcile();
+        let extra = session
+            .graph_mut()
+            .unwrap()
+            .add(Kind::Value, [250., 200.])
+            .unwrap();
+        let original_ids = vec![extra, 3];
+        session.node_selection = original_ids.clone();
+        let original = session.doc.clone();
+        session.begin();
+        let copies = duplicate_selection(session.graph_mut().unwrap(), &original_ids).unwrap();
+        session.node_selection = copies;
+        session.cancel();
+        assert_eq!(session.doc, original);
+        assert_eq!(session.node_selection, original_ids);
+        session.begin();
+        let copies = duplicate_selection(session.graph_mut().unwrap(), &original_ids).unwrap();
+        session.node_selection = copies.clone();
+        session.commit();
+        session.undo();
+        assert_eq!(session.node_selection, original_ids);
+        session.redo();
+        assert_eq!(session.node_selection, copies);
+        assert_eq!(
+            session
+                .graph()
+                .unwrap()
+                .node(*copies.last().unwrap())
+                .unwrap()
+                .kind,
+            Kind::Rough
+        );
+    }
+
     #[test]
     fn adding_node_preserves_existing_wires_and_cancels_atomically() {
         let mut session = crate::session::Session::default();

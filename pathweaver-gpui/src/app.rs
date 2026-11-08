@@ -115,6 +115,7 @@ pub enum Editing {
     NodeName,
     Parameter(Parameter),
     Color,
+    FillColor,
     SetName,
     Category,
     Width,
@@ -131,7 +132,7 @@ pub struct EditTarget {
     anchors: Vec<Anchor>,
 }
 impl EditTarget {
-    fn capture(session: &Session, node: Option<u64>) -> Self {
+    pub(crate) fn capture(session: &Session, node: Option<u64>) -> Self {
         Self {
             path: session.active().map(|s| s.id),
             node,
@@ -139,7 +140,7 @@ impl EditTarget {
             anchors: session.anchors.clone(),
         }
     }
-    fn path_mut<'a>(
+    pub(crate) fn path_mut<'a>(
         &self,
         doc: &'a mut Document,
     ) -> Result<&'a mut pathweaver_core::model::Stroke, String> {
@@ -159,7 +160,7 @@ impl EditTarget {
             .and_then(|g| g.node_mut(id))
             .ok_or_else(|| "編集を開始したノードがありません。取消して選び直してください".into())
     }
-    fn apply_color(&self, doc: &mut Document, color: [u8; 3]) -> Result<(), String> {
+    pub(crate) fn apply_color(&self, doc: &mut Document, color: [u8; 3]) -> Result<(), String> {
         if self.node.is_some() {
             self.node_mut(doc)?.color = color;
         } else {
@@ -181,7 +182,7 @@ impl EditTarget {
     }
 }
 #[derive(Clone, Copy)]
-enum ButtonEditPolicy {
+pub(crate) enum ButtonEditPolicy {
     Commit,
     Explicit,
 }
@@ -191,6 +192,8 @@ pub struct Workspace {
     pub outlines: Vec<(u64, outline::Outline)>,
     rendered_strokes: Vec<pathweaver_core::model::Stroke>,
     node_owner: Option<u64>,
+    node_views: crate::viewport::NodeViews,
+    pub node_view_needs_fit: bool,
     pub node_parameter_values: std::collections::HashMap<(u64, Parameter), f64>,
     node_values_source: Option<pathweaver_core::model::Stroke>,
     pub tool: Tool,
@@ -203,7 +206,7 @@ pub struct Workspace {
     pub focus: FocusHandle,
     pub nodes_open: bool,
     pub node_height: f32,
-    pub node_selection: Vec<u64>,
+    pub node_layout_height: f32,
     pub node_region: bool,
     pub active_nodes: bool,
     pub inspector: bool,
@@ -211,14 +214,15 @@ pub struct Workspace {
     pub add_input: Entity<TextInput>,
     pub add_anchor: Point<Pixels>,
     pub add_index: usize,
-    pub node_placement_selection: Option<Vec<u64>>,
     pub library_open: bool,
+    pub library_selection: Option<(String, String)>,
     pub search: String,
     pub set_name: String,
     pub category: String,
     pub input: Entity<TextInput>,
     pub editing: Option<Editing>,
     pub edit_target: Option<EditTarget>,
+    pub color_picker: Option<crate::color_picker::ColorPicker>,
     pub status: String,
     pub pen_path: Option<u64>,
     pub cursor: Point<Pixels>,
@@ -226,6 +230,8 @@ pub struct Workspace {
     pub numeric_before: Option<Document>,
     pub numeric_error: bool,
     pub numeric_snap: bool,
+    pub(crate) numeric_capture: Option<crate::native_input::CursorCapture>,
+    _native_input: Option<crate::native_input::NativeInput>,
     pub edit_initial: f64,
     pub inspector_tab: usize,
     pub snap_frames: Vec<snapping::Frame>,
@@ -236,6 +242,9 @@ impl Workspace {
         let focus = cx.focus_handle();
         focus.focus(window);
         cx.observe_window_activation(window, |s, w, cx| {
+            if !w.is_window_active() {
+                s.color_window_deactivated();
+            }
             if !w.is_window_active() && !matches!(s.drag, Drag::None) {
                 s.finish_interaction(false, cx);
                 s.refresh(cx);
@@ -252,12 +261,17 @@ impl Workspace {
             }
         })
         .detach();
+        let input = cx.new(TextInput::new);
+        cx.observe(&input, |s, _, cx| s.color_input_changed(cx))
+            .detach();
         Self {
             session: Session::default(),
             dialog_open: false,
             outlines: vec![],
             rendered_strokes: vec![],
             node_owner: None,
+            node_views: Default::default(),
+            node_view_needs_fit: false,
             node_parameter_values: Default::default(),
             node_values_source: None,
             tool: Tool::Pen,
@@ -273,7 +287,7 @@ impl Workspace {
             focus,
             nodes_open: true,
             node_height: 300.,
-            node_selection: vec![],
+            node_layout_height: 300.,
             node_region: false,
             active_nodes: false,
             inspector: true,
@@ -281,14 +295,15 @@ impl Workspace {
             add_input,
             add_anchor: point(px(0.), px(0.)),
             add_index: 0,
-            node_placement_selection: None,
             library_open: false,
+            library_selection: None,
             search: String::new(),
             set_name: String::new(),
             category: String::new(),
-            input: cx.new(TextInput::new),
+            input,
             editing: None,
             edit_target: None,
+            color_picker: None,
             status: "P：ペン   V：範囲選択   A：制御点   W：幅   ⌘S：保存".into(),
             pen_path: None,
             cursor: point(px(0.), px(0.)),
@@ -296,6 +311,8 @@ impl Workspace {
             numeric_before: None,
             numeric_error: false,
             numeric_snap: false,
+            numeric_capture: None,
+            _native_input: crate::native_input::NativeInput::install(window, cx),
             edit_initial: 0.,
             inspector_tab: 0,
             snap_frames: vec![],
@@ -360,11 +377,6 @@ impl Workspace {
             }
         }
         self.rendered_strokes = self.session.doc.strokes.clone();
-        if let Some(g) = self.session.graph() {
-            self.node_selection.retain(|id| g.node(*id).is_some());
-        } else {
-            self.node_selection.clear();
-        }
         cx.notify();
     }
     pub fn confirm_discard(
@@ -455,6 +467,9 @@ impl Workspace {
         self.confirm_discard(window, cx, |s, _, cx| s.pick_document(cx));
     }
     fn reset_document_interaction(&mut self) {
+        self.numeric_capture = None;
+        self.library_selection = None;
+        self.color_picker = None;
         // Called only after a successful document replacement.
         self.node_region = false;
         self.active_nodes = false;
@@ -468,8 +483,10 @@ impl Workspace {
         self.numeric_snap = false;
         self.snap_frames.clear();
         self.snap_guide = None;
-        self.node_selection.clear();
+        self.session.node_selection.clear();
         self.node_owner = None;
+        self.node_views = Default::default();
+        self.node_view_needs_fit = false;
         self.node_values_source = None;
         self.node_parameter_values.clear();
         self.node_view = View {
@@ -480,7 +497,6 @@ impl Workspace {
         self.category.clear();
         self.search.clear();
         self.add_index = 0;
-        self.node_placement_selection = None;
         self.add_open = false;
         self.library_open = false;
         self.merge_open = false;
@@ -661,7 +677,7 @@ impl Workspace {
             }))
             .into_any_element()
     }
-    fn edit_button(
+    pub(crate) fn edit_button(
         &self,
         id: ElementId,
         label: SharedString,
@@ -716,7 +732,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let node = if matches!(kind, Editing::NodeName | Editing::Parameter(_)) {
-            self.node_selection.last().copied()
+            self.session.node_selection.last().copied()
         } else {
             None
         };
@@ -756,6 +772,10 @@ impl Workspace {
         cx.notify();
     }
     pub fn commit_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.color_picker.is_some() {
+            self.commit_color(window, cx);
+            return;
+        }
         let Some(kind) = self.editing.clone() else {
             return;
         };
@@ -777,7 +797,7 @@ impl Workspace {
                 | Editing::Parameter(_)
                 | Editing::Rotation
                 | Editing::Scale => {
-                    if !target.matches_numeric(&self.session, &self.node_selection, &kind) {
+                    if !target.matches_numeric(&self.session, &self.session.node_selection, &kind) {
                         return Err(
                             "入力中に編集対象が変わりました。取消して選び直してください".into()
                         );
@@ -815,7 +835,7 @@ impl Workspace {
                     }
                     target.node_mut(&mut self.session.doc)?.label = text;
                 }
-                Editing::Color => {
+                Editing::Color | Editing::FillColor => {
                     let hex = text.trim().trim_start_matches('#');
                     if hex.len() != 6 {
                         return Err("色は #RRGGBB で入力してください".into());
@@ -823,7 +843,11 @@ impl Workspace {
                     let v = u32::from_str_radix(hex, 16)
                         .map_err(|_| "色は #RRGGBB で入力してください")?;
                     let rgb = [(v >> 16) as u8, (v >> 8) as u8, v as u8];
-                    target.apply_color(&mut self.session.doc, rgb)?;
+                    if kind == Editing::FillColor {
+                        target.path_mut(&mut self.session.doc)?.fill = Some(rgb);
+                    } else {
+                        target.apply_color(&mut self.session.doc, rgb)?;
+                    }
                 }
             }
             self.session.doc.validate()?;
@@ -1031,7 +1055,10 @@ impl Workspace {
         }
         cx.notify();
     }
-    pub fn mouse_move(&mut self, e: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+    pub fn mouse_move(&mut self, e: &MouseMoveEvent, w: &mut Window, cx: &mut Context<Self>) {
+        if self.color_mouse_move(e, w, cx) {
+            return;
+        }
         self.cursor = e.position;
         if self.numeric_move(e, cx) {
             return;
@@ -1072,7 +1099,8 @@ impl Workspace {
                 };
             }
             Drag::Resize => {
-                self.node_height = (f32::from(self.art_bounds.get().bottom()) + self.node_height
+                self.node_height = (f32::from(self.art_bounds.get().bottom())
+                    + self.node_layout_height
                     - f32::from(e.position.y))
                 .clamp(170., 600.);
             }
@@ -1204,6 +1232,9 @@ impl Workspace {
         }
     }
     pub fn mouse_up(&mut self, e: &MouseUpEvent, w: &mut Window, cx: &mut Context<Self>) {
+        if self.color_mouse_up(e) {
+            return;
+        }
         if self.node_move_modal || self.drag.release_button() != Some(e.button) {
             return;
         }
@@ -1214,6 +1245,7 @@ impl Workspace {
             ..
         } = self.drag.clone()
         {
+            self.numeric_capture = None;
             self.session.commit();
             self.drag = Drag::None;
             self.numeric_before = None;
@@ -1359,8 +1391,14 @@ impl Workspace {
                     step,
                     min,
                     max,
-                    (k.modifiers.alt, k.modifiers.shift, false),
+                    crate::controls::numeric_modifiers(
+                        &kind,
+                        k.modifiers.alt,
+                        k.modifiers.shift,
+                        false,
+                    ),
                 );
+                let value = crate::controls::numeric_value(&kind, value);
                 self.input
                     .update(cx, |i, cx| i.set(value.to_string(), w, cx));
                 return;
@@ -1371,6 +1409,10 @@ impl Workspace {
                 }
                 self.commit_edit(w, cx);
             } else if k.key == "escape" {
+                if self.color_picker.is_some() {
+                    self.cancel_color(w, cx);
+                    return;
+                }
                 self.editing = None;
                 self.edit_target = None;
                 self.focus.focus(w);
@@ -1382,7 +1424,6 @@ impl Workspace {
             self.finish_interaction(false, cx);
             self.pen_path = None;
             self.add_open = false;
-            self.library_open = false;
             self.merge_open = false;
             self.refresh(cx);
             return;
@@ -1481,7 +1522,7 @@ impl Workspace {
             Command::Redo => self.history_step(true, cx),
             Command::SelectAll => {
                 if self.active_nodes && self.nodes_open {
-                    self.node_selection = self
+                    self.session.node_selection = self
                         .session
                         .graph()
                         .map(|g| g.nodes.iter().map(|n| n.id).collect())
@@ -1969,25 +2010,22 @@ impl Workspace {
             .border_color(rgb(ui_color(Role::Border)))
             .child(self.paths_panel(cx))
             .child(tabs)
-            .child(
-                div().h(px(42.)).flex_shrink_0().child(
-                    if self
-                        .editing
-                        .as_ref()
-                        .is_some_and(|k| !crate::controls::is_numeric(k))
-                    {
-                        self.edit_strip(cx)
-                    } else {
-                        div()
-                            .px_3()
-                            .py_2()
-                            .text_size(px(11.))
-                            .text_color(rgb(ui_color(Role::Muted)))
-                            .child("クリックで入力 · ドラッグで調整")
-                            .into_any_element()
-                    },
-                ),
-            )
+            .child(div().h(px(42.)).flex_shrink_0().child(
+                if self.editing.as_ref().is_some_and(|k| {
+                    !crate::controls::is_numeric(k)
+                        && !matches!(k, Editing::Color | Editing::FillColor)
+                }) {
+                    self.edit_strip(cx)
+                } else {
+                    div()
+                        .px_3()
+                        .py_2()
+                        .text_size(px(11.))
+                        .text_color(rgb(ui_color(Role::Muted)))
+                        .child("クリックで入力 · ドラッグで調整")
+                        .into_any_element()
+                },
+            ))
             .child(content)
             .into_any_element()
     }
@@ -2016,7 +2054,6 @@ impl Workspace {
             );
         col = col.child(self.anchor_properties(cx));
         if let Some(path) = self.session.active() {
-            let color = path.edge.unwrap_or([224; 3]);
             col = col
                 .child(
                     div()
@@ -2037,42 +2074,8 @@ impl Workspace {
                     )
                 })
                 .child(self.numeric_field("最大幅", Editing::Width, cx))
-                .child(self.button(
-                    format!("線色  #{:02X}{:02X}{:02X}", color[0], color[1], color[2]),
-                    false,
-                    cx,
-                    move |s, w, cx| {
-                        s.node_region = false;
-                        s.active_nodes = false;
-                        s.start_edit(
-                            Editing::Color,
-                            format!("{:02X}{:02X}{:02X}", color[0], color[1], color[2]),
-                            w,
-                            cx,
-                        );
-                    },
-                ))
-                .child(self.button(
-                    if path.fill.is_some() {
-                        "塗り：あり"
-                    } else {
-                        "塗り：なし"
-                    },
-                    false,
-                    cx,
-                    |s, _, cx| {
-                        s.session.edit(|s| {
-                            if let Some(p) = s.active_mut() {
-                                p.fill = if p.fill.is_some() {
-                                    None
-                                } else {
-                                    Some([192, 192, 192])
-                                };
-                            }
-                        });
-                        s.refresh(cx);
-                    },
-                ))
+                .child(self.color_field(crate::color_picker::ColorSlot::Stroke, path.edge, cx))
+                .child(self.color_field(crate::color_picker::ColorSlot::Fill, path.fill, cx))
                 .child(self.button(
                     if path.closed {
                         "パス：閉じる"
@@ -2143,14 +2146,20 @@ impl Workspace {
 }
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.node_height = self
-            .node_height
-            .min((f32::from(window.viewport_size().height) * 0.48).max(180.));
+        self.session.reconcile();
+        self.node_layout_height = crate::viewport::dock_height(
+            self.node_height,
+            f32::from(window.viewport_size().height),
+        );
         self.refresh_node_values();
         let owner = self.session.active().map(|s| s.id);
         if self.node_owner != owner {
+            let restored = self
+                .node_views
+                .switch(owner, self.node_view, !self.node_view_needs_fit);
+            self.node_view = restored.unwrap_or_default();
+            self.node_view_needs_fit = restored.is_none() && owner.is_some();
             self.node_owner = owner;
-            self.node_selection.clear();
             self.set_name = self
                 .session
                 .graph()

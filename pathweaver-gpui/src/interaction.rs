@@ -22,6 +22,7 @@ impl Drag {
 
 impl Workspace {
     pub(crate) fn finish_interaction(&mut self, commit: bool, cx: &mut Context<Self>) {
+        self.numeric_capture = None;
         if commit {
             // An unfinished wire is a proposal, not a disconnected input to save.
             if matches!(self.drag, Drag::Connect { .. } | Drag::ConnectInput { .. }) {
@@ -31,11 +32,6 @@ impl Workspace {
             }
         } else {
             self.session.cancel();
-        }
-        if let Some(selection) = self.node_placement_selection.take()
-            && !commit
-        {
-            self.node_selection = selection;
         }
         self.drag = Drag::None;
         self.node_move_modal = false;
@@ -64,6 +60,26 @@ impl Workspace {
         } else {
             self.session.undo();
         }
+        // Graph replacement can be undone without changing the active path.
+        // Refresh the set editor too, so registration cannot use the replaced
+        // graph's stale name/category after Undo.
+        self.set_name = self
+            .session
+            .graph()
+            .map(|g| g.name.clone())
+            .unwrap_or_default();
+        self.category = self
+            .session
+            .graph()
+            .and_then(|graph| {
+                self.session
+                    .doc
+                    .appearance_presets
+                    .iter()
+                    .find(|preset| preset.apply() == *graph)
+                    .map(|preset| preset.category.clone())
+            })
+            .unwrap_or_default();
         self.refresh(cx);
     }
 }

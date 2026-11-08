@@ -15,6 +15,8 @@ struct Snapshot {
     selected: Vec<u64>,
     anchors: Vec<Anchor>,
     segment: Option<Anchor>,
+    node_selection: Vec<u64>,
+    node_selection_owner: Option<u64>,
 }
 
 pub struct Session {
@@ -22,6 +24,8 @@ pub struct Session {
     pub selected: Vec<u64>,
     pub anchors: Vec<Anchor>,
     pub segment: Option<Anchor>,
+    pub node_selection: Vec<u64>,
+    node_selection_owner: Option<u64>,
     pub path: Option<PathBuf>,
     saved: Document,
     undo: Vec<Snapshot>,
@@ -37,6 +41,8 @@ impl Default for Session {
             selected: vec![],
             anchors: vec![],
             segment: None,
+            node_selection: vec![],
+            node_selection_owner: None,
             path: None,
             undo: vec![],
             redo: vec![],
@@ -86,6 +92,8 @@ impl Session {
             selected: self.selected.clone(),
             anchors: self.anchors.clone(),
             segment: self.segment,
+            node_selection: self.node_selection.clone(),
+            node_selection_owner: self.node_selection_owner,
         }
     }
     fn restore(&mut self, snapshot: Snapshot) {
@@ -93,6 +101,8 @@ impl Session {
         self.selected = snapshot.selected;
         self.anchors = snapshot.anchors;
         self.segment = snapshot.segment;
+        self.node_selection = snapshot.node_selection;
+        self.node_selection_owner = snapshot.node_selection_owner;
         self.reconcile();
     }
     pub fn begin(&mut self) {
@@ -138,6 +148,18 @@ impl Session {
     pub fn reconcile(&mut self) {
         self.selected
             .retain(|id| self.doc.strokes.iter().any(|s| s.id == *id && s.visible));
+        let owner = self.active().map(|s| s.id);
+        if self.node_selection_owner != owner {
+            // Node IDs belong to a path, so equal IDs in another graph are not
+            // the same editing targets. Undo restores owner and IDs together.
+            self.node_selection.clear();
+            self.node_selection_owner = owner;
+        }
+        let graph = self.active().and_then(|s| s.appearance.as_ref());
+        let valid_nodes: Vec<_> = graph
+            .map(|g| g.nodes.iter().map(|n| n.id).collect())
+            .unwrap_or_default();
+        self.node_selection.retain(|id| valid_nodes.contains(id));
         self.anchors.retain(|a| {
             self.doc.strokes.iter().any(|s| {
                 s.id == a.stroke
@@ -176,6 +198,7 @@ impl Session {
             self.selected.retain(|s| *s != id);
             self.selected.push(id);
         }
+        self.reconcile();
     }
     pub fn select_anchor(&mut self, at: Anchor, add: bool) {
         if !self
@@ -205,6 +228,7 @@ impl Session {
                 ids.push(id);
                 ids
             });
+        self.reconcile();
     }
     pub fn anchor_position(&self) -> Option<Point> {
         let at = self.anchors.last()?;
@@ -300,6 +324,18 @@ impl Session {
                 s.doc.strokes.push(p);
             }
         });
+    }
+    pub fn replace_appearance(&mut self, graph: Graph) -> Result<(), String> {
+        graph.validate()?;
+        if self.active().is_none() {
+            return Err("適用先のパスを選択してください".into());
+        }
+        self.edit(|s| {
+            s.active_mut().unwrap().appearance = Some(graph);
+            // The new graph may reuse IDs, but they are different nodes.
+            s.node_selection.clear();
+        });
+        Ok(())
     }
     pub fn load(&mut self, path: &Path) -> Result<(), String> {
         if std::fs::metadata(path).map_err(|e| e.to_string())?.len() > 32 * 1024 * 1024 {
@@ -599,6 +635,112 @@ mod tests {
         assert_eq!(s.undo.len(), undo_len);
         s.select(second, true);
         assert_eq!(s.selected, vec![first]);
+    }
+
+    #[test]
+    fn node_history_restores_order_owner_and_redo_after_delete() {
+        let mut s = Session::default();
+        let path = s.new_path(Point::ZERO);
+        s.active_mut().unwrap().appearance = Some(Graph::rough());
+        let other = s.new_path(Point::new(100., 0.));
+        s.active_mut().unwrap().appearance = Some(Graph::rough());
+        s.select(path, false);
+        let value = s
+            .graph_mut()
+            .unwrap()
+            .add(pathweaver_core::appearance::Kind::Value, [0., 0.])
+            .unwrap();
+        s.node_selection = vec![value, 3];
+        s.edit(|s| {
+            s.graph_mut().unwrap().remove(3);
+            s.graph_mut().unwrap().remove(value);
+        });
+        assert!(s.node_selection.is_empty());
+        s.select(other, false);
+        s.node_selection = vec![3];
+        s.undo();
+        assert_eq!(s.active().unwrap().id, path);
+        assert_eq!(s.node_selection, vec![value, 3]);
+        assert!(s.graph().unwrap().node(value).is_some());
+        s.redo();
+        assert_eq!(s.active().unwrap().id, other);
+        assert_eq!(s.node_selection, vec![3]);
+        assert!(
+            s.doc
+                .strokes
+                .iter()
+                .find(|s| s.id == path)
+                .unwrap()
+                .appearance
+                .as_ref()
+                .unwrap()
+                .node(value)
+                .is_none()
+        );
+        s.undo();
+        assert_eq!(s.node_selection, vec![value, 3]);
+    }
+
+    #[test]
+    fn node_history_cancels_placement_and_preserves_selection_on_undo_redo() {
+        let mut s = Session::default();
+        s.new_path(Point::ZERO);
+        s.active_mut().unwrap().appearance = Some(Graph::rough());
+        s.reconcile();
+        s.node_selection = vec![3, 1];
+        let before = s.doc.clone();
+        s.begin();
+        let added = s
+            .graph_mut()
+            .unwrap()
+            .add(pathweaver_core::appearance::Kind::Offset, [250., 0.])
+            .unwrap();
+        s.node_selection = vec![added];
+        s.cancel();
+        assert_eq!(s.doc, before);
+        assert_eq!(s.node_selection, vec![3, 1]);
+        s.begin();
+        let added = s
+            .graph_mut()
+            .unwrap()
+            .add(pathweaver_core::appearance::Kind::Offset, [250., 0.])
+            .unwrap();
+        s.node_selection = vec![added];
+        s.commit();
+        s.undo();
+        assert_eq!(s.node_selection, vec![3, 1]);
+        s.redo();
+        assert_eq!(s.node_selection, vec![added]);
+    }
+
+    #[test]
+    fn node_ids_do_not_leak_between_paths_or_replacement_graphs() {
+        let mut s = Session::default();
+        let first = s.new_path(Point::ZERO);
+        s.active_mut().unwrap().appearance = Some(Graph::rough());
+        s.reconcile();
+        s.node_selection = vec![3];
+        let second = s.new_path(Point::new(100., 0.));
+        s.active_mut().unwrap().appearance = Some(Graph::rough());
+        s.reconcile();
+        assert!(s.node_selection.is_empty());
+        s.node_selection = vec![3];
+        s.select(first, false);
+        assert!(s.node_selection.is_empty());
+        s.node_selection = vec![3];
+        let before = s.graph().unwrap().clone();
+        let mut replacement = Graph::rough();
+        replacement.node_mut(3).unwrap().amount = 89.;
+        s.replace_appearance(replacement.clone()).unwrap();
+        assert!(s.node_selection.is_empty());
+        s.undo();
+        assert_eq!(s.graph().unwrap(), &before);
+        assert_eq!(s.node_selection, vec![3]);
+        s.redo();
+        assert_eq!(s.graph().unwrap(), &replacement);
+        assert!(s.node_selection.is_empty());
+        s.select(second, false);
+        assert!(s.node_selection.is_empty());
     }
 
     #[test]

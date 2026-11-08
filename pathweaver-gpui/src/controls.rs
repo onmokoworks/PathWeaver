@@ -17,8 +17,41 @@ pub fn is_numeric(kind: &Editing) -> bool {
     )
 }
 fn display(v: f64) -> String {
+    if !v.is_finite() {
+        return "—".into();
+    }
+    if v == 0. {
+        return "0".into();
+    }
+    if v.abs() < 0.001 || v.abs() >= 1e10 {
+        return format!("{v:.3e}");
+    }
     let s = format!("{v:.3}");
     s.trim_end_matches('0').trim_end_matches('.').to_owned()
+}
+pub fn integer_parameter(key: &Editing) -> bool {
+    matches!(
+        key,
+        Editing::Parameter(pathweaver_core::appearance::Parameter::Seed)
+    )
+}
+/// Keep integer parameter previews identical to the value sent to the model.
+pub fn numeric_value(key: &Editing, value: f64) -> f64 {
+    if integer_parameter(key) {
+        value.round()
+    } else {
+        value
+    }
+}
+pub fn numeric_modifiers(key: &Editing, alt: bool, shift: bool, snap: bool) -> (bool, bool, bool) {
+    (alt && !integer_parameter(key), shift, snap)
+}
+fn validate_numeric_kind(key: &Editing, value: f64) -> Result<(), String> {
+    if integer_parameter(key) && value.fract() != 0. {
+        Err("シードは整数で入力してください".into())
+    } else {
+        Ok(())
+    }
 }
 pub fn adjusted(
     value: f64,
@@ -93,6 +126,7 @@ impl Workspace {
             Editing::Scale => (1., 0.01, 100., 0.01),
             Editing::Parameter(p) => {
                 let n = self
+                    .session
                     .node_selection
                     .last()
                     .and_then(|id| self.session.graph()?.node(*id))?;
@@ -118,6 +152,7 @@ impl Workspace {
         if !value.is_finite() || value < min || value > max {
             return Err(format!("{min}〜{max}の範囲で入力してください"));
         }
+        validate_numeric_kind(key, value)?;
         match key {
             Editing::AnchorX | Editing::AnchorY => {
                 let p = self.session.anchor_position().unwrap();
@@ -138,6 +173,7 @@ impl Workspace {
             Editing::GridSpacing => self.session.doc.grid_spacing = value,
             Editing::Parameter(p) => {
                 let id = *self
+                    .session
                     .node_selection
                     .last()
                     .ok_or("ノードを選択してください")?;
@@ -193,6 +229,7 @@ impl Workspace {
                 *preview
             };
         }
+        value = numeric_value(&key, value);
         let editing = self.editing.as_ref() == Some(&key);
         let mut row = div()
             .flex()
@@ -309,19 +346,28 @@ impl Workspace {
         };
         let moved = moved || f32::from(e.position.x - start.x).abs() > 3.;
         if moved {
+            let dx = self
+                .numeric_capture
+                .as_ref()
+                .and_then(|capture| capture.delta_x())
+                .unwrap_or(f32::from(e.position.x - last.x) as f64);
+            if self.numeric_capture.is_none() {
+                self.numeric_capture = crate::native_input::CursorCapture::start();
+            }
             let next = adjusted(
                 value,
-                f32::from(e.position.x - last.x) as f64,
+                dx,
                 step,
                 min,
                 max,
-                (e.modifiers.alt, e.modifiers.shift, false),
+                numeric_modifiers(&key, e.modifiers.alt, e.modifiers.shift, false),
             );
             let applied = if self.numeric_snap {
                 adjusted(next, 0., step, min, max, (false, false, true))
             } else {
                 next
             };
+            let applied = numeric_value(&key, applied);
             if let Some(doc) = &self.numeric_before {
                 self.session.doc = doc.clone();
             }
@@ -463,6 +509,19 @@ mod tests {
         for invalid in ["1/0", "NaN", "x +", "1;2", "Math.random()"] {
             assert!(expression(invalid, 1.).is_err());
         }
+    }
+    #[test]
+    fn seed_preview_and_editing_respect_the_integer_model() {
+        let seed = crate::app::Editing::Parameter(pathweaver_core::appearance::Parameter::Seed);
+        assert!(super::validate_numeric_kind(&seed, 1.9).is_err());
+        assert!(super::validate_numeric_kind(&seed, 2.).is_ok());
+        assert_eq!(super::numeric_value(&seed, 1.9), 2.);
+        assert_eq!(
+            super::numeric_modifiers(&seed, true, false, false),
+            (false, false, false)
+        );
+        assert_eq!(super::display(0.000_012), "1.200e-5");
+        assert_eq!(super::display(u32::MAX as f64), "4294967295");
     }
     #[test]
     fn fine_coarse_snap_and_limits() {

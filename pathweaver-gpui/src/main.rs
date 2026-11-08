@@ -1,14 +1,17 @@
 mod app;
 mod assets;
+mod color_picker;
 mod controls;
 mod drawing;
 mod input;
 mod interaction;
 mod menus;
+mod native_input;
 mod nodes;
 mod path_edit;
 mod session;
 mod theme;
+mod viewport;
 use gpui::{prelude::*, *};
 fn main() {
     theme::initialize();

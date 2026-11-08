@@ -223,7 +223,7 @@ pub fn handlers(mut root: Div, s: &Workspace, cx: &mut Context<Workspace>) -> Di
     let editing = s.editing.is_some() || s.add_open;
     let nodes_context = s.active_nodes && s.nodes_open;
     let editable_nodes = s.session.graph().is_some_and(|g| {
-        s.node_selection.iter().any(|id| {
+        s.session.node_selection.iter().any(|id| {
             g.node(*id)
                 .is_some_and(|n| !matches!(n.kind, Kind::Input | Kind::Output))
         })
