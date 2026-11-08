@@ -1,7 +1,7 @@
 use crate::theme::{Role, color as ui_color};
 use crate::{
     app::{Drag, Editing, Workspace},
-    drawing::{View, dot, line, normal_bounds, rect, text, wire},
+    drawing::{View, dot, line, normal_bounds, rect, wire},
 };
 use gpui::{prelude::*, *};
 use kurbo::{Point as KPoint, Rect};
@@ -121,14 +121,54 @@ fn fitted_view(g: &Graph, width: f32, height: f32) -> Option<View> {
         ],
     })
 }
-fn socket_label(n: &Node, socket: Socket, label: &str) -> String {
+fn format_node_number(value: f64) -> String {
+    if !value.is_finite() {
+        return "—".into();
+    }
+    if value == 0. {
+        return "0".into();
+    }
+    if value.abs() < 0.001 || value.abs() >= 1e10 {
+        return format!("{value:.3e}");
+    }
+    let value = format!("{value:.3}");
+    value.trim_end_matches('0').trim_end_matches('.').into()
+}
+fn socket_label(n: &Node, socket: Socket, label: &str, effective: Option<f64>) -> String {
     match socket {
         Socket::Number(p) if n.bindings.iter().any(|(key, _)| *key == p) => {
-            format!("{label}  接続中")
+            let value = effective
+                .map(format_node_number)
+                .unwrap_or_else(|| "—".into());
+            format!("{label}  ↗ {value}")
         }
-        Socket::Number(p) => format!("{}  {:.2}", label, n.number(p)),
+        Socket::Number(p) => format!("{}  {}", label, format_node_number(n.number(p))),
         Socket::Shape(_) => label.into(),
     }
+}
+/// Keep text and line height in node coordinates, without a fixed font floor.
+fn node_text(
+    window: &mut Window,
+    cx: &mut App,
+    at: Point<Pixels>,
+    value: impl Into<SharedString>,
+    color: u32,
+    font_size: f32,
+    zoom: f32,
+) {
+    let value = value.into();
+    let run = TextRun {
+        len: value.len(),
+        font: font(crate::assets::UI_FONT),
+        color: rgb(color).into(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let line = window
+        .text_system()
+        .shape_line(value, px(font_size * zoom), &[run], None);
+    let _ = line.paint(at, px(16. * zoom), window, cx);
 }
 // A deselection click must not turn into a drag of the remaining selection.
 fn select_node(ids: &mut Vec<u64>, id: u64, extend: bool) -> bool {
@@ -932,42 +972,43 @@ impl Workspace {
                     0.,
                     3.,
                 );
-                // Hide details before text becomes unreadable rather than painting
-                // minimum-size labels over neighbouring nodes when zoomed out.
+                // Values remain visible through typical Fit zooms. Every row scales
+                // and clips with its node, including at tiny overview zoom levels.
                 w.with_content_mask(Some(ContentMask { bounds }), |w| {
-                    if z >= 0.65 {
-                        let title = if n.label.is_empty() {
-                            n.kind.label().to_string()
-                        } else {
-                            n.label.clone()
-                        };
-                        text(
-                            w,
-                            cx,
-                            origin + point(px(9. * z), px(3. * z)),
-                            title,
-                            ui_color(Role::Text),
-                            12. * z,
-                        );
-                    }
-                    if z >= 0.85 && !n.label.is_empty() {
-                        text(
+                    let title = if n.label.is_empty() {
+                        n.kind.label().to_string()
+                    } else {
+                        n.label.clone()
+                    };
+                    node_text(
+                        w,
+                        cx,
+                        origin + point(px(9. * z), px(3. * z)),
+                        title,
+                        ui_color(Role::Text),
+                        12.,
+                        z,
+                    );
+                    if !n.label.is_empty() {
+                        node_text(
                             w,
                             cx,
                             origin + point(px(9. * z), px(28. * z)),
                             n.kind.label(),
                             ui_color(Role::Muted),
-                            9. * z,
+                            9.,
+                            z,
                         );
                     }
-                    if z >= 0.85 && n.bypass {
-                        text(
+                    if n.bypass {
+                        node_text(
                             w,
                             cx,
                             origin + point(px(130. * z), px(28. * z)),
                             "無効",
                             ui_color(Role::Muted),
-                            10. * z,
+                            10.,
+                            z,
                         );
                     }
                 });
@@ -984,18 +1025,25 @@ impl Workspace {
                             ui_color(Role::ShapeSocket)
                         },
                     );
-                    if z >= 0.85 {
-                        w.with_content_mask(Some(ContentMask { bounds }), |w| {
-                            text(
-                                w,
-                                cx,
-                                at + point(px(10. * z), px(-8. * z)),
-                                socket_label(n, socket, label),
-                                ui_color(Role::Text),
-                                11. * z,
-                            );
-                        });
-                    }
+                    let row = Bounds::new(
+                        at + point(px(8. * z), px(-10. * z)),
+                        size(px((WIDTH - 16.) * z), px(20. * z)),
+                    );
+                    let effective = match socket {
+                        Socket::Number(p) => self.node_parameter_values.get(&(n.id, p)).copied(),
+                        Socket::Shape(_) => None,
+                    };
+                    w.with_content_mask(Some(ContentMask { bounds: row }), |w| {
+                        node_text(
+                            w,
+                            cx,
+                            at + point(px(10. * z), px(-8. * z)),
+                            socket_label(n, socket, label, effective),
+                            ui_color(Role::Text),
+                            11.,
+                            z,
+                        );
+                    });
                 }
                 if n.kind != Kind::Output {
                     dot(
@@ -1137,12 +1185,32 @@ impl Workspace {
                 let p = spec.key;
                 let bound = n.bindings.iter().any(|(k, _)| *k == p);
                 if bound {
+                    let effective = self.node_parameter_values.get(&(id, p)).copied();
+                    let value = effective
+                        .map(format_node_number)
+                        .unwrap_or_else(|| "—".into());
                     col = col.child(
                         div()
                             .flex()
+                            .items_center()
                             .justify_between()
-                            .child(spec.label)
-                            .child("接続元で調整"),
+                            .gap_2()
+                            .child(div().flex_1().min_w_0().truncate().child(spec.label))
+                            .child(
+                                div()
+                                    .text_color(rgb(ui_color(Role::NumberSocket)))
+                                    .child(format!("↗ {value}")),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(ui_color(Role::Muted)))
+                                    .child(if effective.is_some() {
+                                        "接続値"
+                                    } else {
+                                        "計算不可"
+                                    }),
+                            ),
                     );
                 } else {
                     col = col.child(self.numeric_field(spec.label, Editing::Parameter(p), cx));
@@ -1575,11 +1643,6 @@ impl Workspace {
             .on_mouse_down(MouseButton::Right, cx.listener(Self::node_down))
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::node_down))
             .on_scroll_wheel(cx.listener(|s, e, _, cx| s.scroll(e, true, cx)));
-        let name = self
-            .session
-            .active()
-            .map(|s| s.name.as_str())
-            .unwrap_or("パス未選択");
         let mut bar = div()
             .h(px(36.))
             .px_2()
@@ -1628,15 +1691,7 @@ impl Workspace {
                 cx,
                 |s, _, _| s.inspector = !s.inspector,
             ))
-            .child(
-                div()
-                    .ml_2()
-                    .min_w_0()
-                    .max_w(px(320.))
-                    .truncate()
-                    .text_color(rgb(ui_color(Role::Muted)))
-                    .child(name.to_string()),
-            );
+            .child(self.path_context());
         if let Some(g) = self.session.graph() {
             bar = bar.child(self.icon_button(
                 "node-graph-enabled",
@@ -1658,14 +1713,37 @@ impl Workspace {
                 },
             ));
         }
-        bar = bar.child(div().flex_1()).child(self.icon_button(
-            "node-panel-collapse",
-            "chevron-down",
-            "ノードエディターを折りたたむ",
-            false,
-            cx,
-            |s, _, _| s.nodes_open = false,
-        ));
+        bar = bar
+            .child(div().flex_1())
+            .child(
+                div()
+                    .id("node-zoom-reset")
+                    .tooltip(|_, cx| {
+                        cx.new(|_| {
+                            crate::app::IconTooltip(
+                                "ノードの表示倍率 · クリックで100%に戻す".into(),
+                            )
+                        })
+                        .into()
+                    })
+                    .child(self.button(
+                        format!("{:.0}%", self.node_view.zoom * 100.),
+                        false,
+                        cx,
+                        |s, _, _| {
+                            let b = s.node_bounds.get();
+                            s.node_view.zoom_at(b.center(), b, 1. / s.node_view.zoom);
+                        },
+                    )),
+            )
+            .child(self.icon_button(
+                "node-panel-collapse",
+                "chevron-down",
+                "ノードエディターを折りたたむ",
+                false,
+                cx,
+                |s, _, _| s.nodes_open = false,
+            ));
         let mut body = div().flex().flex_1().min_h_0();
         if self.library_open {
             body = body.child(self.library_sidebar(cx));
@@ -1785,6 +1863,43 @@ mod tests {
         wire_crosses,
     };
     #[test]
+    fn numeric_labels_show_effective_values_without_stale_local_fallback() {
+        let mut graph = Graph::rough();
+        let value = graph.add(Kind::Value, [0., 0.]).unwrap();
+        graph.node_mut(value).unwrap().value = 17.5;
+        graph
+            .connect_parameter(value, 3, Parameter::Amount)
+            .unwrap();
+        let effective = pathweaver_core::appearance::parameter_values(&graph, &[]).unwrap();
+        let node = graph.node(3).unwrap();
+        assert_eq!(
+            socket_label(
+                node,
+                Socket::Number(Parameter::Amount),
+                "大きさ",
+                effective.get(&(3, Parameter::Amount)).copied()
+            ),
+            "大きさ  ↗ 17.5"
+        );
+        assert_eq!(
+            socket_label(node, Socket::Number(Parameter::Amount), "大きさ", None),
+            "大きさ  ↗ —"
+        );
+        assert_eq!(
+            socket_label(node, Socket::Number(Parameter::Detail), "細かさ", None),
+            format!("細かさ  {}", super::format_node_number(node.detail))
+        );
+    }
+    #[test]
+    fn compact_numeric_format_keeps_small_values_and_seed_integers() {
+        assert_eq!(super::format_node_number(17.), "17");
+        assert_eq!(super::format_node_number(17.125), "17.125");
+        assert_eq!(super::format_node_number(-0.), "0");
+        assert_eq!(super::format_node_number(0.000_012), "1.200e-5");
+        assert_eq!(super::format_node_number(u32::MAX as f64), "4294967295");
+        assert_eq!(super::format_node_number(f64::NAN), "—");
+    }
+    #[test]
     fn add_search_matches_japanese_english_and_reports_no_results() {
         assert_eq!(super::matching_kinds(" rough "), vec![Kind::Rough]);
         assert_eq!(super::matching_kinds("ラフ"), vec![Kind::Rough]);
@@ -1892,8 +2007,13 @@ mod tests {
         let mut g = Graph::rough();
         let value = g.add(Kind::Value, [0., 0.]).unwrap();
         connect(&mut g, value, 3, Socket::Number(Parameter::Amount)).unwrap();
-        let label = socket_label(g.node(3).unwrap(), Socket::Number(Parameter::Amount), "量");
-        assert_eq!(label, "量  接続中");
+        let label = socket_label(
+            g.node(3).unwrap(),
+            Socket::Number(Parameter::Amount),
+            "量",
+            None,
+        );
+        assert_eq!(label, "量  ↗ —");
         let before = g.clone();
         assert!(connect(&mut g, value, 3, Socket::Shape(0)).is_err());
         assert!(connect(&mut g, 3, 3, Socket::Shape(0)).is_err());

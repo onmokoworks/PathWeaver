@@ -191,6 +191,8 @@ pub struct Workspace {
     pub outlines: Vec<(u64, outline::Outline)>,
     rendered_strokes: Vec<pathweaver_core::model::Stroke>,
     node_owner: Option<u64>,
+    pub node_parameter_values: std::collections::HashMap<(u64, Parameter), f64>,
+    node_values_source: Option<pathweaver_core::model::Stroke>,
     pub tool: Tool,
     pub drag: Drag,
     pub node_move_modal: bool,
@@ -256,6 +258,8 @@ impl Workspace {
             outlines: vec![],
             rendered_strokes: vec![],
             node_owner: None,
+            node_parameter_values: Default::default(),
+            node_values_source: None,
             tool: Tool::Pen,
             drag: Drag::None,
             node_move_modal: false,
@@ -296,6 +300,45 @@ impl Workspace {
             inspector_tab: 0,
             snap_frames: vec![],
             snap_guide: None,
+        }
+    }
+    fn refresh_node_values(&mut self) {
+        if !self.nodes_open {
+            return;
+        }
+        let source = self.session.active();
+        if source
+            .zip(self.node_values_source.as_ref())
+            .is_some_and(|(a, b)| a.id == b.id && same_art(a, b))
+        {
+            return;
+        }
+        self.node_parameter_values.clear();
+        self.node_values_source = source.cloned();
+        let Some(source) = &self.node_values_source else {
+            return;
+        };
+        let Some(graph) = &source.appearance else {
+            return;
+        };
+        if !graph.nodes.iter().any(|n| !n.bindings.is_empty()) {
+            return;
+        }
+        let mut original = source.clone();
+        original.appearance = None;
+        if let Ok(outline) = outline::paint(&original) {
+            let layers = outline
+                .layers
+                .into_iter()
+                .map(|l| pathweaver_core::appearance::Layer {
+                    color: l.color,
+                    opacity: l.opacity,
+                    contours: l.outline.contours,
+                })
+                .collect::<Vec<_>>();
+            if let Ok(values) = pathweaver_core::appearance::parameter_values(graph, &layers) {
+                self.node_parameter_values = values;
+            }
         }
     }
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -427,6 +470,8 @@ impl Workspace {
         self.snap_guide = None;
         self.node_selection.clear();
         self.node_owner = None;
+        self.node_values_source = None;
+        self.node_parameter_values.clear();
         self.node_view = View {
             pan: [30., 30.],
             zoom: 0.9,
@@ -1637,6 +1682,180 @@ impl Workspace {
         tools.into_any_element()
     }
 
+    fn path_row(
+        &self,
+        path: &pathweaver_core::model::Stroke,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = path.id;
+        let active = self.session.active().is_some_and(|p| p.id == id);
+        let selected = self.session.selected.contains(&id);
+        let name = path_display_name(&path.name);
+        let tip: SharedString = format!(
+            "{}：{}",
+            if active {
+                "編集中のパス"
+            } else {
+                "パス"
+            },
+            name
+        )
+        .into();
+        div()
+            .id(("path", id))
+            .flex_1()
+            .min_w_0()
+            .h(px(28.))
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .rounded(px(4.))
+            .cursor_pointer()
+            .bg(rgb(ui_color(if active {
+                Role::Selected
+            } else if selected {
+                Role::Hover
+            } else {
+                Role::Surface
+            })))
+            .border_l_2()
+            .border_color(if selected {
+                rgb(ui_color(Role::Accent))
+            } else {
+                rgba(0)
+            })
+            .text_color(rgb(ui_color(if active {
+                Role::OnAccent
+            } else {
+                Role::Text
+            })))
+            .child(div().flex_1().min_w_0().truncate().child(name))
+            .when(active, |d| {
+                d.child(
+                    svg()
+                        .path("icons/pen.svg")
+                        .size(px(13.))
+                        .flex_shrink_0()
+                        .text_color(rgb(ui_color(Role::OnAccent))),
+                )
+            })
+            .tooltip(move |_, cx| cx.new(|_| IconTooltip(tip.clone())).into())
+            .on_click(cx.listener(move |s, e: &ClickEvent, w, cx| {
+                if s.editing.is_some() {
+                    s.commit_edit(w, cx);
+                    if s.editing.is_some() {
+                        return;
+                    }
+                }
+                s.finish_interaction(true, cx);
+                s.session.select(id, w.modifiers().shift);
+                s.node_region = false;
+                s.active_nodes = false;
+                s.pen_path = None;
+                s.focus.focus(w);
+                if e.click_count() == 2
+                    && let Some(path) = s.session.active().filter(|p| p.id == id)
+                {
+                    s.start_edit(Editing::PathName, path.name.clone(), w, cx);
+                }
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+    fn path_name_field(
+        &self,
+        path: &pathweaver_core::model::Stroke,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = path.id;
+        let name = path.name.clone();
+        let display_name = path_display_name(&name);
+        let tip: SharedString = format!("パス名を変更：{display_name}").into();
+        div()
+            .id(("path-name", id))
+            .w_full()
+            .h(px(28.))
+            .flex_shrink_0()
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .rounded(px(4.))
+            .cursor_pointer()
+            .bg(rgb(ui_color(Role::Button)))
+            .hover(|d| d.bg(rgb(ui_color(Role::Hover))))
+            .child(div().flex_1().min_w_0().truncate().child(display_name))
+            .child(
+                svg()
+                    .path("icons/pen.svg")
+                    .size(px(14.))
+                    .flex_shrink_0()
+                    .text_color(rgb(ui_color(Role::Muted))),
+            )
+            .tooltip(move |_, cx| cx.new(|_| IconTooltip(tip.clone())).into())
+            .on_click(cx.listener(move |s, _, w, cx| {
+                if s.editing.is_some() {
+                    s.commit_edit(w, cx);
+                    if s.editing.is_some() {
+                        return;
+                    }
+                }
+                s.finish_interaction(true, cx);
+                if s.session.active().is_some_and(|p| p.id == id) {
+                    s.start_edit(Editing::PathName, name.clone(), w, cx);
+                }
+            }))
+            .into_any_element()
+    }
+    pub(crate) fn path_context(&self) -> AnyElement {
+        let Some(path) = self.session.active() else {
+            return div()
+                .text_color(rgb(ui_color(Role::Muted)))
+                .child("パス未選択")
+                .into_any_element();
+        };
+        let name = path_display_name(&path.name);
+        let tip: SharedString = format!("ノードの対象パス：{name}（最後に選択したパス）").into();
+        div()
+            .id("node-path-context")
+            .flex()
+            .items_center()
+            .gap_2()
+            .min_w_0()
+            .max_w(px(320.))
+            .px_2()
+            .h(px(26.))
+            .rounded(px(4.))
+            .border_1()
+            .border_color(rgb(ui_color(Role::Border)))
+            .child(
+                svg()
+                    .path("icons/pen.svg")
+                    .size(px(14.))
+                    .flex_shrink_0()
+                    .text_color(rgb(ui_color(Role::Accent))),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(rgb(ui_color(Role::Text)))
+                    .child(name),
+            )
+            .when(self.session.selected.len() > 1, |d| {
+                d.child(
+                    div()
+                        .flex_shrink_0()
+                        .text_color(rgb(ui_color(Role::Muted)))
+                        .text_size(px(10.))
+                        .child(format!("{}選択中", self.session.selected.len())),
+                )
+            })
+            .tooltip(move |_, cx| cx.new(|_| IconTooltip(tip.clone())).into())
+            .into_any_element()
+    }
     fn paths_panel(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut list = div()
             .id("paths-list")
@@ -1670,20 +1889,7 @@ impl Workspace {
                             s.refresh(cx);
                         },
                     ))
-                    .child(div().flex_1().min_w_0().child(self.button_with_id(
-                        ("path", id),
-                        path.name.clone(),
-                        self.session.selected.contains(&id),
-                        cx,
-                        move |s, w, cx| {
-                            s.session.select(id, w.modifiers().shift);
-                            s.node_region = false;
-                            s.active_nodes = false;
-                            s.pen_path = None;
-                            s.focus.focus(w);
-                            cx.notify();
-                        },
-                    ))),
+                    .child(self.path_row(path, cx)),
             );
         }
         div()
@@ -1810,17 +2016,26 @@ impl Workspace {
             );
         col = col.child(self.anchor_properties(cx));
         if let Some(path) = self.session.active() {
-            let name = path.name.clone();
             let color = path.edge.unwrap_or([224; 3]);
             col = col
-                .child(self.button_with_id(
-                    ("path-name", path.id),
-                    name.clone(),
-                    false,
-                    cx,
-                    move |s, w, cx| s.start_edit(Editing::PathName, name.clone(), w, cx),
-                ))
-                .child(format!("{} パスを選択", self.session.selected.len()))
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(rgb(ui_color(Role::Muted)))
+                        .child("編集中のパス名"),
+                )
+                .child(self.path_name_field(path, cx))
+                .when(self.session.selected.len() > 1, |d| {
+                    d.child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(ui_color(Role::Muted)))
+                            .child(format!(
+                                "{}パス選択中 · 名前とノードはこのパスが対象",
+                                self.session.selected.len()
+                            )),
+                    )
+                })
                 .child(self.numeric_field("最大幅", Editing::Width, cx))
                 .child(self.button(
                     format!("線色  #{:02X}{:02X}{:02X}", color[0], color[1], color[2]),
@@ -1931,6 +2146,7 @@ impl Render for Workspace {
         self.node_height = self
             .node_height
             .min((f32::from(window.viewport_size().height) * 0.48).max(180.));
+        self.refresh_node_values();
         let owner = self.session.active().map(|s| s.id);
         if self.node_owner != owner {
             self.node_owner = owner;
@@ -2042,6 +2258,14 @@ impl Render for Workspace {
         root
     }
 }
+pub(crate) fn path_display_name(name: &str) -> String {
+    if name.trim().is_empty() {
+        "名称未設定のパス".into()
+    } else {
+        name.into()
+    }
+}
+
 pub fn segment_hits_rect(a: KPoint, b: KPoint, r: Rect) -> bool {
     if r.contains(a) || r.contains(b) {
         return true;

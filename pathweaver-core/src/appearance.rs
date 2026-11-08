@@ -694,16 +694,49 @@ pub struct Layer {
     pub contours: Vec<Vec<Point>>,
 }
 
+#[derive(Clone)]
+struct Value {
+    layers: Vec<Layer>,
+    number: f64,
+}
+
 pub fn evaluate(graph: &Graph, original: &[Layer]) -> Result<Vec<Layer>, String> {
-    graph.validate()?;
     if !graph.enabled {
+        graph.validate()?;
         return Ok(original.to_vec());
     }
-    #[derive(Clone)]
-    struct Value {
-        layers: Vec<Layer>,
-        number: f64,
+    let mut values = evaluate_values(graph, original, &[graph.output])?;
+    Ok(values.remove(&graph.output).unwrap().layers)
+}
+
+/// Effective values of connected parameters, using the rendering evaluator.
+/// Only binding sources and their upstream dependencies are evaluated; target
+/// effects and unrelated disconnected branches are not rendered for inspection.
+pub fn parameter_values(
+    graph: &Graph,
+    original: &[Layer],
+) -> Result<HashMap<(u64, Parameter), f64>, String> {
+    let sources: Vec<_> = graph.nodes.iter()
+        .flat_map(|node| node.bindings.iter().map(|(_, source)| *source)).collect();
+    let values = evaluate_values(graph, original, &sources)?;
+    let mut parameters = HashMap::new();
+    for node in &graph.nodes {
+        let mut effective = node.clone();
+        for &(parameter, source) in &node.bindings {
+            // The target owns range limits and integer conversion (e.g. Seed).
+            effective.set_number(parameter, values[&source].number);
+            parameters.insert((node.id, parameter), effective.number(parameter));
+        }
     }
+    Ok(parameters)
+}
+
+fn evaluate_values(
+    graph: &Graph,
+    original: &[Layer],
+    requested: &[u64],
+) -> Result<HashMap<u64, Value>, String> {
+    graph.validate()?;
     fn visit(
         graph: &Graph,
         id: u64,
@@ -915,7 +948,11 @@ pub fn evaluate(graph: &Graph, original: &[Layer]) -> Result<Vec<Layer>, String>
         cache.insert(id, result.clone());
         Ok(result)
     }
-    Ok(visit(graph, graph.output, original, &mut HashMap::new())?.layers)
+    let mut values = HashMap::new();
+    for &id in requested {
+        visit(graph, id, original, &mut values)?;
+    }
+    Ok(values)
 }
 
 fn random(seed: u32, index: usize) -> f64 {
@@ -1027,6 +1064,66 @@ mod tests {
                 Point::new(0., 100.),
             ]],
         }]
+    }
+    #[test]
+    fn inspected_parameters_share_numeric_clamping_and_integer_conversion() {
+        let mut graph = Graph::rough();
+        let value = graph.add(Kind::Value, [0., 0.]).unwrap();
+        graph.node_mut(value).unwrap().value = 1234.75;
+        graph.connect_parameter(value, 3, Parameter::Amount).unwrap();
+        graph.connect_parameter(value, 3, Parameter::Seed).unwrap();
+        let local = graph.node(3).unwrap().amount;
+        let values = parameter_values(&graph, &layers()).unwrap();
+        assert_eq!(values[&(3, Parameter::Amount)], 1000.);
+        assert_eq!(values[&(3, Parameter::Seed)], 1234.);
+        assert_eq!(graph.node(3).unwrap().amount, local);
+        graph.node_mut(value).unwrap().value = -99.;
+        let values = parameter_values(&graph, &layers()).unwrap();
+        assert_eq!(values[&(3, Parameter::Amount)], 0.);
+        assert_eq!(values[&(3, Parameter::Seed)], 0.);
+    }
+    #[test]
+    fn inspected_measure_and_math_follow_upstream_geometry_and_bypass() {
+        let mut graph = Graph::rough();
+        let transform = graph.add(Kind::Transform, [0., 0.]).unwrap();
+        graph.node_mut(transform).unwrap().scale = 2.;
+        graph.connect(1, transform, 0).unwrap();
+        let measure = graph.add(Kind::Measure, [0., 0.]).unwrap();
+        graph.connect(transform, measure, 0).unwrap();
+        let math = graph.add(Kind::Math, [0., 0.]).unwrap();
+        graph.node_mut(math).unwrap().math = MathOperation::Divide;
+        graph.node_mut(math).unwrap().b = 2.;
+        graph.connect_parameter(measure, math, Parameter::A).unwrap();
+        graph.connect_parameter(math, 3, Parameter::Amount).unwrap();
+        let values = parameter_values(&graph, &layers()).unwrap();
+        assert_eq!(values[&(math, Parameter::A)], 200.);
+        assert_eq!(values[&(3, Parameter::Amount)], 100.);
+        let mut direct = Graph::rough();
+        direct.node_mut(3).unwrap().amount = values[&(3, Parameter::Amount)];
+        assert_eq!(evaluate(&graph, &layers()).unwrap(), evaluate(&direct, &layers()).unwrap());
+        graph.node_mut(transform).unwrap().bypass = true;
+        assert_eq!(parameter_values(&graph, &layers()).unwrap()[&(3, Parameter::Amount)], 50.);
+        graph.node_mut(math).unwrap().bypass = true;
+        assert_eq!(parameter_values(&graph, &layers()).unwrap()[&(3, Parameter::Amount)], 100.);
+    }
+    #[test]
+    fn parameter_inspection_skips_unrelated_rendering_but_rejects_cycles() {
+        let mut graph = Graph::rough();
+        let value = graph.add(Kind::Value, [0., 0.]).unwrap();
+        graph.node_mut(value).unwrap().value = 42.;
+        graph.connect_parameter(value, 3, Parameter::Amount).unwrap();
+        let transform = graph.add(Kind::Transform, [0., 0.]).unwrap();
+        graph.node_mut(transform).unwrap().translation[0] = 100_000.;
+        graph.connect(1, transform, 0).unwrap();
+        graph.connect(transform, 2, 0).unwrap();
+        let mut input = layers();
+        for point in input.iter_mut().flat_map(|l| l.contours.iter_mut().flatten()) {
+            point.x += 999_000.;
+        }
+        assert!(evaluate(&graph, &input).is_err());
+        assert_eq!(parameter_values(&graph, &input).unwrap()[&(3, Parameter::Amount)], 42.);
+        graph.node_mut(value).unwrap().bindings.push((Parameter::Value, value));
+        assert!(parameter_values(&graph, &input).is_err());
     }
     #[test]
     fn rough_is_deterministic_and_bypass_preserves_original() {
