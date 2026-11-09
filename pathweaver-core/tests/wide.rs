@@ -20,3 +20,14 @@ fn very_wide_curves_stay_fast() {
         assert!(t.elapsed().as_secs_f64() < 2.0, "w={w}: {:?}", t.elapsed());
     }
 }
+
+/// 角を丸く (in by r, out by r) must not leave dots: the inward offset left
+/// zero-area slivers that the outward offset grew into small circles.
+#[test]
+fn round_leaves_no_dots() {
+    use pathweaver_core::appearance_effects::{offset_contours, OffsetJoin};
+    let s: Stroke = serde_json::from_str(CURVE).unwrap();
+    let o = pathweaver_core::outline::build(&s).unwrap();
+    let eroded = offset_contours(&o.contours, -3., OffsetJoin::Round).unwrap();
+    assert_eq!(eroded.len(), 1, "slivers left: {:?}", eroded.iter().map(Vec::len).collect::<Vec<_>>());
+}

@@ -152,7 +152,7 @@ pub fn offset_contours(
         .iter()
         .map(|ring| simplify(ring, 0.2, &mut budget))
         .collect::<Result<_, _>>()?;
-    let base = normalized(&simplified);
+    let base = drop_slivers(normalized(&simplified));
     let radius = distance.abs();
     let mut band: Vec<Vec<Point>> = Vec::new();
     let mut total_points = 0;
@@ -238,8 +238,20 @@ pub fn offset_contours(
             OverlayRule::Difference
         },
     );
+    // Overlays leave zero-area slivers along shared edges; offset again (角を丸く
+    // = in then out) they would grow into visible dots.
+    let output = drop_slivers(output);
     validate_contours(&output)?;
     Ok(output)
+}
+
+/// Rings with (almost) no area: rounding leftovers, never real shapes.
+fn drop_slivers(mut rings: Vec<Vec<Point>>) -> Vec<Vec<Point>> {
+    rings.retain(|r| {
+        let area: f64 = r.iter().zip(r.iter().cycle().skip(1)).map(|(a, b)| a.x * b.y - a.y * b.x).sum::<f64>() * 0.5;
+        area.abs() > 0.01
+    });
+    rings
 }
 
 fn bounds(contours: &[Vec<Point>]) -> Option<Rect> {
