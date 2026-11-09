@@ -2,17 +2,18 @@
 // A panel floating over the workspace: drag the top strip to move, the corner
 // to resize; it stays inside the workspace and comes to the front when used.
 import {computed} from 'vue'
-import {layout, PANEL_TITLES, raise, setFloating, type PanelId} from '../core/layout'
+import {layout, PANEL_TITLES, raise, setFloating, setFolded, type PanelId} from '../core/layout'
 import {Icon} from '../../vendor/tweeq/src/Icon'
 
 const props = defineProps<{id: PanelId; bounds: {width: number; height: number}}>()
 const place = computed(() => layout[props.id])
 const MIN_W = 200, MIN_H = 120
 
+const BAR = 24
 const rect = computed(() => {
   const p = place.value
   const w = Math.max(MIN_W, Math.min(p.w, props.bounds.width - 8))
-  const h = Math.max(MIN_H, Math.min(p.h, props.bounds.height - 8))
+  const h = p.shaded ? BAR + 2 : Math.max(MIN_H, Math.min(p.h, props.bounds.height - 8))
   return {
     x: Math.max(4, Math.min(p.x, props.bounds.width - w - 4)),
     y: Math.max(4, Math.min(p.y, props.bounds.height - h - 4)),
@@ -38,7 +39,8 @@ function move(e: PointerEvent) {
 function up() {
   if (!drag) return
   drag = null
-  Object.assign(place.value, rect.value) // keep what is actually shown
+  const r = rect.value // keep what is actually shown (a folded height is not a size)
+  Object.assign(place.value, place.value.shaded ? {x: r.x, y: r.y, w: r.w} : r)
 }
 </script>
 
@@ -48,14 +50,20 @@ function up() {
     :style="{left: rect.x + 'px', top: rect.y + 'px', width: rect.w + 'px', height: rect.h + 'px', zIndex: 10 + place.z}"
     @pointerdown.capture="raise(id)"
   >
-    <header class="bar" data-testid="floating-bar" @pointerdown="down($event, 'move')" @pointermove="move" @pointerup="up" @pointercancel="up">
+    <header class="bar" data-testid="floating-bar" @pointerdown="down($event, 'move')" @pointermove="move" @pointerup="up" @pointercancel="up" @dblclick="e => { if (!(e.target as HTMLElement).closest('button')) setFolded(id, !place.shaded) }">
+      <button
+        type="button" class="dock" :data-fold="id" :aria-label="place.shaded ? `${PANEL_TITLES[id]}を開く` : `${PANEL_TITLES[id]}をたたむ`"
+        :title="place.shaded ? '開く（見出しのダブルクリックでも）' : 'たたむ（見出しのダブルクリックでも）'" @click="setFolded(id, !place.shaded)"
+      >
+        <Icon :icon="place.shaded ? 'material-symbols:chevron-right' : 'material-symbols:expand-more'" />
+      </button>
       <span class="title">{{ PANEL_TITLES[id] }}</span>
       <button type="button" class="dock" :aria-label="`${PANEL_TITLES[id]}を元の場所に戻す`" title="元の場所に戻す" @click="setFloating(id, false)">
         <Icon icon="material-symbols:close-fullscreen" />
       </button>
     </header>
-    <div class="content"><slot /></div>
-    <div class="resize" aria-hidden="true" @pointerdown="down($event, 'size')" @pointermove="move" @pointerup="up" @pointercancel="up" />
+    <div v-show="!place.shaded" class="content"><slot /></div>
+    <div v-if="!place.shaded" class="resize" aria-hidden="true" @pointerdown="down($event, 'size')" @pointermove="move" @pointerup="up" @pointercancel="up" />
   </section>
 </template>
 
@@ -66,7 +74,7 @@ function up() {
   box-shadow: 0 6px 24px rgba(0, 0, 0, .18), 0 0 1px rgba(0, 0, 0, .2);
 }
 .bar {
-  display: flex; align-items: center; height: 24px; padding: 0 4px 0 10px; flex: none; cursor: grab;
+  display: flex; align-items: center; gap: 2px; height: 24px; padding: 0 4px 0 4px; flex: none; cursor: grab;
   font-size: 11px; font-weight: 600; color: var(--tq-color-text-mute); border-bottom: 1px solid var(--tq-color-border);
   touch-action: none;
 }

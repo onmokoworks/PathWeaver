@@ -249,7 +249,7 @@ test('H-07 panels float anywhere and dock back; the canvas takes the freed space
   await page.getByTestId('canvas').waitFor()
   await expect(page.locator('[data-floating="layers"]')).toBeVisible()
   // dock everything back
-  for (const id of ['layers', 'props', 'nodes']) await page.locator(`[data-floating="${id}"] .dock`).click()
+  for (const id of ['layers', 'props', 'nodes']) await page.locator(`[data-floating="${id}"] .dock:not([data-fold])`).click()
   await expect(page.locator('[data-floating]')).toHaveCount(0)
   expect(Math.abs(await canvasWidth() - w0)).toBeLessThan(2)
   expect(errors).toEqual([])

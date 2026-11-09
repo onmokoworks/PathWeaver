@@ -2,7 +2,6 @@
 import {computed, onBeforeUnmount, onMounted, ref, watch} from 'vue'
 import {TooltipRoot} from '../vendor/tweeq/src/Tooltip'
 import {useInputColor} from '../vendor/tweeq/src/InputColor/useInputColor'
-import PaneSplit from '../vendor/tweeq/src/PaneSplit/PaneSplit.vue'
 import InputButton from '../vendor/tweeq/src/InputButton/InputButton.vue'
 import {useThemeStore} from '../vendor/tweeq/src/stores/theme'
 import {useAppConfigStore} from '../vendor/tweeq/src/stores/appConfig'
@@ -17,7 +16,8 @@ import GridPanel from './panels/GridPanel.vue'
 import SettingsDialog from './panels/SettingsDialog.vue'
 import FloatingPanel from './panels/FloatingPanel.vue'
 import PanelPin from './panels/PanelPin.vue'
-import {layout} from './core/layout'
+import AreaSplit from './panels/AreaSplit.vue'
+import {isFolded, layout, setFolded, toggleFolded, type PanelId} from './core/layout'
 import {settings} from './core/settings'
 import {createHost, isNative} from './host'
 import {call} from './core/wasm'
@@ -57,13 +57,12 @@ const typing = (t: EventTarget | null) =>
   t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || (t instanceof HTMLElement && t.isContentEditable)
 /** App commands confirm a field being edited first (its blur commits it). */
 function settle() { if (typing(document.activeElement)) (document.activeElement as HTMLElement).blur() }
-const nodesOpen = ref(true)
 const commands: Record<string, () => void> = {
   // Menu commands act on a focused text field first, like any Mac app.
   undo: () => (typing(document.activeElement) ? document.execCommand('undo') : ed.undo()),
   redo: () => (typing(document.activeElement) ? document.execCommand('redo') : ed.redo()),
   delete: () => { if (!typing(document.activeElement)) ed.deleteSelection() },
-  toggleNodes: () => { nodesOpen.value = !nodesOpen.value },
+  toggleNodes: () => toggleFolded('nodes'),
   duplicate: () => ed.duplicateSelection(),
   selectAll: () => { if (typing(document.activeElement)) { (document.activeElement as HTMLInputElement).select?.(); return } ed.selected = ed.doc.strokes.filter(s => ed.shown(s)).map(s => s.id); ed.anchors = [] },
   fit: () => canvas.fit(),
@@ -115,6 +114,7 @@ function onKeyDown(e: KeyboardEvent) {
   const k = e.key.toLowerCase()
   if (e.key === 'Meta') canvas.state.meta = true
   if (e.key === 'Alt') canvas.state.alt = true
+  if (e.ctrlKey && k === ' ') { toggleMaximize(); e.preventDefault(); return }
   if (k === ' ') { canvas.state.space = true; nodeEditor.value?.setSpace(true); e.preventDefault(); return }
   if (mod && k === 'z') { e.shiftKey ? ed.redo() : ed.undo(); e.preventDefault(); return }
   if (mod && k === 's') { (e.shiftKey ? commands.saveAs : commands.save)(); e.preventDefault(); return }
@@ -133,6 +133,7 @@ function onKeyUp(e: KeyboardEvent) {
 onMounted(() => {
   window.addEventListener('keydown', onKeyDown)
   window.addEventListener('keyup', onKeyUp)
+  window.addEventListener('pointermove', trackArea, true)
   window.addEventListener('blur', () => { canvas.cancelDrag(); canvas.state.space = false; canvas.state.meta = false; canvas.state.alt = false; if (!typing(document.activeElement)) ed.commit() })
   // Tweeq's color pad/slider gestures end without a confirm event. Releasing
   // the pointer outside a text field ends the gesture: one drag = one undo.
@@ -148,7 +149,7 @@ onBeforeUnmount(() => {
 
 const message = computed(() => ed.error || ed.status || toolHint[ed.tool])
 watch(() => ed.status, v => { if (v) setTimeout(() => { if (ed.status === v) ed.status = '' }, 4000) })
-function openNodes() { nodesOpen.value = true }
+function openNodes() { setFolded('nodes', false) }
 
 // ---- top bar = title bar (drag to move the window, double-click = full screen) ----
 let dragRegion = false
@@ -169,7 +170,27 @@ function onTopbarDouble(e: MouseEvent) {
 // ---- panels: docked in place, or floating over the workspace ----
 const layersDocked = computed(() => !layout.layers.floating)
 const propsDocked = computed(() => !layout.props.floating)
-const nodesDocked = computed(() => nodesOpen.value && !layout.nodes.floating)
+const nodesDocked = computed(() => !layout.nodes.floating)
+const nodesFolded = computed(() => isFolded('nodes'))
+
+// ---- Ctrl+Space: the area under the pointer fills the workspace (Blender) ----
+type AreaId = 'canvas' | PanelId
+const maximized = ref<AreaId | null>(null)
+let pointerArea: AreaId | null = null
+function trackArea(e: PointerEvent) {
+  const el = (e.target as Element | null)?.closest?.('[data-area]') as HTMLElement | null
+  pointerArea = (el?.dataset.area as AreaId) ?? null
+}
+function toggleMaximize() {
+  if (maximized.value) { maximized.value = null; return }
+  const a = pointerArea ?? 'canvas'
+  if (a !== 'canvas' && layout[a].floating) return
+  maximized.value = a
+  ed.status = '最大化しました（Ctrl＋Space で戻す）'
+}
+const maxRight = computed(() => (!maximized.value ? null : maximized.value === 'canvas' || maximized.value === 'nodes' ? 'first' : 'second'))
+const maxNodes = computed(() => (maximized.value === 'canvas' ? 'first' : maximized.value === 'nodes' ? 'second' : null))
+const maxSide = computed(() => (maximized.value === 'layers' ? 'first' : maximized.value === 'props' ? 'second' : null))
 const workspace = ref<HTMLElement>()
 const wsBounds = ref({width: 800, height: 600})
 let wsObserver: ResizeObserver | null = null
@@ -205,7 +226,7 @@ function setSideTab(id: string) { sideTab.value = id; try { localStorage.setItem
           <InputButton subtle narrow icon="material-symbols:undo" tooltip="取り消す ⌘Z" :disabled="!ed.history.undo" @click="ed.undo()" />
           <InputButton subtle narrow icon="material-symbols:redo" tooltip="やり直す ⇧⌘Z" :disabled="!ed.history.redo" @click="ed.redo()" />
           <span class="sep" />
-          <InputButton subtle narrow :icon="nodesOpen ? 'material-symbols:bottom-panel-close-outline' : 'material-symbols:bottom-panel-open-outline'" :tooltip="nodesOpen ? 'ノードを隠す' : 'ノードを表示'" @click="nodesOpen = !nodesOpen" />
+          <InputButton subtle narrow :icon="nodesFolded ? 'material-symbols:bottom-panel-open-outline' : 'material-symbols:bottom-panel-close-outline'" :tooltip="nodesFolded ? 'ノードを開く' : 'ノードをたたむ'" data-testid="toggle-nodes" @click="toggleFolded('nodes')" />
           <InputButton v-if="!isNative()" subtle narrow icon="material-symbols:settings-outline" tooltip="設定 ⌘," aria-label="設定" @click="settingsOpen = true" />
         </div>
       </header>
@@ -213,18 +234,18 @@ function setSideTab(id: string) { sideTab.value = id; try { localStorage.setItem
       <div class="body">
 
         <div ref="workspace" class="workspace">
-          <PaneSplit name="pw-right" direction="horizontal" fixed="second" :size="280" :scroll="[false, false]" :class="{'collapse-second': !layersDocked && !propsDocked}">
+          <AreaSplit name="pw-right" direction="horizontal" fixed="second" :titles="['キャンバス', 'レイヤー・プロパティ']" :min="200" :max="maxRight" :hide="!layersDocked && !propsDocked ? 'second' : null">
             <template #first>
-              <PaneSplit name="pw-nodes" direction="vertical" fixed="second" :size="300" :scroll="[false, false]" :class="{'collapse-second': !nodesDocked}">
-                <template #first><ArtCanvas :ed="ed" :canvas="canvas" v-slot="{bounds}"><ToolPalette :tools="tools" :active="ed.tool" :bounds="bounds" @select="t => canvas.setTool(t)" /></ArtCanvas></template>
-                <template #second><NodeEditor v-if="nodesDocked" ref="nodeEditor" :ed="ed" /></template>
-              </PaneSplit>
+              <AreaSplit name="pw-nodes" direction="vertical" fixed="second" :titles="['キャンバス', 'ノード']" :max="maxNodes" :hide="!nodesDocked ? 'second' : null">
+                <template #first><div class="area" data-area="canvas"><ArtCanvas :ed="ed" :canvas="canvas" v-slot="{bounds}"><ToolPalette :tools="tools" :active="ed.tool" :bounds="bounds" @select="t => canvas.setTool(t)" /></ArtCanvas></div></template>
+                <template #second><div class="area" data-area="nodes"><NodeEditor v-if="nodesDocked" ref="nodeEditor" :ed="ed" /></div></template>
+              </AreaSplit>
             </template>
             <template #second>
-              <PaneSplit name="pw-side" direction="vertical" fixed="first" :size="180" :scroll="[false, false]" :class="{'collapse-first': !layersDocked, 'collapse-second': !propsDocked}">
-                <template #first><PathList v-if="layersDocked" :ed="ed" /></template>
+              <AreaSplit name="pw-side" direction="vertical" fixed="first" :titles="['レイヤー', 'プロパティ']" :min="80" :max="maxSide" :hide="!layersDocked ? 'first' : !propsDocked ? 'second' : null">
+                <template #first><div class="area" data-area="layers"><PathList v-if="layersDocked" :ed="ed" /></div></template>
                 <template #second>
-                  <div v-if="propsDocked" class="side-tabs">
+                  <div v-if="propsDocked" class="side-tabs area" data-area="props">
                     <div class="tab-bar" role="tablist">
                       <button v-for="t in sideTabs" :key="t.id" type="button" role="tab" class="tab" :class="{active: sideTab === t.id}" :aria-selected="sideTab === t.id" @click="setSideTab(t.id)">{{ t.label }}</button>
                       <span class="tab-spacer" />
@@ -236,9 +257,9 @@ function setSideTab(id: string) { sideTab.value = id; try { localStorage.setItem
                     </div>
                   </div>
                 </template>
-              </PaneSplit>
+              </AreaSplit>
             </template>
-          </PaneSplit>
+          </AreaSplit>
 
           <!-- floating panels -->
           <FloatingPanel v-if="!layersDocked" id="layers" :bounds="wsBounds"><PathList :ed="ed" /></FloatingPanel>
@@ -253,7 +274,7 @@ function setSideTab(id: string) { sideTab.value = id; try { localStorage.setItem
               </div>
             </div>
           </FloatingPanel>
-          <FloatingPanel v-if="nodesOpen && !nodesDocked" id="nodes" :bounds="wsBounds"><NodeEditor ref="nodeEditor" :ed="ed" /></FloatingPanel>
+          <FloatingPanel v-if="!nodesDocked" id="nodes" :bounds="wsBounds"><NodeEditor ref="nodeEditor" :ed="ed" /></FloatingPanel>
         </div>
       </div>
 
@@ -286,10 +307,6 @@ html.fullscreen .app.native .topbar {padding-left: 12px}
 .TqInputButton:disabled, .TqInputButtonToggle:disabled {
   opacity: .3 !important; background: transparent !important; box-shadow: inset 0 0 0 1px var(--tq-color-border) !important;
 }
-/* A pane whose panel floats is folded away (no remount of the other pane). */
-.TqPaneSplit.collapse-second > .divider, .TqPaneSplit.collapse-second > .pane:last-child,
-.TqPaneSplit.collapse-first > .divider, .TqPaneSplit.collapse-first > .pane:first-child {display: none !important}
-.TqPaneSplit.collapse-second > .pane:first-child, .TqPaneSplit.collapse-first > .pane:last-child {flex: 1 1 auto !important; width: auto; height: auto}
 /* Quieter, flatter corners than Tweeq's defaults (popups 13px, panes 12px). */
 :root {--tq-radius-input: 3px !important; --tq-radius-popup: 6px !important; --tq-radius-pane: 6px !important}
 </style>
@@ -308,6 +325,7 @@ html.fullscreen .app.native .topbar {padding-left: 12px}
 .sep {width: 1px; height: 16px; background: var(--tq-color-border); margin: 0 4px}
 .body {flex: 1; display: flex; min-height: 0}
 .workspace {flex: 1; min-width: 0; position: relative}
+.area {width: 100%; height: 100%; position: relative}
 .side-tabs {display: flex; flex-direction: column; height: 100%}
 .tab-bar {display: flex; gap: 2px; padding: 0 8px; border-bottom: 1px solid var(--tq-color-border); flex: none}
 .tab {
