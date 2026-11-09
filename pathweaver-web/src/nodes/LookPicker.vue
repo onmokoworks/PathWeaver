@@ -4,11 +4,11 @@
 // its name, the user count (click = make it this path's own copy), new/copy,
 // and unlink. Everything picked applies to ALL selected paths as one shared
 // appearance. The list also holds the look library (.pwn files, every
-// document) and the sets that come with the app.
+// document).
 import {computed, nextTick, onBeforeUnmount, ref} from 'vue'
 import type {Editor} from '../core/editor'
 import type {Stroke} from '../core/types'
-import {applySet, BUILTIN_SETS, linkLook, lookOf, looks, makeSingleUser, newLook, unlinkLook, useBuiltin, useSet} from '../core/looks'
+import {applySet, linkLook, lookOf, looks, makeSingleUser, newLook, unlinkLook, useSet} from '../core/looks'
 import {deleteFromLibrary, exportLook, importLooks, library, revealLibrary, saveToLibrary} from '../core/library'
 import {Icon} from '../../vendor/tweeq/src/Icon'
 import {vTooltip} from '../../vendor/tweeq/src/Tooltip'
@@ -47,7 +47,6 @@ function pick(key: string) {
   close()
 }
 function pickSet(name: string) { useSet(ed, targets.value, name); close() }
-function pickBuiltin(name: string) { useBuiltin(ed, targets.value, name); close() }
 function pickLibrary(name: string) {
   const l = library.items.find(v => v.name === name)
   if (l) applySet(ed, targets.value, l.name, () => JSON.parse(JSON.stringify(l.graph)))
@@ -138,12 +137,6 @@ const pathNames = (users: Stroke[]) => users.map(s => s.name).join('、')
             <button type="button" class="label" :data-set="n" @click="pickSet(n)">{{ n }}</button>
             <button type="button" class="del" :aria-label="`セット「${n}」を削除`" title="削除" @click="deleteSet(n)"><Icon icon="material-symbols:close" /></button>
           </div>
-        </template>
-        <template v-if="BUILTIN_SETS.some(b => match(b.name))">
-          <div class="group">用意されたセット</div>
-          <button v-for="b in BUILTIN_SETS.filter(v => match(v.name))" :key="b.name" type="button" class="row" :data-builtin="b.name" :title="b.hint" @click="pickBuiltin(b.name)">
-            <span class="label">{{ b.name }}</span>
-          </button>
         </template>
       </div>
       <div v-if="many" class="note">選んでいる{{ targets.length }}本のパスに、ひとつの外観としてかけます（共有）</div>

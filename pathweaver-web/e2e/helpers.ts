@@ -64,3 +64,10 @@ export async function scrub(page: Page, el: {boundingBox(): Promise<{x: number; 
   for (let i = 1; i <= 12; i++) { await page.mouse.move(x + (dx * i) / 12, y); await page.waitForTimeout(16) }
   await page.mouse.up()
 }
+
+/** Put looks in the browser-side library (the Mac app keeps them as .pwn files). */
+export async function withLibrary(page: Page, files: Record<string, string>) {
+  const fs = await import('fs')
+  const texts = Object.fromEntries(Object.entries(files).map(([name, path]) => [name, fs.readFileSync(path, 'utf8')]))
+  await page.addInitScript(t => localStorage.setItem('pw.library', JSON.stringify(t)), texts)
+}

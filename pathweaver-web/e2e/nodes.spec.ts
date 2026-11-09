@@ -1,5 +1,5 @@
 import {test, expect, type Page} from '@playwright/test'
-import {boot, doc, pen, scrub, state} from './helpers'
+import {boot, doc, pen, scrub, state, withLibrary} from './helpers'
 
 async function setup(page: Page) {
   const errors = await boot(page)
@@ -244,19 +244,20 @@ test('the look library (.pwn, every document): save, apply to another path (join
 })
 
 test('a set applied with several paths selected gives them ONE shared look', async ({page}) => {
+  await withLibrary(page, {'スタンプ': 'e2e/fixtures/stamp.pwn'})
   await boot(page)
   for (const y of [100, 200, 300]) await pen(page, [{p: {x: 0, y}}, {p: {x: 300, y}}])
   await page.evaluate(() => { const {ed} = (window as any).__pw; ed.selected = ed.doc.strokes.slice(0, 2).map((s: any) => s.id) })
   await page.getByTestId('look-browse').click()
   await expect(page.getByTestId('look-picker')).toContainText('2本のパス')
-  await page.locator('[data-builtin="スタンプ"]').click()
+  await page.locator('[data-library="スタンプ"]').click()
   let d = await doc(page)
   expect(d.strokes[0].appearance.shared).not.toBeNull()
   expect(d.strokes[1].appearance.shared).toBe(d.strokes[0].appearance.shared)
   // the third path later: joins the same スタンプ
   await page.evaluate(() => { const {ed} = (window as any).__pw; ed.selected = [ed.doc.strokes[2].id] })
   await page.getByTestId('look-browse').click()
-  await page.locator('[data-builtin="スタンプ"]').click()
+  await page.locator('[data-library="スタンプ"]').click()
   d = await doc(page)
   expect(d.strokes[2].appearance.shared).toBe(d.strokes[0].appearance.shared)
   expect(new Set(d.strokes.map((s: any) => s.appearance.name))).toEqual(new Set(['スタンプ']))
@@ -700,11 +701,12 @@ test('N-01 Ctrl+Shift+click a node makes it the final output; again puts the old
   expect(errors).toEqual([])
 })
 
-test('built-in スタンプ set (wkwkdesign recipe): picked from the appearance list, renders without errors; 判定 switches to 暗さ', async ({page}) => {
+test('スタンプ (wkwkdesign recipe, a .pwn in the library): picked from the appearance list, renders without errors; 判定 switches to 暗さ', async ({page}) => {
+  await withLibrary(page, {'スタンプ': 'e2e/fixtures/stamp.pwn'})
   const errors = await boot(page)
   await pen(page, [{p: {x: 0, y: 100}}, {p: {x: 300, y: 100}}])
   await page.getByTestId('look-browse').click()
-  await page.locator('[data-builtin="スタンプ"]').click()
+  await page.locator('[data-library="スタンプ"]').click()
   const g = await graph(page)
   expect(g.nodes.map((n: any) => n.kind)).toEqual(['Input', 'Output', 'Fill', 'Glow', 'Noise', 'RasterBlur', 'Threshold', 'Trace', 'Rough', 'Fill'])
   expect(g.nodes.find((n: any) => n.kind === 'Noise').by_darkness).toBe(true)
