@@ -4,7 +4,7 @@ import {boot, doc, pen, scrub, state} from './helpers'
 async function setup(page: Page) {
   const errors = await boot(page)
   await pen(page, [{p: {x: 0, y: 100}}, {p: {x: 300, y: 100}}])
-  await page.getByRole('button', {name: '入力と出力だけで始める'}).first().click()
+  await page.getByTestId('look-new').click()
   await page.waitForTimeout(200)
   return errors
 }
@@ -211,27 +211,24 @@ test('Node Wrangler: Option-drag node→node connects the best sockets; Ctrl+rig
   expect((await byKind(page, 'Output')).inputs[0]).toBe(input.id)
 })
 
-test('node sets are named, saved and applied from the bar above the node editor', async ({page}) => {
+test('node sets are named, saved and applied from the appearance picker', async ({page}) => {
   const errors = await setup(page)
   await addNode(page, 'ラフ', {x: 420, y: 200})
-  const bar = page.getByTestId('node-bar')
-  await expect(bar).toBeVisible()
-  const name = bar.locator('[aria-label="セット名"] input, input[aria-label="セット名"]').first()
-  await name.click()
-  await page.keyboard.type('ざらざら')
-  await page.keyboard.press('Enter')
+  await page.getByTestId('look-name').fill('ざらざら')
+  await page.getByTestId('look-name').press('Enter')
   expect((await graph(page)).name).toBe('ざらざら')
-  await bar.getByRole('button', {name: 'セットとして保存'}).click()
+  await page.getByTestId('look-browse').click()
+  await page.getByRole('button', {name: 'この外観をセットに保存'}).click()
   expect((await doc(page)).appearance_presets.map((p: any) => p.name)).toEqual(['ざらざら'])
-  // a second path gets the set from the bar's picker
+  // a second path takes a copy of the set (not linked)
   await pen(page, [{p: {x: 0, y: 250}}, {p: {x: 300, y: 250}}])
-  await page.getByRole('button', {name: '入力と出力だけで始める'}).first().click()
-  await bar.locator('[aria-label="セットを呼び出す"]').click()
-  const opt = page.locator('.Popover li.option', {hasText: 'ざらざら'})
-  await opt.hover(); await opt.click()
+  await page.getByTestId('look-browse').click()
+  await page.locator('[data-set="ざらざら"]').click()
   const d = await doc(page)
   expect(d.strokes[1].appearance.nodes.map((n: any) => n.kind)).toEqual(d.strokes[0].appearance.nodes.map((n: any) => n.kind))
-  await bar.getByRole('button', {name: 'セットを削除'}).click()
+  expect(d.strokes[1].appearance.shared ?? null).toBeNull()
+  await page.getByTestId('look-browse').click()
+  await page.getByRole('button', {name: 'セット「ざらざら」を削除'}).click()
   expect((await doc(page)).appearance_presets).toEqual([])
   expect((await doc(page)).strokes[1].appearance.name).toBe('ざらざら') // the path keeps its look
   expect(errors).toEqual([])
@@ -581,12 +578,12 @@ test('a menu opened from a dragged link lists only nodes that can take that link
   await expect(menu.locator('[data-kind="Measure"]')).toHaveCount(1)
 })
 
-test('a path without nodes starts from the node you pick: Input → it → Output, one undo', async ({page}) => {
+test('no start buttons: adding a node to a path without nodes makes Input → it → Output, one undo', async ({page}) => {
   const errors = await boot(page)
   await pen(page, [{p: {x: 0, y: 100}}, {p: {x: 300, y: 100}}])
-  await page.getByTestId('start-with-node').click()
-  const menu = page.getByTestId('add-menu')
-  await menu.locator('input').fill('ラフ')
+  await expect(page.getByTestId('node-editor').locator('.empty button')).toHaveCount(0)
+  await page.getByTestId('node-add').click()
+  await page.getByTestId('add-menu').locator('input').fill('ラフ')
   await page.keyboard.press('Enter')
   const g = await graph(page)
   const input = g.nodes.find((n: any) => n.kind === 'Input'), output = g.nodes.find((n: any) => n.kind === 'Output')
@@ -595,9 +592,42 @@ test('a path without nodes starts from the node you pick: Input → it → Outpu
   expect(output.inputs[0]).toBe(rough.id)
   await page.keyboard.press('Meta+z')
   expect(await graph(page)).toBeFalsy()
-  // the property panel entry opens the same menu instead of making an empty graph
-  await page.getByRole('button', {name: 'ノードを追加…'}).first().click()
-  await expect(page.getByTestId('add-menu')).toBeVisible()
-  expect(await graph(page)).toBeFalsy()
+  expect(errors).toEqual([])
+})
+
+test('appearances are data-blocks: path 2 picks path 1\'s, edits sync, the user count makes its own copy', async ({page}) => {
+  const errors = await boot(page)
+  const looks = async () => (await doc(page)).strokes.map((s: any) => s.appearance)
+  await pen(page, [{p: {x: 0, y: 100}}, {p: {x: 300, y: 100}}])
+  await page.getByTestId('look-new').click()
+  await page.getByTestId('look-name').fill('ノード1')
+  await page.getByTestId('look-name').press('Enter')
+  await pen(page, [{p: {x: 0, y: 250}}, {p: {x: 300, y: 250}}])
+  // path 2: pick path 1's appearance from the browse list
+  await page.getByTestId('look-browse').click()
+  await page.locator('[data-look="ノード1"]').click()
+  let [a, b] = await looks()
+  expect(b.shared).toBe(a.shared)
+  expect(b.shared).not.toBeNull()
+  await expect(page.getByTestId('look-users')).toHaveText('2')
+  // an edit on path 2 shows on path 1 too
+  const box = (await page.getByTestId('node-editor').boundingBox())!
+  await page.mouse.move(box.x + 280, box.y + 220)
+  await page.keyboard.press('Shift+A')
+  await page.getByTestId('add-menu').locator('input').fill('ジグザグ')
+  await page.keyboard.press('Enter'); await page.keyboard.press('Enter')
+  ;[a, b] = await looks()
+  expect(a.nodes.some((n: any) => n.kind === 'Zigzag')).toBe(true)
+  expect(JSON.stringify(a)).toBe(JSON.stringify(b))
+  // the user count: this path gets its own copy; further edits stay here
+  await page.getByTestId('look-users').click()
+  ;[a, b] = await looks()
+  expect(b.shared ?? null).toBeNull()
+  expect(a.shared ?? null).toBeNull() // one user left: no longer shared
+  expect(b.name).not.toBe(a.name)
+  await page.getByTestId('look-unlink').click()
+  ;[a, b] = await looks()
+  expect(b).toBeFalsy()
+  expect(a.nodes.some((n: any) => n.kind === 'Zigzag')).toBe(true)
   expect(errors).toEqual([])
 })

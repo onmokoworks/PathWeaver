@@ -553,6 +553,11 @@ impl Node {
 pub struct Graph {
     #[serde(default)]
     pub name: String,
+    /// Data-block id when several paths share this appearance (Blender's
+    /// linked data): every path with the same id holds the same graph and an
+    /// edit to one is copied to the others. None = used by this path only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared: Option<u64>,
     pub enabled: bool,
     pub nodes: Vec<Node>,
     pub output: u64,
@@ -564,6 +569,7 @@ impl Default for Graph {
         output.inputs[0] = Some(1);
         Self {
             name: String::new(),
+            shared: None,
             enabled: true,
             nodes: vec![input, output],
             output: 2,

@@ -123,7 +123,7 @@ test('UX-24 the node editor shows when it receives the keys', async ({page}) => 
 test('UX-22 integer parameters stay integers (seed); UX-43 long names are cut with an ellipsis and shown in full on hover', async ({page}) => {
   await boot(page)
   await pen(page, [{p: {x: 0, y: 0}}, {p: {x: 200, y: 0}}])
-  await page.getByRole('button', {name: '入力と出力だけで始める'}).first().click()
+  await page.getByTestId('look-new').click()
   const box = (await page.getByTestId('node-editor').boundingBox())!
   await page.mouse.move(box.x + 300, box.y + 120)
   await page.keyboard.press('Shift+A')

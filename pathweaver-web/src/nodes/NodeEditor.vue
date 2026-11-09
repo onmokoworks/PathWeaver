@@ -6,9 +6,7 @@
 //  - Shift+A / right click: add menu at the pointer; X / Delete: remove
 import {computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch} from 'vue'
 import InputButton from '../../vendor/tweeq/src/InputButton/InputButton.vue'
-import InputString from '../../vendor/tweeq/src/InputString/InputString.vue'
 import InputCheckbox from '../../vendor/tweeq/src/InputCheckbox/InputCheckbox.vue'
-import InputDropdown from '../../vendor/tweeq/src/InputDropdown/InputDropdown.vue'
 import {vTooltip} from '../../vendor/tweeq/src/Tooltip'
 import {Icon} from '../../vendor/tweeq/src/Icon'
 import type {Editor} from '../core/editor'
@@ -20,6 +18,7 @@ import {gestureZoom, settings, wheelZoom} from '../core/settings'
 import {renderBounds} from '../canvas/geometry'
 import NodeCard from './NodeCard.vue'
 import AddMenu from './AddMenu.vue'
+import LookPicker from './LookPicker.vue'
 import {fitsLink, hasOutput, kindInfo, nodeInfo, outputsNumber} from './catalog'
 
 const props = defineProps<{ed: Editor}>()
@@ -135,12 +134,6 @@ function replaceGraph(g: Graph) {
 }
 function node(id: number) {
   return graph.value?.nodes.find(n => n.id === id)
-}
-function enableNodes() {
-  const s = stroke.value
-  if (!s) return
-  ed.edit(() => { s.appearance = call<Graph>('graphDefault') })
-  nextTick(fit)
 }
 /** Start a path's appearance from the node you want, not from an empty
  *  graph: Input → (picked node) → Output, as one undo step. */
@@ -862,13 +855,7 @@ function key(e: KeyboardEvent): boolean {
   return false
 }
 function trackPointer(e: PointerEvent) { lastPointer = localOf(e); pointerInside.value = true }
-/** Open the add menu in the middle of the editor (from the property panel). */
-function openMenu() {
-  const r = root.value
-  const screen = {x: Math.max(8, (r?.clientWidth ?? 400) / 2 - 100), y: Math.max(8, (r?.clientHeight ?? 300) / 2 - 80)}
-  menu.value = {screen, world: toWorld(screen)}
-}
-defineExpose({key, isPointerInside: () => pointerInside.value, setSpace: (v: boolean) => { spaceHeld = v }, fit, openMenu})
+defineExpose({key, isPointerInside: () => pointerInside.value, setSpace: (v: boolean) => { spaceHeld = v }, fit})
 
 const pendingWire = computed(() => {
   const d = drag.value
@@ -898,36 +885,6 @@ const cutLine = computed(() => {
 })
 const lazyTarget = computed(() => (drag.value?.kind === 'lazy' ? drag.value.target : null))
 // ---- named sets (stored in the document) ----
-const presetNames = computed(() => { void ed.revision; return ed.doc.appearance_presets.map(p => p.name) })
-const presetExists = computed(() => { void ed.revision; const n = graph.value?.name.trim(); return !!n && presetNames.value.includes(n) })
-function savePreset() {
-  const g = graph.value
-  const name = g?.name.trim()
-  if (!g || !name) return
-  ed.edit(d => {
-    const copy: Graph = JSON.parse(JSON.stringify(g))
-    copy.name = name
-    const i = d.appearance_presets.findIndex(p => p.name === name)
-    if (i >= 0) d.appearance_presets[i] = {name, category: '', graph: copy}
-    else d.appearance_presets.push({name, category: '', graph: copy})
-  })
-  ed.status = `セット「${name}」を保存しました`
-}
-function applyPreset(name: string) {
-  const p = ed.doc.appearance_presets.find(v => v.name === name)
-  if (!p) return
-  const ids = ed.selected.length ? ed.selected : stroke.value ? [stroke.value.id] : []
-  ed.edit(() => { for (const id of ids) { const s = ed.findStroke(id); if (s) s.appearance = JSON.parse(JSON.stringify(p.graph)) } })
-  ed.selectedNodes = []
-  ed.status = `セット「${name}」を${ids.length}本のパスに適用しました`
-  nextTick(fit)
-}
-function deletePreset() {
-  const name = graph.value?.name.trim()
-  if (!name) return
-  ed.edit(d => { d.appearance_presets = d.appearance_presets.filter(p => p.name !== name) })
-  ed.status = `セット「${name}」を削除しました（パスの外観はそのまま）`
-}
 const zoomLabel = computed(() => `${Math.round(view.zoom * 100)}%`)
 function resetZoom() { zoomAt({x: (root.value?.clientWidth ?? 0) / 2, y: (root.value?.clientHeight ?? 0) / 2}, 1 / view.zoom) }
 void kindInfo
@@ -943,12 +900,8 @@ void kindInfo
     <div class="pin-corner" @pointerdown.stop><PanelPin id="nodes" /></div>
     <div v-if="!stroke" class="empty">パスを選択すると、その外観ノードを編集できます</div>
     <div v-else-if="!graph" class="empty">
-      <p>「{{ stroke.name }}」は外観ノードを使っていません</p>
-      <div class="start">
-        <InputButton icon="material-symbols:add" label="ノードを追加…" data-testid="start-with-node" @click="openMenuAt" />
-        <InputButton subtle icon="material-symbols:account-tree-outline" label="入力と出力だけで始める" @click="enableNodes" />
-      </div>
-      <p class="mute">Shift＋A でも追加できます</p>
+      <p>ノードを足すと（Shift＋A・右クリック・「追加」）入力と出力も一緒にできます</p>
+      <p class="mute">上の <Icon icon="material-symbols:texture" class="inline" /> から、ほかのパスの外観を選んで共有できます</p>
     </div>
     <template v-else>
       <div ref="layer" class="layer" :style="{transform: `translate(${view.panX}px, ${view.panY}px) scale(${view.zoom})`}">
@@ -970,26 +923,21 @@ void kindInfo
           @begin="ed.begin()" @commit="onCommit" @bypass="toggleBypass(n)" @choose-picture="choosePicture(n)"
         />
       </div>
-      <div class="hud" data-testid="node-bar" @pointerdown.stop @wheel.stop @dblclick.stop>
-        <button type="button" class="add" data-testid="node-add" aria-haspopup="menu" title="ノードを追加（Shift＋A）" @click="openMenuAt">
-          <Icon icon="material-symbols:add" />追加
-        </button>
+    </template>
+    <div v-if="stroke" class="hud" data-testid="node-bar" @pointerdown.stop @wheel.stop @dblclick.stop>
+      <LookPicker :ed="ed" :stroke="stroke" />
+      <span class="sep" />
+      <button type="button" class="add" data-testid="node-add" aria-haspopup="menu" title="ノードを追加（Shift＋A）" @click="openMenuAt">
+        <Icon icon="material-symbols:add" />追加
+      </button>
+      <template v-if="graph">
         <span class="sep" />
-        <span class="target" :title="`編集中のパス：${stroke.name}`">{{ stroke.name }}</span>
         <InputCheckbox v-tooltip="'外観ノードを使う（オフで元の見た目）'" :model-value="graph.enabled" aria-label="外観ノードを使う" @update:model-value="v => mutate(g => { g.enabled = v })" />
-        <span class="sep" />
-        <span class="label">セット</span>
-        <InputString class="set-name" :model-value="graph.name" placeholder="名前なし" aria-label="セット名" @focus="ed.begin()" @update:model-value="v => { ed.begin(); graph!.name = v; ed.changed() }" @confirm="ed.commit()" @blur="ed.commit()" />
-        <InputButton subtle narrow icon="material-symbols:bookmark-add-outline" :disabled="!graph.name.trim()" :tooltip="presetExists ? 'このセット名で上書き保存' : 'セットとして保存'" aria-label="セットとして保存" @click="savePreset" />
-        <InputDropdown
-          v-if="presetNames.length" class="set-pick" :model-value="presetExists ? graph.name.trim() : ''" :options="['', ...presetNames]" :labels="['呼び出す…', ...presetNames]"
-          aria-label="セットを呼び出す" @update:model-value="v => v && applyPreset(v)"
-        />
-        <InputButton v-if="presetExists" subtle narrow icon="material-symbols:delete-outline" :tooltip="`セット「${graph.name.trim()}」を削除`" aria-label="セットを削除" @click="deletePreset" />
+        <span class="target" :title="`編集中のパス：${stroke.name}`">{{ stroke.name }}</span>
         <span class="sep" />
         <button type="button" class="zoom" title="100%に戻す" @click="resetZoom">{{ zoomLabel }}</button>
-      </div>
-    </template>
+      </template>
+    </div>
     <AddMenu
       v-if="menu && stroke" :at="menu.screen" :bounds="{width: root?.clientWidth ?? 600, height: root?.clientHeight ?? 300}"
       :hint="menu.link ? 'つなげるノードだけを表示しています' : !graph ? '入力と出力の間に入れて始めます' : undefined"
@@ -1023,7 +971,7 @@ void kindInfo
   align-items: center; justify-content: center; color: var(--tq-color-text-mute); font-size: 12px;
 }
 .empty p {margin: 0}
-.empty .start {display: flex; gap: 6px}
+.empty .inline {vertical-align: -2px}
 .empty .mute {font-size: 10px; opacity: .8}
 .add {
   display: inline-flex; align-items: center; gap: 2px; height: 20px; padding: 0 8px 0 4px; border: 0; border-radius: 10px;

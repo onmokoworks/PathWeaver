@@ -74,7 +74,8 @@ export interface GraphNode {
   effect: {join: 'Round' | 'Miter' | 'Bevel'; position: 'Outer' | 'Inner' | 'Center'; grain?: 'Dots' | 'Lines'; [k: string]: unknown}
   [k: string]: unknown
 }
-export interface Graph {name: string; enabled: boolean; nodes: GraphNode[]; output: number}
+/** `shared`: data-block id when several paths use this appearance (edits sync). */
+export interface Graph {name: string; shared?: number | null; enabled: boolean; nodes: GraphNode[]; output: number}
 export interface Preset {name: string; category: string; graph: Graph}
 
 export interface Guide {vertical: boolean; position: number}

@@ -4,7 +4,7 @@
 import {computed, reactive, ref, shallowRef, triggerRef, watch} from 'vue'
 import {call, CoreError} from './wasm'
 import {createRenderQueue} from './renderQueue'
-import type {Anchor, Cap, Document, Folder, Join, Render, RGB, Stroke, Vec2} from './types'
+import type {Anchor, Cap, Document, Folder, Graph, Join, Render, RGB, Stroke, Vec2} from './types'
 
 export interface DrawStyle {fill: RGB | null; edge: RGB | null; width: number; join: Join; cap: Cap}
 
@@ -48,8 +48,25 @@ export function createEditor() {
   }
 
   function changed() {
+    syncShared()
     revision.value++
     triggerRef(doc)
+  }
+  // A shared appearance (Blender's linked data-block) is one thing used by
+  // several paths: an edit to the active path's copy goes to every user.
+  // Embedded pictures are compared by a short signature, not megabytes.
+  let sharedSeen = ''
+  const sig = (g: Graph) => JSON.stringify(g, (k, v) => (k === 'png' && typeof v === 'string' ? `${v.length}:${v.slice(-48)}` : v))
+  function syncShared() {
+    const s = active.value
+    const g = s?.appearance
+    if (!s || !g || g.shared == null) return
+    const users = doc.value.strokes.filter(o => o !== s && o.appearance?.shared === g.shared)
+    if (!users.length) return
+    const now = `${g.shared}|${sig(g)}`
+    if (now === sharedSeen) return
+    sharedSeen = now
+    for (const o of users) o.appearance = JSON.parse(JSON.stringify(g)) as Graph
   }
 
   /** Start a gesture. Nested begins are ignored; the outermost gesture wins. */
