@@ -24,11 +24,14 @@ pub struct Image {
     pub width: usize,
     pub height: usize,
     pub rgba: Vec<u8>,
+    /// A soft effect (glow, blur, shadow): shape nodes after it leave it as is
+    /// instead of tracing it back into stepped outlines.
+    pub soft: bool,
     png: OnceLock<String>,
 }
 impl Clone for Image {
     fn clone(&self) -> Self {
-        Self::new(self.x0, self.y0, self.scale, self.width, self.height, self.rgba.clone())
+        Self::new(self.x0, self.y0, self.scale, self.width, self.height, self.rgba.clone()).with_soft(self.soft)
     }
 }
 impl std::fmt::Debug for Image {
@@ -38,12 +41,16 @@ impl std::fmt::Debug for Image {
 }
 impl PartialEq for Image {
     fn eq(&self, o: &Self) -> bool {
-        self.x0 == o.x0 && self.y0 == o.y0 && self.scale == o.scale && self.width == o.width && self.height == o.height && self.rgba == o.rgba
+        self.soft == o.soft && self.x0 == o.x0 && self.y0 == o.y0 && self.scale == o.scale && self.width == o.width && self.height == o.height && self.rgba == o.rgba
     }
 }
 impl Image {
     pub fn new(x0: f64, y0: f64, scale: f64, width: usize, height: usize, rgba: Vec<u8>) -> Self {
-        Self { x0, y0, scale, width, height, rgba, png: OnceLock::new() }
+        Self { x0, y0, scale, width, height, rgba, soft: false, png: OnceLock::new() }
+    }
+    pub fn with_soft(mut self, soft: bool) -> Self {
+        self.soft = soft;
+        self
     }
     pub fn x1(&self) -> f64 {
         self.x0 + self.width as f64 / self.scale
@@ -277,7 +284,7 @@ pub fn blur(img: &Image, radius: f64) -> Result<Image, String> {
         return Ok(img.clone());
     }
     // Room for the spread.
-    let pad = (sigma * 3.).ceil() as usize;
+    let pad = (sigma * 4.).ceil() as usize;
     let (w, h) = (img.width + pad * 2, img.height + pad * 2);
     check_size(w, h)?;
     let boxes = box_sizes(sigma);
@@ -306,7 +313,7 @@ pub fn blur(img: &Image, radius: f64) -> Result<Image, String> {
         px[2] = px[2].min(px[3]);
     }
     let s = img.scale;
-    Ok(Image::new(img.x0 - pad as f64 / s, img.y0 - pad as f64 / s, s, w, h, out))
+    Ok(Image::new(img.x0 - pad as f64 / s, img.y0 - pad as f64 / s, s, w, h, out).with_soft(img.soft))
 }
 fn box_sizes(sigma: f64) -> [usize; 3] {
     // Box radii whose three passes approximate a Gaussian of `sigma`.
@@ -455,7 +462,7 @@ pub fn tint(img: &Image, color: [u8; 3], opacity: f64) -> Image {
         }
         px[3] = (a * 255.).round() as u8;
     }
-    Image::new(img.x0, img.y0, img.scale, img.width, img.height, out)
+    Image::new(img.x0, img.y0, img.scale, img.width, img.height, out).with_soft(img.soft)
 }
 
 /// Apply a world affine map `p ↦ m(p)` by resampling (same resolution).
@@ -485,7 +492,7 @@ pub fn transform(img: &Image, m: impl Fn(Point) -> Point, inverse: impl Fn(Point
             }
         }
     }
-    Ok(Image::new(x0, y0, s, w, h, out))
+    Ok(Image::new(x0, y0, s, w, h, out).with_soft(img.soft))
 }
 
 /// Trace the alpha channel back into vector contours (marching squares at
@@ -859,6 +866,94 @@ fn base64(bytes: &[u8]) -> String {
         s.push(if c.len() > 2 { T[n as usize & 63] as char } else { '=' });
     }
     s
+}
+
+/// Pixels per unit for a soft effect over `layers` grown by `pad` units: the
+/// default resolution, lowered for big artwork so the bitmap stays in budget.
+pub fn soft_scale(layers: &[Layer], pad: f64) -> f64 {
+    let Some((min, max)) = bounds(layers) else { return DEFAULT_SCALE };
+    let area = (max.x - min.x + 2. * pad).max(1.) * (max.y - min.y + 2. * pad).max(1.);
+    ((MAX_PIXELS as f64 * 0.6) / area).sqrt().min(DEFAULT_SCALE).max(0.02)
+}
+fn blur_plane(plane: &mut [f32], w: usize, h: usize, sigma: f64) {
+    if sigma < 0.05 {
+        return;
+    }
+    let mut tmp = vec![0f32; w * h];
+    for r in box_sizes(sigma) {
+        box_h(plane, &mut tmp, w, h, r);
+        box_v(&tmp, plane, w, h, r);
+    }
+}
+fn from_alpha(grid: &Image, alpha: &[f32], color: [u8; 3], opacity: f64) -> Image {
+    let o = opacity.clamp(0., 1.) as f32;
+    let mut rgba = vec![0u8; alpha.len() * 4];
+    for (i, a) in alpha.iter().enumerate() {
+        let a = (a.clamp(0., 1.) * o).min(1.);
+        for k in 0..3 {
+            rgba[i * 4 + k] = (color[k] as f32 * a).round() as u8;
+        }
+        rgba[i * 4 + 3] = (a * 255.).round() as u8;
+    }
+    Image::new(grid.x0, grid.y0, grid.scale, grid.width, grid.height, rgba).with_soft(true)
+}
+fn alpha_plane(img: &Image) -> Vec<f32> {
+    img.rgba.chunks_exact(4).map(|p| p[3] as f32 / 255.).collect()
+}
+
+/// A real (Gaussian) glow around and/or inside the artwork, as smooth bitmaps
+/// in one colour: (outer, inner). `size` ≈ how far the light reaches.
+/// `hole`: the outer glow is cut out where the artwork is (no source kept).
+pub fn glow(layers: &[Layer], size: f64, color: [u8; 3], amount: f64, outer: bool, inner: bool, hole: bool) -> Result<(Option<Image>, Option<Image>), String> {
+    let pad = size * 2.;  // 4σ: the tail ends below 1/255, no visible edge
+    let scale = soft_scale(layers, pad);
+    let Some(mask) = rasterize(layers, scale, pad + 2. / scale)? else { return Ok((None, None)) };
+    // Coverage of the artwork (a translucent shape still glows fully).
+    let mut a = alpha_plane(&mask);
+    let peak = a.iter().cloned().fold(0f32, f32::max);
+    if peak > 0. {
+        a.iter_mut().for_each(|v| *v = (*v / peak).min(1.));
+    }
+    let (w, h) = (mask.width, mask.height);
+    let sigma = size * 0.5 * scale;
+    let mut out = (None, None);
+    if outer {
+        let mut p = a.clone();
+        blur_plane(&mut p, w, h, sigma);
+        for (v, m) in p.iter_mut().zip(&a) {
+            *v = (*v * 1.6).min(1.);
+            if hole {
+                *v *= 1. - m;
+            }
+        }
+        out.0 = Some(from_alpha(&mask, &p, color, amount));
+    }
+    if inner {
+        let mut p: Vec<f32> = a.iter().map(|m| 1. - m).collect();
+        blur_plane(&mut p, w, h, sigma);
+        for (v, m) in p.iter_mut().zip(&a) {
+            *v = (*v * 1.6).min(1.) * m;
+        }
+        out.1 = Some(from_alpha(&mask, &p, color, amount));
+    }
+    Ok(out)
+}
+
+/// The artwork's silhouette blurred into one colour (drop shadows).
+pub fn soft_silhouette(layers: &[Layer], radius: f64, color: [u8; 3], amount: f64) -> Result<Option<Image>, String> {
+    let pad = radius * 2.;
+    let scale = soft_scale(layers, pad);
+    let Some(mask) = rasterize(layers, scale, pad + 2. / scale)? else { return Ok(None) };
+    let mut a = alpha_plane(&mask);
+    blur_plane(&mut a, mask.width, mask.height, radius * 0.5 * scale);
+    Ok(Some(from_alpha(&mask, &a, color, amount)))
+}
+
+/// Everything blurred as pixels (the ぼかし node), kept in its colours.
+pub fn soft_blur(layers: &[Layer], radius: f64) -> Result<Option<Image>, String> {
+    let scale = soft_scale(layers, radius * 2.);
+    let Some(img) = rasterize(layers, scale, 0.)? else { return Ok(None) };
+    Ok(Some(blur(&img, radius)?.with_soft(true)))
 }
 
 #[cfg(test)]

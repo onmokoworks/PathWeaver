@@ -92,7 +92,6 @@ impl Kind {
             self,
             Self::Rough | Self::Zigzag | Self::Pathfinder | Self::Boolean | Self::Offset | Self::Round | Self::Band
                 | Self::Pucker | Self::Simplify | Self::Streak | Self::Dissolve | Self::Halftone | Self::Mezzotint
-                | Self::Blur | Self::Shadow | Self::Glow
         )
     }
     pub fn is_number(self) -> bool {
@@ -921,8 +920,15 @@ fn evaluate_values(
             cache.insert(id, hit.clone());
             return Ok(hit);
         }
+        // Shape nodes: soft light (glow, blur, shadow bitmaps) passes through
+        // untouched, kept below/above the shapes; other bitmaps are traced.
+        let (mut soft_below, mut soft_above) = (Vec::new(), Vec::new());
         if !node.bypass && node.kind.needs_vector() {
-            for input in &mut inputs {
+            for (k, input) in inputs.iter_mut().enumerate() {
+                let (below, above) = take_soft(input);
+                if k == 0 {
+                    (soft_below, soft_above) = (below, above);
+                }
                 vectorize(input)?;
             }
         }
@@ -1026,7 +1032,7 @@ fn evaluate_values(
                 }
                 Kind::Noise => {
                     layers = super::raster::as_image(&layers, 0.)?
-                        .map(|img| vec![super::raster::noise(&img, node.amount, node.detail, node.seed).layer(1.)])
+                        .map(|img| { let soft = img.soft; vec![super::raster::noise(&img, node.amount, node.detail, node.seed).with_soft(soft).layer(1.)] })
                         .unwrap_or_default();
                 }
                 Kind::Trace => {
@@ -1123,6 +1129,11 @@ fn evaluate_values(
                 }
             }
         }
+        if !soft_below.is_empty() || !soft_above.is_empty() {
+            soft_below.append(&mut layers);
+            soft_below.append(&mut soft_above);
+            layers = soft_below;
+        }
         if layers.len() > MAX_LAYERS
             || layers
                 .iter()
@@ -1191,6 +1202,15 @@ fn evaluate_values(
 
 /// Bitmaps reaching a vector-only node are traced back into shapes
 /// (threshold 0.5, half-pixel tolerance, one smoothing round).
+/// Remove the soft bitmaps: (those before the first shape, the rest).
+fn take_soft(layers: &mut Vec<Layer>) -> (Vec<Layer>, Vec<Layer>) {
+    let is_soft = |l: &Layer| l.image.as_ref().is_some_and(|i| i.soft);
+    let first = layers.iter().position(|l| !is_soft(l)).unwrap_or(layers.len());
+    let below: Vec<Layer> = layers.drain(..first).collect();
+    let mut above = Vec::new();
+    layers.retain(|l| if is_soft(l) { above.push(l.clone()); false } else { true });
+    (below, above)
+}
 fn vectorize(layers: &mut [Layer]) -> Result<(), String> {
     for layer in layers.iter_mut() {
         if let Some(img) = layer.image.take() {
@@ -1489,6 +1509,38 @@ mod tests {
         assert_eq!(input, evaluate(&graph, &input).unwrap());
         graph.enabled = false;
         assert_eq!(input, evaluate(&graph, &input).unwrap());
+    }
+    #[test]
+    fn glow_light_passes_shape_nodes_untouched_and_follows_transforms() {
+        let input = layers();
+        let mut graph = Graph::default();
+        let glow = graph.add(Kind::Glow, [0., 0.]).unwrap();
+        let rough = graph.add(Kind::Rough, [0., 0.]).unwrap();
+        graph.connect(1, glow, 0).unwrap();
+        graph.connect(glow, rough, 0).unwrap();
+        graph.connect(rough, graph.output, 0).unwrap();
+        let out = evaluate(&graph, &input).unwrap();
+        // the light stays one smooth bitmap behind the roughened shapes (no trace back)
+        let images: Vec<_> = out.iter().filter_map(|l| l.image.as_ref()).collect();
+        assert_eq!(images.len(), 1);
+        assert!(images[0].soft);
+        assert!(out[0].image.is_some());
+        assert!(out[1..].iter().all(|l| l.image.is_none()));
+        let glow_only = {
+            let mut g = graph.clone();
+            g.node_mut(rough).unwrap().bypass = true;
+            evaluate(&g, &input).unwrap()
+        };
+        assert_eq!(glow_only[0], out[0], "the light is not touched by ラフ");
+        // a transform after the glow moves the light too
+        let t = graph.add(Kind::Transform, [0., 0.]).unwrap();
+        graph.node_mut(t).unwrap().translation = [50., 0.];
+        graph.connect(rough, t, 0).unwrap();
+        graph.connect(t, graph.output, 0).unwrap();
+        let moved = evaluate(&graph, &input).unwrap();
+        let (a, b) = (out[0].image.as_ref().unwrap(), moved[0].image.as_ref().unwrap());
+        assert!((b.x0 - a.x0 - 50.).abs() < 1.);
+        assert!(b.soft);
     }
     #[test]
     fn graph_rejects_cycles_missing_nodes_and_nonfinite_parameters() {

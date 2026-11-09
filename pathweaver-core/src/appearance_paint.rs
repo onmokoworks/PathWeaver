@@ -1,5 +1,5 @@
-//! Paint effects use translucent vector bands so the canvas and SVG share geometry.
-//! Blur is a bounded, eight-band approximation of a Gaussian edge, not a raster filter.
+//! Paint effects. Opacity stays vector; blur, glow and soft shadows are real
+//! Gaussian blurs on pixels (raster.rs), output as one smooth bitmap each.
 use super::{
     appearance::Layer,
     appearance_effects::{offset_contours, OffsetJoin},
@@ -10,8 +10,6 @@ use kurbo::{Point, Vec2};
 
 const MAX_LAYERS: usize = 64;
 const MAX_VERTICES: usize = 200_000;
-const BLUR_BANDS: usize = 8;
-const BLUR_MAX_BANDS: usize = 40;
 
 fn check_layers(layers: &[Layer]) -> Result<(), String> {
     if layers.len() > MAX_LAYERS
@@ -51,13 +49,6 @@ fn silhouette(layers: &[Layer]) -> Vec<Vec<Point>> {
         .collect::<Vec<_>>();
     boolean_contours(&rings, &[], OverlayRule::Subject)
 }
-fn push_layer(result: &mut Vec<Layer>, layer: Layer) -> Result<(), String> {
-    if !layer.contours.is_empty() && layer.opacity > 0. {
-        result.push(layer);
-        check_layers(result)?;
-    }
-    Ok(())
-}
 
 /// Multiply existing alpha; RGB values and input geometry remain unchanged.
 pub fn opacity(layers: &[Layer], amount: f64) -> Result<Vec<Layer>, String> {
@@ -73,69 +64,31 @@ pub fn opacity(layers: &[Layer], amount: f64) -> Result<Vec<Layer>, String> {
         .collect())
 }
 
-/// CDF-based coverage at a signed distance from an edge. The logistic approximation
-/// is smooth and monotonic; exact Gaussian filtering is deliberately not claimed.
-fn coverage(distance_in_sigmas: f64) -> f64 {
-    1. / (1. + (1.702 * distance_in_sigmas).exp())
-}
-
 pub fn blur(layers: &[Layer], radius: f64) -> Result<Vec<Layer>, String> {
-    blur_within(layers, radius, MAX_LAYERS)
-}
-
-/// Blur producing at most about `limit` layers (fewer, coarser steps if needed).
-fn blur_within(layers: &[Layer], radius: f64, limit: usize) -> Result<Vec<Layer>, String> {
     check_layers(layers)?;
     check_range(radius, 0., 100.)?;
     if radius < 1e-6 {
         return Ok(layers.to_vec());
     }
-    let mut result = Vec::new();
-    let total_points: usize = layers.iter().flat_map(|l| l.contours.iter()).map(Vec::len).sum();
-    let visible = layers.iter().filter(|l| l.opacity > 0.).count().max(1);
-    // Steps about 2.5px wide so large radii do not show rings; bounded by the
-    // layer budget. Very detailed sources (thousands of grains) get fewer:
-    // each step is a full offset, and fine grains blur into fuzz either way.
-    let wanted = (4. * radius / 2.5).ceil() as usize;
-    let cap = if total_points > 8_000 { BLUR_BANDS / 2 } else { BLUR_MAX_BANDS };
-    let budget = (limit / visible).saturating_sub(1).max(BLUR_BANDS / 2);
-    let bands = wanted.clamp(BLUR_BANDS / 2, cap.max(BLUR_BANDS / 2)).min(budget);
-    for layer in layers.iter().filter(|l| l.opacity > 0.) {
-        let source = boolean_contours(&layer.contours, &[], OverlayRule::Subject);
-        if source.is_empty() {
-            continue;
-        }
-        // Nested regions, outermost first, each drawn over the previous with an
-        // alpha chosen so the composite matches the coverage curve. Every step
-        // edge has solid paint underneath, so no hairline seams appear between
-        // steps (disjoint rings show their anti-aliased edges as faint circles).
-        let mut below = 0.;
-        for k in 0..=bands {
-            let edge = 2. - 4. * k as f64 / bands as f64;
-            let target = if k == bands {
-                layer.opacity
-            } else {
-                let mid = edge - 2. / bands as f64;
-                layer.opacity * coverage(mid)
-            };
-            if target <= below + 1e-6 {
-                continue;
+    // A real Gaussian blur on pixels: one smooth bitmap, no stepped bands.
+    Ok(super::raster::soft_blur(layers, radius)?.map(|img| vec![img.layer(1.)]).unwrap_or_default())
+}
+
+/// The artwork moved by (dx, dy): shapes are offset, bitmaps resampled.
+fn moved(layers: &[Layer], d: Vec2) -> Result<Vec<Layer>, String> {
+    layers
+        .iter()
+        .map(|l| {
+            let mut l = l.clone();
+            for p in l.contours.iter_mut().flatten() {
+                *p += d;
             }
-            let alpha = if below >= 1. { 1. } else { 1. - (1. - target) / (1. - below) };
-            below = target;
-            let contours = offset_contours(&source, edge * radius, OffsetJoin::Round)?;
-            push_layer(
-                &mut result,
-                Layer {
-                    color: layer.color,
-                    opacity: alpha.clamp(0., 1.),
-                    contours,
-                    image: None,
-                },
-            )?;
-        }
-    }
-    Ok(result)
+            if let Some(img) = &l.image {
+                l.image = Some(std::sync::Arc::new(super::raster::transform(img, |p| p + d, |p| p - d)?));
+            }
+            Ok(l)
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -157,19 +110,23 @@ pub fn shadow(
     if amount == 0. {
         return Ok(layers.to_vec());
     }
-    let contours = offset_contours(&silhouette(layers), spread, OffsetJoin::Round)?
-        .into_iter()
-        .map(|ring| ring.into_iter().map(|p| p + Vec2::new(dx, dy)).collect())
-        .collect();
-    let mut result = blur(
-        &[Layer {
-            color,
-            opacity: amount,
-            contours,
-            image: None,
-        }],
-        radius,
-    )?;
+    let d = Vec2::new(dx, dy);
+    // Shapes: their silhouette grown by `spread`; bitmaps keep their alpha.
+    let shapes: Vec<Layer> = layers.iter().filter(|l| l.image.is_none()).cloned().collect();
+    let mut source = vec![Layer {
+        color,
+        opacity: 1.,
+        contours: offset_contours(&silhouette(&shapes), spread, OffsetJoin::Round)?,
+        image: None,
+    }];
+    source.extend(layers.iter().filter(|l| l.image.is_some()).cloned());
+    let source = moved(&source, d)?;
+    let mut result = if radius < 1e-6 && source.iter().all(|l| l.image.is_none()) {
+        vec![Layer { opacity: amount, ..source[0].clone() }]
+    } else {
+        super::raster::soft_silhouette(&source, radius, color, amount)?.map(|img| vec![img.layer(1.)]).unwrap_or_default()
+    };
+    result.retain(|l| !l.contours.is_empty());
     result.extend_from_slice(layers);
     check_layers(&result)?;
     Ok(result)
@@ -183,6 +140,8 @@ pub struct GlowMode {
     pub keep_source: bool,
 }
 
+/// A real glow: the artwork's alpha blurred (Gaussian) into smooth light.
+/// Outer light sits behind the artwork, inner light over it (clipped to it).
 pub fn glow(
     layers: &[Layer],
     size: f64,
@@ -197,48 +156,11 @@ pub fn glow(
     if size < 1e-6 || amount == 0. || !(mode.outer || mode.inner) {
         return Ok(source_layers());
     }
-    let source = silhouette(layers);
-    let halos = mode.outer as usize + mode.inner as usize;
-    let kept = if mode.keep_source { layers.len() } else { 0 };
-    let limit = (MAX_LAYERS.saturating_sub(kept) / halos).max(BLUR_BANDS / 2 + 1);
-    let halo = |contours: Vec<Vec<Point>>| {
-        blur_within(
-            &[Layer {
-                color,
-                opacity: amount,
-                contours,
-                image: None,
-            }],
-            size * 0.5,
-            limit,
-        )
-    };
+    let (outer, inner) = super::raster::glow(layers, size, color, amount, mode.outer, mode.inner, !mode.keep_source)?;
     let mut result = Vec::new();
-    if mode.outer {
-        // Outer halo sits behind the source.
-        let grown = offset_contours(&source, size * 0.5, OffsetJoin::Round)?;
-        let mut outer = halo(grown)?;
-        if !mode.keep_source {
-            // Halo only: the shape itself becomes a hole.
-            for l in &mut outer {
-                l.contours = boolean_contours(&l.contours, &source, OverlayRule::Difference);
-            }
-            outer.retain(|l| !l.contours.is_empty());
-        }
-        result.extend(outer);
-    }
+    result.extend(outer.map(|i| i.layer(1.)));
     result.extend(source_layers());
-    if mode.inner {
-        // Inner halo is painted over the source, clipped to it.
-        let inset = offset_contours(&source, -size, OffsetJoin::Round)?;
-        let ring = boolean_contours(&source, &inset, OverlayRule::Difference);
-        let mut inner = halo(ring)?;
-        for l in &mut inner {
-            l.contours = boolean_contours(&l.contours, &source, OverlayRule::Intersect);
-        }
-        inner.retain(|l| !l.contours.is_empty());
-        result.extend(inner);
-    }
+    result.extend(inner.map(|i| i.layer(1.)));
     check_layers(&result)?;
     Ok(result)
 }
@@ -259,12 +181,6 @@ mod tests {
             image: None,
         }
     }
-    fn bounds(layers: &[Layer]) -> kurbo::Rect {
-        layers
-            .iter()
-            .flat_map(|l| l.contours.iter().flatten())
-            .fold(kurbo::Rect::ZERO, |r, p| r.union_pt(*p))
-    }
     fn contains(rings: &[Vec<Point>], p: Point) -> bool {
         let mut winding = 0;
         for ring in rings {
@@ -282,11 +198,34 @@ mod tests {
         }
         winding != 0
     }
+    /// Composite alpha at a point: shapes by containment, bitmaps by pixel.
     fn alpha_at(layers: &[Layer], p: Point) -> f64 {
-        layers
-            .iter()
-            .filter(|l| contains(&l.contours, p))
-            .fold(0., |a, l| l.opacity + a * (1. - l.opacity))
+        layers.iter().fold(0., |a, l| {
+            let v = match &l.image {
+                Some(i) => {
+                    let (x, y) = (((p.x - i.x0) * i.scale).floor(), ((p.y - i.y0) * i.scale).floor());
+                    if x < 0. || y < 0. || x >= i.width as f64 || y >= i.height as f64 {
+                        0.
+                    } else {
+                        i.rgba[(y as usize * i.width + x as usize) * 4 + 3] as f64 / 255. * l.opacity
+                    }
+                }
+                None if contains(&l.contours, p) => l.opacity,
+                None => 0.,
+            };
+            v + a * (1. - v)
+        })
+    }
+    /// Alpha along y=50 from x0 to x1 never jumps (no visible steps or rings).
+    fn assert_smooth(layers: &[Layer], x0: f64, x1: f64, max_step: f64) {
+        let mut last = alpha_at(layers, Point::new(x0, 50.));
+        let mut x = x0 + 1.;
+        while x < x1 {
+            let a = alpha_at(layers, Point::new(x, 50.));
+            assert!((a - last).abs() < max_step, "x={x} {last} -> {a}");
+            last = a;
+            x += 1.;
+        }
     }
     #[test]
     fn opacity_multiplies_and_preserves_geometry_color() {
@@ -309,68 +248,67 @@ mod tests {
         assert!(!contains(&result[0].contours, Point::new(5., 5.)));
     }
     #[test]
-    fn blur_is_bounded_and_fades_toward_outside() {
+    fn soft_shadow_is_one_smooth_bitmap_below_the_source() {
+        let shadowed = shadow(&[square()], 20., 30., 0., [1, 2, 3], 0.6, 8.).unwrap();
+        assert_eq!(shadowed.len(), 2);
+        let img = shadowed[0].image.as_ref().unwrap();
+        assert!(img.soft);
+        assert!(alpha_at(&shadowed[..1], Point::new(70., 80.)) > 0.5);
+        assert_smooth(&shadowed[..1], 100., 140., 0.06);
+    }
+    #[test]
+    fn blur_is_a_real_gaussian_on_pixels() {
         let original = square();
-        assert_eq!(
-            blur(std::slice::from_ref(&original), 0.).unwrap(),
-            vec![original.clone()]
-        );
+        assert_eq!(blur(std::slice::from_ref(&original), 0.).unwrap(), vec![original.clone()]);
         let blurred = blur(&[original], 10.).unwrap();
-        assert!(blurred.len() <= BLUR_MAX_BANDS + 1);
-        let b = bounds(&blurred);
-        assert!(b.x0 >= -20.01 && b.x1 <= 120.01);
+        assert_eq!(blurred.len(), 1, "one bitmap, not stepped bands");
+        let img = blurred[0].image.as_ref().unwrap();
+        assert!(img.soft);
         let center = alpha_at(&blurred, Point::new(50., 50.));
         let near = alpha_at(&blurred, Point::new(103., 50.));
-        let far = alpha_at(&blurred, Point::new(116., 50.));
-        assert!(center > near && near > far && far > 0.);
-        assert!(blurred.iter().all(|l| l.color == [100, 150, 200]));
+        let far = alpha_at(&blurred, Point::new(112., 50.));
+        assert!(center > near && near > far && far > 0., "{center} {near} {far}");
+        assert!((center - 0.8).abs() < 0.02);
+        // colour kept (premultiplied: rgb ≈ colour × alpha)
+        let i = ((50. - img.y0) * img.scale) as usize * img.width + ((50. - img.x0) * img.scale) as usize;
+        let a = img.rgba[i * 4 + 3] as f64;
+        assert!((img.rgba[i * 4] as f64 - 100. * a / 255.).abs() < 3.);
         assert!(blur(&[square()], 101.).is_err());
     }
     #[test]
-    fn large_blur_uses_fine_steps_and_matches_the_coverage_curve() {
+    fn large_blur_falls_off_smoothly() {
         let blurred = blur(&[square()], 60.).unwrap();
-        assert!(blurred.len() > 24, "{} steps", blurred.len());
-        // Composite alpha falls smoothly: neighbouring samples 3px apart never
-        // jump by more than a few percent (no visible rings).
-        let mut last = alpha_at(&blurred, Point::new(50., 50.));
-        let mut x = 53.;
-        while x < 220. {
-            let a = alpha_at(&blurred, Point::new(x, 50.));
-            assert!(a <= last + 1e-9 && last - a < 0.06, "x={x} {last} -> {a}");
-            last = a;
-            x += 3.;
-        }
+        assert_smooth(&blurred, 50., 200., 0.03);
     }
     #[test]
-    fn inner_glow_is_clipped_while_outer_glow_sits_behind_source() {
+    fn glow_modes_are_smooth_light_behind_and_inside() {
         let mode = |outer, inner, keep_source| GlowMode { outer, inner, keep_source };
         let original = square();
+        // inner: source, then light clipped to the shape
         let inner = glow(std::slice::from_ref(&original), 10., [255, 0, 0], 0.5, mode(false, true, true)).unwrap();
+        assert_eq!(inner.len(), 2);
         assert_eq!(inner[0], original);
-        let inside = |l: &Layer| {
-            l.contours
-                .iter()
-                .flatten()
-                .all(|p| p.x >= -1e-6 && p.x <= 100. + 1e-6 && p.y >= -1e-6 && p.y <= 100. + 1e-6)
-        };
-        assert!(inner[1..].iter().all(inside));
+        assert!(alpha_at(&inner[1..], Point::new(98., 50.)) > 0.1);
+        assert_eq!(alpha_at(&inner[1..], Point::new(103., 50.)), 0.);
+        assert!(alpha_at(&inner[1..], Point::new(98., 50.)) > alpha_at(&inner[1..], Point::new(80., 50.)));
+        // outer: light behind, source on top
         let outer = glow(&[square()], 10., [255, 0, 0], 0.5, mode(true, false, true)).unwrap();
-        assert_eq!(outer.last().unwrap(), &square());
-        assert!(bounds(&outer).x1 > 100.);
-        // Both sides: halo behind, source, then the clipped inner halo on top.
+        assert_eq!(outer.len(), 2);
+        assert_eq!(outer[1], square());
+        assert!(alpha_at(&outer[..1], Point::new(104., 50.)) > 0.1);
+        assert_smooth(&outer[..1], 100., 130., 0.08);
+        // both: light, source, inner light
         let both = glow(&[square()], 10., [255, 0, 0], 0.5, mode(true, true, true)).unwrap();
+        assert_eq!(both.len(), 3);
+        assert_eq!(both[1], square());
         assert!(glow(&[square()], 100., [255, 0, 0], 0.5, mode(true, true, true)).is_ok());
-        let at = both.iter().position(|l| *l == square()).unwrap();
-        assert!(at > 0 && at < both.len() - 1);
-        assert!(bounds(&both[..at]).x1 > 100.);
-        assert!(both[at + 1..].iter().all(inside));
-        // Halo only: no source layer, and the shape area is left open.
+        // halo only: the shape area stays open
         let halo = glow(&[square()], 10., [255, 0, 0], 0.5, mode(true, false, false)).unwrap();
         assert!(!halo.contains(&square()));
-        assert_eq!(alpha_at(&halo, Point::new(50., 50.)), 0.);
+        assert!(alpha_at(&halo, Point::new(50., 50.)) < 0.01);
         assert!(alpha_at(&halo, Point::new(103., 50.)) > 0.);
         let inner_only = glow(&[square()], 10., [255, 0, 0], 0.5, mode(false, true, false)).unwrap();
-        assert!(!inner_only.contains(&square()) && !inner_only.is_empty() && inner_only.iter().all(inside));
+        assert_eq!(inner_only.len(), 1);
     }
     #[test]
     fn graph_opacity_matches_canvas_layers_and_svg() {
@@ -405,6 +343,6 @@ mod tests {
     fn paint_effects_enforce_layer_budget() {
         let source = vec![square(); MAX_LAYERS + 1];
         assert!(opacity(&source, 0.5).is_err());
-        assert!(blur(&vec![square(); 20], 5.).is_err());
+        assert!(blur(&source, 5.).is_err());
     }
 }

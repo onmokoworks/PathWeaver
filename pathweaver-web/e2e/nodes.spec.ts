@@ -255,8 +255,9 @@ test('heavy effects render off the main thread: the UI keeps answering while mez
   await page.evaluate(() => (window as any).__pw.ed.renders.size)
   expect(Date.now() - t0).toBeLessThan(400)
   await expect.poll(() => page.evaluate(() => { const {ed} = (window as any).__pw; return ed.renderPending === 0 && !ed.renders.get(ed.doc.strokes[0].id).stale }), {timeout: 15000}).toBe(true)
-  const layers = await page.evaluate(() => { const {ed} = (window as any).__pw; return ed.renders.get(ed.doc.strokes[0].id).layers.length })
-  expect(layers).toBeGreaterThan(2) // blur bands arrived from the worker
+  const layers = await page.evaluate(() => { const {ed} = (window as any).__pw; return ed.renders.get(ed.doc.strokes[0].id).layers })
+  expect(layers).toHaveLength(1) // the blur arrived from the worker: one smooth bitmap, not stepped bands
+  expect(layers[0].image).toBeTruthy()
 })
 
 test('F-09 drag an item out of the add menu onto a link: inserted on release', async ({page}) => {
