@@ -77,7 +77,12 @@ watch(() => pos.horizontal, () => requestAnimationFrame(() => Object.assign(pos,
       @pointerdown="onGripDown" @pointermove="onGripMove" @pointerup="onGripUp" @pointercancel="onGripUp"
       @dblclick="toggleOrientation"
     >
-      <svg viewBox="0 0 12 6" aria-hidden="true"><circle v-for="i in 6" :key="i" :cx="1.5 + ((i - 1) % 3) * 4.5" :cy="i <= 3 ? 1.2 : 4.8" r="1.1" /></svg>
+      <svg v-if="!pos.horizontal" viewBox="0 0 6 12" aria-hidden="true" data-dots="columns">
+        <circle v-for="i in 6" :key="i" :cx="i <= 3 ? 1.2 : 4.8" :cy="1.5 + ((i - 1) % 3) * 4.5" r="1.1" />
+      </svg>
+      <svg v-else viewBox="0 0 12 6" aria-hidden="true" data-dots="rows">
+        <circle v-for="i in 6" :key="i" :cx="1.5 + ((i - 1) % 3) * 4.5" :cy="i <= 3 ? 1.2 : 4.8" r="1.1" />
+      </svg>
     </div>
     <InputButtonToggle
       v-for="t in tools" :key="t.id" v-tooltip="{content: `${t.label}（${t.key}）`, placement: pos.horizontal ? 'bottom' : 'right'}"
@@ -98,14 +103,15 @@ watch(() => pos.horizontal, () => requestAnimationFrame(() => Object.assign(pos,
   cursor: default;
 }
 .tool-palette.horizontal {flex-direction: row; padding: 4px 4px 4px 3px}
+/* Two columns of three dots (⋮⋮) on a vertical palette, two rows on a horizontal one. */
 .grip {
-  display: grid; place-items: center; width: 26px; height: 10px; border-radius: 3px; cursor: grab;
+  display: grid; place-items: center; width: 26px; height: 16px; border-radius: 3px; cursor: grab;
   color: var(--tq-color-text-mute); touch-action: none;
 }
-.horizontal .grip {width: 10px; height: 26px}
-.horizontal .grip svg {transform: rotate(90deg)}
+.horizontal .grip {width: 16px; height: 26px}
 .grip:hover {background: var(--tq-color-input-hover)}
 .grip:active {cursor: grabbing}
-.grip svg {width: 12px; height: 6px; fill: currentColor}
+.grip svg {width: 6px; height: 12px; fill: currentColor}
+.horizontal .grip svg {width: 12px; height: 6px}
 .tool-palette :deep(.TqInputButtonToggle) {width: 28px; height: 28px; min-width: 28px; font-size: 16px; justify-content: center; border-radius: 4px}
 </style>
