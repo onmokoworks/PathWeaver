@@ -99,6 +99,41 @@ final class Host: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMes
             web.dragRegion = m["value"] as? Bool ?? false
         case "pointerLock":
             setPointerLock(m["value"] as? Bool ?? false)
+        case "libraryList":
+            sendLibrary()
+        case "librarySave":
+            let name = safeName(m["name"] as? String ?? "外観")
+            do {
+                try (m["text"] as? String ?? "").write(to: libraryDir.appendingPathComponent("\(name).pwn"), atomically: true, encoding: .utf8)
+            } catch {
+                js("window.pathweaver.failed(\(json("ライブラリに保存できませんでした：\(error.localizedDescription)")))")
+            }
+            sendLibrary()
+        case "libraryDelete":
+            try? FileManager.default.trashItem(at: libraryDir.appendingPathComponent("\(safeName(m["name"] as? String ?? "")).pwn"), resultingItemURL: nil)
+            sendLibrary()
+        case "libraryReveal":
+            NSWorkspace.shared.open(libraryDir)
+        case "lookExport":
+            let panel = NSSavePanel()
+            panel.allowedContentTypes = [UTType(filenameExtension: "pwn") ?? .json]
+            panel.nameFieldStringValue = "\(safeName(m["name"] as? String ?? "外観")).pwn"
+            panel.beginSheetModal(for: window) { r in
+                if r == .OK, let url = panel.url { try? (m["text"] as? String ?? "").write(to: url, atomically: true, encoding: .utf8) }
+            }
+        case "lookImport":
+            let panel = NSOpenPanel()
+            panel.allowedContentTypes = [UTType(filenameExtension: "pwn") ?? .json]
+            panel.allowsMultipleSelection = true
+            panel.beginSheetModal(for: window) { r in
+                guard r == .OK else { return }
+                for url in panel.urls {
+                    let dest = self.libraryDir.appendingPathComponent(url.lastPathComponent)
+                    try? FileManager.default.removeItem(at: dest)
+                    try? FileManager.default.copyItem(at: url, to: dest)
+                }
+                self.sendLibrary()
+            }
         case "menu":
             canUndo = m["undo"] as? Bool ?? false
             canRedo = m["redo"] as? Bool ?? false
@@ -195,6 +230,31 @@ final class Host: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMes
     }
 
     func js(_ code: String) { web.evaluateJavaScript(code, completionHandler: nil) }
+
+    // MARK: look library (like After Effects' .ffx presets): one .pwn file
+    // per look in ~/Library/Application Support/PathWeaver/Looks, shared by
+    // every document.
+    lazy var libraryDir: URL = {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let dir = base.appendingPathComponent("PathWeaver/Looks", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }()
+    func safeName(_ s: String) -> String {
+        let cleaned = s.replacingOccurrences(of: "/", with: "／").replacingOccurrences(of: ":", with: "：").trimmingCharacters(in: .whitespaces)
+        return cleaned.isEmpty ? "外観" : cleaned
+    }
+    func sendLibrary() {
+        let files = (try? FileManager.default.contentsOfDirectory(at: libraryDir, includingPropertiesForKeys: nil)) ?? []
+        let items: [[String: String]] = files.filter { $0.pathExtension == "pwn" }
+            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+            .compactMap { url in
+                guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+                return ["name": url.deletingPathExtension().lastPathComponent, "text": text]
+            }
+        guard let data = try? JSONSerialization.data(withJSONObject: items), let list = String(data: data, encoding: .utf8) else { return }
+        js("window.pathweaver.library && window.pathweaver.library(\(list))")
+    }
 
     // MARK: pointer lock (WKWebView does not grant the web API)
     /// Freeze and hide the cursor and feed raw mouse deltas to the page, so a

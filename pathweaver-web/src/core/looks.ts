@@ -46,9 +46,10 @@ function freshName(d: Document, base: string) {
   for (let i = 2; ; i++) if (!used.has(`${stem} ${i}`)) return `${stem} ${i}`
 }
 
-/** Use another path's appearance on this path: both now share it. */
-export function linkLook(ed: Editor, target: Stroke, look: Look) {
-  if (look.users.includes(target)) return
+/** Use an appearance on these paths: they all share it (edits sync). */
+export function linkLook(ed: Editor, targets: Stroke[], look: Look) {
+  const todo = targets.filter(t => !look.users.includes(t))
+  if (!todo.length) return
   ed.edit(d => {
     const src = look.users[0]
     const g = src.appearance!
@@ -56,9 +57,24 @@ export function linkLook(ed: Editor, target: Stroke, look: Look) {
       g.shared = newSharedId(d)
       if (!g.name.trim()) g.name = freshName(d, lookName(g, src))
     }
-    target.appearance = copy(g)
+    for (const t of todo) t.appearance = copy(g)
   })
-  ed.status = `「${look.name}」を共有しました（${look.users.length + 1}つのパスで使用）`
+  ed.status = `「${look.name}」を共有しました（${look.users.length + todo.length}本のパスで使用・編集はすべてに反映）`
+}
+/** Put a look made from a set (library, built-in, this file) on these paths.
+ *  One shared appearance for all of them; if this document already has an
+ *  appearance of that name, the paths join it instead of making 「名前 2」. */
+export function applySet(ed: Editor, targets: Stroke[], name: string, make: () => Graph) {
+  if (!targets.length) return
+  const existing = looks(ed.doc).find(l => l.name === name)
+  if (existing) return linkLook(ed, targets, existing)
+  ed.edit(d => {
+    const g = make()
+    g.name = name
+    g.shared = newSharedId(d)
+    for (const t of targets) t.appearance = copy(g)
+  })
+  ed.status = targets.length > 1 ? `「${name}」を${targets.length}本のパスにかけました（共有・編集はすべてに反映）` : `「${name}」をかけました`
 }
 /** Blender's user-count button: this path gets its own copy. */
 export function makeSingleUser(ed: Editor, target: Stroke) {
@@ -74,27 +90,29 @@ export function makeSingleUser(ed: Editor, target: Stroke) {
   })
   ed.status = 'このパス専用の外観にしました'
 }
-/** New: a fresh Input → Output appearance, or a copy of the current one. */
-export function newLook(ed: Editor, target: Stroke) {
+/** New: a fresh Input → Output appearance (or a copy of the first path's),
+ *  one for all the given paths. */
+export function newLook(ed: Editor, targets: Stroke[]) {
+  if (!targets.length) return
   ed.edit(d => {
-    const g = target.appearance ? copy(target.appearance) : call<Graph>('graphDefault')
-    g.shared = null
-    g.name = freshName(d, target.appearance ? lookName(target.appearance, target) : '外観')
-    target.appearance = g
+    const base = targets[0].appearance
+    const g = base ? copy(base) : call<Graph>('graphDefault')
+    g.name = freshName(d, base ? lookName(base, targets[0]) : '外観')
+    g.shared = targets.length > 1 ? newSharedId(d) : null
+    for (const t of targets) t.appearance = copy(g)
   })
 }
-export function unlinkLook(ed: Editor, target: Stroke) {
+export function unlinkLook(ed: Editor, targets: Stroke[]) {
   ed.edit(d => {
-    target.appearance = null
+    for (const t of targets) t.appearance = null
     const rest = d.strokes.filter(s => s.appearance?.shared != null)
     for (const s of rest) if (rest.filter(o => o.appearance!.shared === s.appearance!.shared).length === 1) s.appearance!.shared = null
   })
 }
-/** A saved set: always a fresh copy for this path. */
-export function useSet(ed: Editor, target: Stroke, name: string) {
+/** A set saved in this document. */
+export function useSet(ed: Editor, targets: Stroke[], name: string) {
   const p = ed.doc.appearance_presets.find(v => v.name === name)
-  if (!p) return
-  ed.edit(() => { target.appearance = {...copy(p.graph), shared: null, name} })
+  if (p) applySet(ed, targets, name, () => copy(p.graph))
 }
 
 // ---- sets that come with the app ----
@@ -131,9 +149,7 @@ export const BUILTIN_SETS: {name: string; hint: string; make: () => Graph}[] = [
     ]),
   },
 ]
-export function useBuiltin(ed: Editor, target: Stroke, name: string) {
+export function useBuiltin(ed: Editor, targets: Stroke[], name: string) {
   const b = BUILTIN_SETS.find(v => v.name === name)
-  if (!b) return
-  ed.edit(d => { const g = b.make(); g.name = freshName(d, b.name); target.appearance = g })
-  ed.status = `「${b.name}」をかけました（ノードで調整できます）`
+  if (b) applySet(ed, targets, b.name, b.make)
 }

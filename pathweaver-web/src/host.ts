@@ -5,6 +5,7 @@ import {call} from './core/wasm'
 import type {Editor} from './core/editor'
 import type {Document} from './core/types'
 import {installNativePointerLock} from './nativePointerLock'
+import {initLibrary} from './core/library'
 
 interface NativeMessage {type: string; [k: string]: unknown}
 declare global {
@@ -79,6 +80,7 @@ export function createHost(ed: Editor, commands: Record<string, () => void>) {
       snap: {snapGrid: d.snap_grid, snapGuides: d.snap_guides, snapTangent: d.snap_tangent, snapNormal: d.snap_normal},
     })
   }, {immediate: true})
+  initLibrary(post as never, isNative())
   if (!isNative()) {
     window.addEventListener('beforeunload', e => { if (ed.dirty) e.preventDefault() })
   }
