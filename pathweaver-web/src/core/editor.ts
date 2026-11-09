@@ -434,6 +434,26 @@ export function createEditor() {
     })
     selected.value = []
   }
+  /** A copy of a path with fresh ids, moved by (dx, dy). */
+  function copyStroke(d: Document, s: Stroke, dx: number, dy: number, name: string): Stroke {
+    const c: Stroke = clone(s)
+    const remap = new Map<number, number>()
+    c.id = nextId(d)
+    c.name = name
+    for (const n of c.nodes) {
+      const old = n.id
+      n.id = nextId(d)
+      remap.set(old, n.id)
+      n.p = {x: n.p.x + dx, y: n.p.y + dy}
+    }
+    for (const k of c.widths) {
+      k.id = nextId(d)
+      k.segment = remap.get(k.segment) ?? k.segment
+    }
+    for (const corner of c.corners) corner.node = remap.get(corner.node) ?? corner.node
+    if (c.contours) c.contours = c.contours.map(r => r.map(p => ({x: p.x + dx, y: p.y + dy})))
+    return c
+  }
   function duplicateSelection() {
     if (!selected.value.length) return
     edit(d => {
@@ -441,28 +461,93 @@ export function createEditor() {
       for (const id of selected.value) {
         const s = d.strokes.find(v => v.id === id)
         if (!s) continue
-        const c: Stroke = clone(s)
-        const remap = new Map<number, number>()
-        c.id = nextId(d)
-        c.name = `${s.name} のコピー`
-        for (const n of c.nodes) {
-          const old = n.id
-          n.id = nextId(d)
-          remap.set(old, n.id)
-          n.p = {x: n.p.x + 20, y: n.p.y + 20}
-        }
-        for (const k of c.widths) {
-          k.id = nextId(d)
-          k.segment = remap.get(k.segment) ?? k.segment
-        }
-        for (const corner of c.corners) corner.node = remap.get(corner.node) ?? corner.node
-        if (c.contours) c.contours = c.contours.map(r => r.map(p => ({x: p.x + 20, y: p.y + 20})))
+        const c = copyStroke(d, s, 20, 20, `${s.name} のコピー`)
         d.strokes.push(c)
         copies.push(c.id)
       }
       selected.value = copies
       anchors.value = []
     })
+  }
+
+  /** Illustrator's Make / Release Guides on the selected paths. */
+  function makeGuides(on: boolean) {
+    const ids = new Set(selected.value)
+    const targets = doc.value.strokes.filter(s => ids.has(s.id) && !!s.guide !== on && !s.contours)
+    if (!targets.length) { status.value = on ? 'ガイドにするパスを選んでください' : '解除するガイドを選んでください'; return }
+    edit(() => { for (const s of targets) s.guide = on || undefined })
+    anchors.value = []
+    status.value = on ? `${targets.length}本のパスをガイドにしました（⌥⌘5で解除）` : `${targets.length}本のガイドをパスに戻しました`
+  }
+
+  /** Stacking order of the selected paths (Illustrator's Arrange). Folders stay together. */
+  function arrange(where: 'front' | 'forward' | 'backward' | 'back') {
+    const ids = new Set(selected.value)
+    if (!ids.size) return
+    edit(d => {
+      const list = d.strokes
+      if (where === 'front' || where === 'back') {
+        const moving = list.filter(s => ids.has(s.id)), rest = list.filter(s => !ids.has(s.id))
+        d.strokes = where === 'front' ? [...rest, ...moving] : [...moving, ...rest]
+      } else if (where === 'forward') {
+        for (let i = list.length - 2; i >= 0; i--) if (ids.has(list[i].id) && !ids.has(list[i + 1].id)) [list[i], list[i + 1]] = [list[i + 1], list[i]]
+      } else {
+        for (let i = 1; i < list.length; i++) if (ids.has(list[i].id) && !ids.has(list[i - 1].id)) [list[i], list[i - 1]] = [list[i - 1], list[i]]
+      }
+      regroup(d)
+    })
+  }
+
+  // ---- clipboard (paths with their widths, corners and appearance) ----
+  const CLIP_KIND = 'pathweaver/strokes'
+  let pasteCount = 0
+  /** The selected paths as clipboard text (back to front), or '' when none. */
+  function copySelection(): string {
+    const ids = new Set(selected.value)
+    const strokes = doc.value.strokes.filter(s => ids.has(s.id))
+    if (!strokes.length) return ''
+    pasteCount = 0
+    const text = JSON.stringify({kind: CLIP_KIND, strokes})
+    try { localStorage.setItem('pw.clipboard', text) } catch { /* memory only */ }
+    clip.value = text
+    status.value = `${strokes.length}本のパスをコピーしました`
+    return text
+  }
+  const clip = ref('') // reactive, so menus know when there is something to paste
+  function hasClipboard() {
+    if (clip.value) return true
+    try { return !!localStorage.getItem('pw.clipboard') } catch { return false }
+  }
+  function cutSelection(): string {
+    const text = copySelection()
+    if (text) { deleteSelection(); status.value = 'カットしました' }
+    return text
+  }
+  /** Paste paths copied from PathWeaver (this or another document). */
+  function paste(text?: string): boolean {
+    let src = text ?? clip.value
+    if (!src) { try { src = localStorage.getItem('pw.clipboard') ?? '' } catch { src = '' } }
+    let data: {kind?: string; strokes?: Stroke[]}
+    try { data = JSON.parse(src) } catch { return false }
+    if (data?.kind !== CLIP_KIND || !Array.isArray(data.strokes) || !data.strokes.length) return false
+    pasteCount++
+    const off = 20 * pasteCount
+    edit(d => {
+      const folders = new Set((d.folders ?? []).map(f => f.id))
+      const ids: number[] = []
+      for (const s of data.strokes!) {
+        const c = copyStroke(d, s, off, off, s.name)
+        if (c.folder != null && !folders.has(c.folder)) c.folder = null
+        if (c.appearance) c.appearance.shared = null // an independent copy, like Illustrator
+        d.strokes.push(c)
+        ids.push(c.id)
+      }
+      call('validate', {doc: d})
+      selected.value = ids
+      anchors.value = []
+    })
+    status.value = `${data.strokes.length}本のパスをペーストしました`
+    return true
   }
 
   watch(selected, () => {
@@ -475,7 +560,7 @@ export function createEditor() {
     history, dirty, active, renders, renderPending,
     begin, commit, cancel, inGesture, edit, coreEdit, changed, undo, redo, load, markSaved,
     findStroke, nextId, shown, folderTree, inFolder, folderOf, groupSelection, ungroup, moveInList, regroup, selectPath, selectAnchor, clearSelection, isAnchorSelected,
-    render, newPath, deleteSelection, duplicateSelection,
+    render, newPath, deleteSelection, duplicateSelection, copySelection, cutSelection, paste, makeGuides, arrange, hasClipboard,
   })
 }
 

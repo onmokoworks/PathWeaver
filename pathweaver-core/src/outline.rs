@@ -794,7 +794,7 @@ pub fn svg(doc: &Document) -> Result<String, String> {
     let mut paths = String::new();
     let mut min = Point::new(f64::INFINITY, f64::INFINITY);
     let mut max = Point::new(f64::NEG_INFINITY, f64::NEG_INFINITY);
-    for s in doc.strokes.iter().filter(|s| doc.shown(s)) {
+    for s in doc.strokes.iter().filter(|s| doc.shown(s) && !s.guide) {
         let rendered = paint(s)?;
         for layer in &rendered.layers {
             if layer.opacity <= 0. { continue; }

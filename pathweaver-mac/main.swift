@@ -347,6 +347,8 @@ final class Host: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMes
             item("グリッドを表示して吸着", "snapGrid", "'"), item("ガイドに吸着", "snapGuides", ";"),
             item("接線に吸着", "snapTangent"), item("法線に吸着", "snapNormal"),
             .separator(),
+            item("ガイドを作成", "makeGuides", "5"), item("ガイドを解除", "releaseGuides", "5", [.command, .option]),
+            .separator(),
             item("全体を表示", "fit", "0"), item("100%", "actualSize", "1"),
             item("拡大", "zoomIn", "+"), item("縮小", "zoomOut", "-"),
             .separator(),

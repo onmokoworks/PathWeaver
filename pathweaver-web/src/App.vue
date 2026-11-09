@@ -63,6 +63,12 @@ const commands: Record<string, () => void> = {
   redo: () => (typing(document.activeElement) ? document.execCommand('redo') : ed.redo()),
   delete: () => { if (!typing(document.activeElement)) ed.deleteSelection() },
   toggleNodes: () => toggleFolded('nodes'),
+  makeGuides: () => ed.makeGuides(true),
+  openNodes: () => openNodes(),
+  releaseGuides: () => ed.makeGuides(false),
+  copy: () => { const t = ed.copySelection(); if (t) navigator.clipboard?.writeText(t).catch(() => {}) },
+  cut: () => { const t = ed.cutSelection(); if (t) navigator.clipboard?.writeText(t).catch(() => {}) },
+  paste: () => { ed.paste() },
   duplicate: () => ed.duplicateSelection(),
   selectAll: () => { if (typing(document.activeElement)) { (document.activeElement as HTMLInputElement).select?.(); return } ed.selected = ed.doc.strokes.filter(s => ed.shown(s)).map(s => s.id); ed.anchors = [] },
   fit: () => canvas.fit(),
@@ -108,7 +114,9 @@ function onKeyDown(e: KeyboardEvent) {
     return
   }
   // A Tweeq popover (color picker, dropdown) owns the keyboard while open.
-  if (document.querySelector('.Popover:popover-open, [popover]:popover-open')) return
+  // (A tooltip is a popover too, but it never takes the keyboard.)
+  const owner = [...document.querySelectorAll('.Popover:popover-open, [popover]:popover-open')].some(p => !p.querySelector('.TqTooltipContent'))
+  if (owner) return
   if (document.activeElement instanceof HTMLElement && document.activeElement.closest('.Popover, [popover]')) return
   const mod = e.metaKey || e.ctrlKey
   const k = e.key.toLowerCase()
@@ -125,8 +133,28 @@ function onKeyDown(e: KeyboardEvent) {
   if (mod && k === 'e') { commands.export(); e.preventDefault(); return }
   if (mod && e.key === ',') { settingsOpen.value = true; e.preventDefault(); return }
   if (mod && k === 'g') { (e.shiftKey ? commands.ungroup : commands.group)(); e.preventDefault(); return }
+  if (mod && e.code === 'Digit5') { ed.makeGuides(!e.altKey); e.preventDefault(); return }
+  // Paths on the clipboard (text fields keep their own copy/paste above).
+  // ⌘ only: Ctrl+X belongs to the node editor (dissolve).
+  if (e.metaKey && !e.shiftKey && (k === 'c' || k === 'x')) {
+    const text = k === 'c' ? ed.copySelection() : ed.cutSelection()
+    if (text) { navigator.clipboard?.writeText(text).catch(() => {}); e.preventDefault() }
+    return
+  }
+  if (e.metaKey && !e.shiftKey && k === 'v') { if (ed.paste()) e.preventDefault(); return }
   if (nodeEditor.value?.isPointerInside() && nodeEditor.value.key(e)) { e.preventDefault(); return }
   if (canvas.key(e)) e.preventDefault()
+}
+function onClipboard(e: ClipboardEvent) {
+  if (typing(document.activeElement)) return
+  const text = e.type === 'cut' ? ed.cutSelection() : ed.copySelection()
+  if (!text) return
+  e.clipboardData?.setData('text/plain', text)
+  e.preventDefault()
+}
+function onPaste(e: ClipboardEvent) {
+  if (typing(document.activeElement)) return
+  if (ed.paste(e.clipboardData?.getData('text/plain') || undefined) || ed.paste()) e.preventDefault()
 }
 function onKeyUp(e: KeyboardEvent) {
   if (e.key === 'Meta') canvas.state.meta = false
@@ -137,6 +165,10 @@ onMounted(() => {
   window.addEventListener('keydown', onKeyDown)
   window.addEventListener('keyup', onKeyUp)
   window.addEventListener('pointermove', trackArea, true)
+  // Edit menu (Mac app) and other copy/paste routes arrive as DOM events.
+  document.addEventListener('copy', onClipboard)
+  document.addEventListener('cut', onClipboard)
+  document.addEventListener('paste', onPaste)
   window.addEventListener('blur', () => { canvas.cancelDrag(); canvas.state.space = false; canvas.state.meta = false; canvas.state.alt = false; if (!typing(document.activeElement)) ed.commit() })
   // Tweeq's color pad/slider gestures end without a confirm event. Releasing
   // the pointer outside a text field ends the gesture: one drag = one undo.
@@ -239,7 +271,7 @@ function setSideTab(id: string) { sideTab.value = id; try { localStorage.setItem
           <AreaSplit name="pw-right" direction="horizontal" fixed="second" :titles="['キャンバス', 'レイヤー・プロパティ']" :min="200" :max="maxRight" :hide="!layersDocked && !propsDocked ? 'second' : null">
             <template #first>
               <AreaSplit name="pw-nodes" direction="vertical" fixed="second" :titles="['キャンバス', 'ノード']" :max="maxNodes" :hide="!nodesDocked ? 'second' : null">
-                <template #first><div class="area" data-area="canvas"><ArtCanvas :ed="ed" :canvas="canvas" v-slot="{bounds}"><ToolPalette :tools="tools" :active="ed.tool" :bounds="bounds" @select="t => canvas.setTool(t)" /></ArtCanvas></div></template>
+                <template #first><div class="area" data-area="canvas"><ArtCanvas :ed="ed" :canvas="canvas" v-slot="{bounds}" @command="n => commands[n]?.()"><ToolPalette :tools="tools" :active="ed.tool" :bounds="bounds" @select="t => canvas.setTool(t)" /></ArtCanvas></div></template>
                 <template #second><div class="area" data-area="nodes"><NodeEditor v-if="nodesDocked" ref="nodeEditor" :ed="ed" /></div></template>
               </AreaSplit>
             </template>

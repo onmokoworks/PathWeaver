@@ -100,6 +100,10 @@ pub struct Corner {
 pub struct Stroke {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub appearance: Option<super::appearance::Graph>,
+    /// A guide made from this path (Illustrator's Make Guides): drawn as a thin
+    /// line, snapped to, never painted or exported.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub guide: bool,
     /// Layer folder (`Document::folders`), if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder: Option<u64>,
@@ -205,6 +209,7 @@ impl Stroke {
     pub fn new(id: u64, name: String) -> Self {
         Self {
             appearance: None,
+            guide: false,
             folder: None,
             closed: false,
             contours: None,

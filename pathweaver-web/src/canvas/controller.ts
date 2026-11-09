@@ -91,7 +91,8 @@ export function createCanvas(ed: Editor) {
   const toScreen = (p: Vec2): Vec2 => ({x: p.x * view.zoom + view.panX, y: p.y * view.zoom + view.panY})
   const tol = (px = 7) => px / view.zoom
 
-  const editable = () => ed.doc.strokes.filter(s => ed.shown(s) && !s.contours)
+  const editable = () => ed.doc.strokes.filter(s => ed.shown(s) && !s.contours && !s.guide)
+  const pathGuides = () => ed.doc.strokes.filter(s => ed.shown(s) && s.guide && s.nodes.length > 1)
   const stroke = (id: number) => ed.findStroke(id)
   const nodeOf = (at: Anchor): PathNode | undefined => stroke(at.stroke)?.nodes.find(n => n.id === at.node)
 
@@ -135,6 +136,10 @@ export function createCanvas(ed: Editor) {
       const r = ed.renders.get(s.id)
       if (r && inside(p, rings(r))) return s.id
       if (s.nodes.some(n => dist(n.p, p) < tol(6))) return s.id
+      if (s.guide && s.nodes.length > 1) {
+        const r = call<{distance: number} | null>('nearest', {stroke: s, p})
+        if (r && r.distance < tol(5)) return s.id
+      }
     }
     const seg = segmentAt(p, 6)
     return seg ? seg.stroke : null
@@ -202,6 +207,22 @@ export function createCanvas(ed: Editor) {
   }
 
   // ---------- snapping ----------
+  /** `p` seen from `origin`, its direction snapped (shown as a guide line). */
+  function angleFrom(origin: Vec2, p: Vec2): Vec2 {
+    const v = angleStep(sub(p, origin))
+    const l = len(v)
+    state.snap = l > 1e-9 ? {origin, direction: scale(v, 1 / l), kind: 'Angle'} : null
+    state.snapAt = l > 1e-9 ? add(origin, v) : null
+    return add(origin, v)
+  }
+  /** Shift: the direction snaps to the angle step (15° by default), length kept. */
+  function angleStep(v: Vec2): Vec2 {
+    const l = len(v)
+    if (l < 1e-9) return v
+    const step = (ed.doc.angle_step || 15) * Math.PI / 180
+    const a = Math.round(Math.atan2(v.y, v.x) / step) * step
+    return {x: Math.cos(a) * l, y: Math.sin(a) * l}
+  }
   const snapping = () => {
     const d = ed.doc
     return d.snap_grid || d.snap_guides || d.snap_tangent || d.snap_normal
@@ -238,6 +259,14 @@ export function createCanvas(ed: Editor) {
       const r = call<{p: Vec2; guide: SnapGuide | null}>('snap', {doc: ed.doc, p, frames, zoom: view.zoom})
       result = r.p
       guide = r.guide
+    }
+    // Guides made from paths: the nearest point on the line (beats grid/tangent).
+    if (ed.doc.snap_guides && !pathFrameOnly) {
+      let best = guide && guide.kind !== 'Grid' ? dist(result, p) : tol(8)
+      for (const s of pathGuides()) {
+        const r = call<{distance: number; point: Vec2; tangent: Vec2} | null>('nearest', {stroke: s, p})
+        if (r && r.distance < best) { best = r.distance; result = r.point; guide = {origin: r.point, direction: r.tangent, kind: 'PathGuide'} }
+      }
     }
     // An explicit "start on a path" frame always offers its normal (and its
     // tangent when tangent snapping is on), whatever the toggles say.
@@ -386,7 +415,8 @@ export function createCanvas(ed: Editor) {
       }
       captureFrames({stroke: drawing.id, node: last.id}, () => false)
       const onPath = e.shiftKey ? segmentAt(raw, 8, drawing.id) : null
-      const p = onPath ? onPath.point : snap(raw, e.ctrlKey)
+      // Shift off a path: the new segment's direction snaps to the angle step.
+      const p = onPath ? onPath.point : e.shiftKey ? angleFrom(last.p, raw) : snap(raw, e.ctrlKey)
       const node: PathNode = {id: ed.nextId(), p, incoming: {x: 0, y: 0}, outgoing: {x: 0, y: 0}, smooth: false}
       drawing.nodes.push(node)
       state.pathFrame = onPath ? {origin: p, tangent: onPath.tangent, node: node.id} : null
@@ -688,7 +718,7 @@ export function createCanvas(ed: Editor) {
       case 'handle': {
         const n = nodeOf(d.at)
         if (!n) return
-        const p = snap(raw, e.ctrlKey)
+        const p = e.shiftKey ? angleFrom(n.p, raw) : snap(raw, e.ctrlKey)
         const v = sub(p, n.p)
         if (e.altKey) n.smooth = false
         if (d.side === 'in') {
@@ -706,7 +736,7 @@ export function createCanvas(ed: Editor) {
         if (!n) return
         if (!d.moved && dist(raw, d.start) < tol(3)) return
         d.moved = true
-        const v = sub(raw, n.p)
+        const v = e.shiftKey ? sub(angleFrom(n.p, raw), n.p) : sub(raw, n.p)
         if (d.mode === 'out') {
           // Redefine only the departing handle of the last anchor.
           n.outgoing = v; n.exact_outgoing = false; n.smooth = false
@@ -790,8 +820,9 @@ export function createCanvas(ed: Editor) {
           const seg = segmentAt(p, 8, state.penPath)
           if (seg) { h.segment = {stroke: seg.stroke, point: seg.point}; h.cursor = 'var(--pen-on-path)'; h.pointer = seg.point; return }
         }
-        // Preview where the next click lands (normal / tangent / grid).
-        h.pointer = hoverSnap(p, e.ctrlKey)
+        // Preview where the next click lands (normal / tangent / grid; Shift: angle).
+        const lastNode = s?.nodes.at(-1)
+        h.pointer = e.shiftKey && lastNode ? angleFrom(lastNode.p, p) : hoverSnap(p, e.ctrlKey)
         return
       }
       const end = anchorAt(p, s => !s.closed)
@@ -980,7 +1011,7 @@ export function createCanvas(ed: Editor) {
 
   return reactive({
     view, state, toWorld, toScreen, down, move, up, wheel, zoomAt, fit, key, setTool, cancelDrag, setPaper,
-    selectionBounds, boxHandles, widthHandles, widthGrips, finishPen, activePathFrame, cornerWidgets, widthVisible, setShowWidth,
+    selectionBounds, boxHandles, widthHandles, widthGrips, finishPen, activePathFrame, cornerWidgets, widthVisible, setShowWidth, pathAt,
   })
 }
 export type Canvas = ReturnType<typeof createCanvas>

@@ -38,6 +38,8 @@ export interface Stroke {
   contours?: Vec2[][] | null
   appearance?: Graph | null
   folder?: number | null
+  /** A guide made from this path: a thin line to snap to, never painted or exported. */
+  guide?: boolean
   start_cap?: Cap
   end_cap?: Cap
 }

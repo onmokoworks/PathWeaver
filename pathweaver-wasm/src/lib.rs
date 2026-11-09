@@ -93,6 +93,10 @@ fn original_layers(s: &Stroke) -> Result<Vec<appearance::Layer>, String> {
 fn render(s: &Stroke) -> Value {
     let center = if s.corners.is_empty() { s.clone() } else { corners::rounded(s) };
     let centerline = polyline_d(outline::samples(&center).into_iter().map(|p| p.p));
+    // A guide is only its line: nothing painted, picked by its line.
+    if s.guide {
+        return json!({"layers": [], "hit": "", "center": centerline});
+    }
     // Contours only: no triangulation and no union. Hit testing uses the
     // layers' own rings (non-zero winding), which covers the same area.
     match outline::contours_only(|| outline::paint_layers(s)) {

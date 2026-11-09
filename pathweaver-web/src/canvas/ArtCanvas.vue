@@ -8,6 +8,7 @@ import {RULER, type Canvas} from './controller'
 import {add, sub, scale} from './geometry'
 import InputButtonToggle from '../../vendor/tweeq/src/InputButtonToggle/InputButtonToggle.vue'
 import {vTooltip} from '../../vendor/tweeq/src/Tooltip'
+import CanvasMenu, {type MenuItem} from './CanvasMenu.vue'
 
 type Flag = 'snap_guides' | 'snap_grid' | 'snap_tangent' | 'snap_normal'
 const snapFlags: [Flag, string, string][] = [
@@ -19,6 +20,7 @@ const snapFlags: [Flag, string, string][] = [
 function toggleSnap(f: Flag, v: boolean) { props.ed.edit(d => { d[f] = v }) }
 
 const props = defineProps<{ed: Editor; canvas: Canvas}>()
+const emit = defineEmits<{command: [name: string]}>()
 const ed = props.ed
 const cv = props.canvas
 const root = ref<HTMLDivElement>()
@@ -39,6 +41,7 @@ const local = (e: {clientX: number; clientY: number}): Vec2 => {
   return {x: e.clientX - r.left, y: e.clientY - r.top}
 }
 function onDown(e: PointerEvent) {
+  if (e.button === 2) return // the context menu (below)
   ;(document.activeElement as HTMLElement | null)?.blur?.()
   root.value!.setPointerCapture(e.pointerId)
   cv.down(e, local(e))
@@ -53,6 +56,45 @@ function onWheel(e: WheelEvent) {
   e.preventDefault()
   cv.wheel(e, local(e))
 }
+// ---- right-click menu (Illustrator: what applies to what is under the pointer) ----
+const menu = ref<{x: number; y: number} | null>(null)
+function onContext(e: MouseEvent) {
+  if (e.button !== 2) return // Ctrl+click is a canvas gesture, not this menu
+  cv.finishPen()
+  const at = local(e)
+  const hit = cv.pathAt(cv.toWorld(at))
+  if (hit !== null && !ed.selected.includes(hit)) ed.selectPath(hit, false)
+  menu.value = at
+}
+const menuItems = computed<MenuItem[]>(() => {
+  void ed.revision
+  const sel = ed.selected.map(id => ed.findStroke(id)).filter((s): s is Stroke => !!s)
+  const any = sel.length > 0
+  const guides = sel.filter(s => s.guide).length
+  const one = sel.length === 1 ? sel[0] : null
+  return [
+    {label: 'カット', shortcut: '⌘X', disabled: !any, action: () => emit('command', 'cut')},
+    {label: 'コピー', shortcut: '⌘C', disabled: !any, action: () => emit('command', 'copy')},
+    {label: 'ペースト', shortcut: '⌘V', disabled: !ed.hasClipboard(), action: () => emit('command', 'paste')},
+    {label: '複製', shortcut: '⌘D', disabled: !any, action: () => ed.duplicateSelection()},
+    {label: '削除', shortcut: '⌫', disabled: !any, action: () => ed.deleteSelection()},
+    {label: '', separator: true},
+    {label: 'ガイドを作成', shortcut: '⌘5', disabled: sel.length - guides === 0, action: () => ed.makeGuides(true)},
+    {label: 'ガイドを解除', shortcut: '⌥⌘5', disabled: guides === 0, action: () => ed.makeGuides(false)},
+    {label: '', separator: true},
+    {label: '最前面へ', disabled: !any, action: () => ed.arrange('front')},
+    {label: '前面へ', disabled: !any, action: () => ed.arrange('forward')},
+    {label: '背面へ', disabled: !any, action: () => ed.arrange('backward')},
+    {label: '最背面へ', disabled: !any, action: () => ed.arrange('back')},
+    {label: '', separator: true},
+    {label: 'フォルダにまとめる', shortcut: '⌘G', action: () => emit('command', 'group')},
+    {label: one?.appearance ? '外観ノードを編集' : '外観ノードを開く', disabled: !one || !!one.guide, action: () => emit('command', 'openNodes')},
+    {label: '', separator: true},
+    {label: 'すべてを選択', shortcut: '⌘A', action: () => emit('command', 'selectAll')},
+    {label: '選択を解除', disabled: !any, action: () => { ed.selected = []; ed.anchors = [] }},
+  ]
+})
+
 // Safari trackpad pinch.
 let gestureBase = 1
 function onGestureStart(e: Event) { e.preventDefault(); gestureBase = 1 }
@@ -175,9 +217,11 @@ const snapLine = computed(() => {
   const far = 1e5 / view.zoom
   const at = cv.state.snapAt && !cv.state.drag ? S(cv.state.snapAt) : null
   if (g.kind === 'Grid' || g.kind === 'Intersection') return {point: S(g.origin), at: null, label: ''}
+  if (g.kind === 'PathGuide') return {point: S(g.origin), at: null, label: 'ガイド'}
   const a = S(sub(g.origin, scale(g.direction, far))), b = S(add(g.origin, scale(g.direction, far)))
   // Normal / tangent: mark the anchor it comes from and name the line.
-  const label = g.kind === 'Normal' ? '法線' : g.kind === 'Tangent' ? '接線' : ''
+  const deg = ((Math.round(Math.atan2(-g.direction.y, g.direction.x) * 180 / Math.PI) % 360) + 360) % 360
+  const label = g.kind === 'Normal' ? '法線' : g.kind === 'Tangent' ? '接線' : g.kind === 'Angle' ? `${deg}°` : g.kind === 'PathGuide' ? 'ガイド' : ''
   return {a, b, point: S(g.origin), at, label, source: label !== ''}
 })
 
@@ -216,7 +260,7 @@ const cursor = computed(() => {
     ref="root" class="art-canvas" :class="`paper-${cv.state.paper}`" :style="{cursor}" data-testid="canvas" :data-paper="cv.state.paper"
     @pointerdown="onDown" @pointermove="onMove" @pointerup="onUp" @pointercancel="onUp"
     @wheel="onWheel" @gesturestart="onGestureStart" @gesturechange="onGestureChange"
-    @contextmenu.prevent
+    @contextmenu.prevent="onContext"
   >
     <svg class="layer" :width="view.width" :height="view.height">
       <defs>
@@ -246,6 +290,12 @@ const cursor = computed(() => {
           <line v-if="g.vertical" :x1="S({x: g.position, y: 0}).x" :x2="S({x: g.position, y: 0}).x" y1="0" :y2="view.height" />
           <line v-else :y1="S({x: 0, y: g.position}).y" :y2="S({x: 0, y: g.position}).y" x1="0" :x2="view.width" />
         </template>
+      </g>
+
+      <!-- guides made from paths -->
+      <g :transform="worldTransform" class="path-guides">
+        <path v-for="s in visible.filter(v => v.guide)" :key="s.id" :d="ed.renders.get(s.id)?.center" :data-guide-path="s.id"
+          :class="{selected: ed.selected.includes(s.id)}" vector-effect="non-scaling-stroke" />
       </g>
 
       <!-- selection: centerlines -->
@@ -337,6 +387,7 @@ const cursor = computed(() => {
       />
     </div>
     <div v-if="ed.renderPending" class="busy-badge" data-testid="render-busy">計算中…</div>
+    <CanvasMenu v-if="menu" :at="menu" :bounds="{width: view.width, height: view.height}" :items="menuItems" @close="menu = null" />
     <button type="button" class="zoom-badge" data-testid="zoom-badge" title="クリックで100%（⌘1）" @pointerdown.stop @click="cv.zoomAt({x: view.width / 2, y: view.height / 2}, 1 / view.zoom)">{{ Math.round(zoom * 100) }}%</button>
   </div>
 </template>
@@ -363,6 +414,8 @@ const cursor = computed(() => {
 .paper-black {--pw-paper: #111214; --pw-ink: #e8e8ea; --pw-grid: rgba(255,255,255,.09)}
 .grid-line {stroke: var(--pw-grid); stroke-width: 1}
 .guides line {stroke: var(--pw-guide); stroke-width: 1}
+.path-guides path {fill: none; stroke: var(--pw-guide); stroke-width: 1}
+.path-guides path.selected {stroke-width: 2}
 .center {fill: none; stroke: var(--tq-color-accent); stroke-width: 1}
 .center.hover {stroke-width: 2}
 .pen-preview {fill: none; stroke: var(--tq-color-accent); stroke-width: 1; stroke-dasharray: 4 3}
