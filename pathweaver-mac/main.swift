@@ -97,6 +97,8 @@ final class Host: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMes
             window.representedURL = path.map { URL(fileURLWithPath: $0) }
         case "dragRegion":
             web.dragRegion = m["value"] as? Bool ?? false
+        case "pointerLock":
+            setPointerLock(m["value"] as? Bool ?? false)
         case "menu":
             canUndo = m["undo"] as? Bool ?? false
             canRedo = m["redo"] as? Bool ?? false
@@ -193,6 +195,36 @@ final class Host: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMes
     }
 
     func js(_ code: String) { web.evaluateJavaScript(code, completionHandler: nil) }
+
+    // MARK: pointer lock (WKWebView does not grant the web API)
+    /// Freeze and hide the cursor and feed raw mouse deltas to the page, so a
+    /// numeric drag keeps going past the screen edge. Released on mouse up,
+    /// when the page asks, or when the window loses focus.
+    var lockMonitor: Any?
+    func setPointerLock(_ on: Bool) {
+        if on {
+            guard lockMonitor == nil else { return }
+            CGAssociateMouseAndMouseCursorPosition(0)
+            NSCursor.hide()
+            lockMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDragged, .mouseMoved, .leftMouseUp]) { [weak self] e in
+                guard let self else { return e }
+                if e.type == .leftMouseUp {
+                    DispatchQueue.main.async { self.setPointerLock(false) }
+                } else if e.deltaX != 0 || e.deltaY != 0 {
+                    self.js("window.__pwPointerDelta && window.__pwPointerDelta(\(e.deltaX), \(e.deltaY))")
+                }
+                return e
+            }
+        } else {
+            guard let m = lockMonitor else { return }
+            NSEvent.removeMonitor(m)
+            lockMonitor = nil
+            CGAssociateMouseAndMouseCursorPosition(1)
+            NSCursor.unhide()
+            js("window.__pwPointerUnlocked && window.__pwPointerUnlocked()")
+        }
+    }
+    func windowDidResignKey(_ notification: Notification) { setPointerLock(false) }
     func json(_ s: String) -> String {
         let d = try! JSONSerialization.data(withJSONObject: [s])
         let a = String(data: d, encoding: .utf8)!

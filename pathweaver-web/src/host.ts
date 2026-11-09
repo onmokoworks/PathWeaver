@@ -4,6 +4,7 @@ import {watch} from 'vue'
 import {call} from './core/wasm'
 import type {Editor} from './core/editor'
 import type {Document} from './core/types'
+import {installNativePointerLock} from './nativePointerLock'
 
 interface NativeMessage {type: string; [k: string]: unknown}
 declare global {
@@ -17,6 +18,7 @@ export const isNative = () => !!native()
 const post = (m: NativeMessage) => native()?.postMessage(JSON.stringify(m))
 
 export function createHost(ed: Editor, commands: Record<string, () => void>) {
+  if (isNative()) installNativePointerLock(post)
   function open() {
     if (isNative()) return post({type: 'open'})
     const input = document.createElement('input')

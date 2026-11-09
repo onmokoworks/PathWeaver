@@ -172,7 +172,8 @@ const insideRange = computed(
 let dragStartedFocused = false
 
 const {dragging: tweaking} = useDrag($input, {
-	lockPointer: computed(() => !barVisible.value),
+	// PathWeaver: lock for every drag (ranged too) so it never stops at the screen edge
+	lockPointer: true,
 	disabled: computed(() => props.disabled),
 	// While focused, only the grab affordances (.scrub) start a drag; pressing the
 	// text area falls through to the <input> to place a caret / edit. `closest` so
