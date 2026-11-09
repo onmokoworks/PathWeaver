@@ -518,12 +518,39 @@ pub fn build(stroke: &Stroke) -> Result<Outline, String> {
     }
     let mut ring = left;
     ring.extend(right.into_iter().rev());
-    let contours = boolean_contours(
-        &pieces,
-        &[],
-        i_overlay::core::overlay_rule::OverlayRule::Subject,
-    );
+    let contours = union_all(pieces);
     tessellate(contours, original_points, ring)
+}
+
+/// Union many small overlapping pieces (the swept cross-sections) as a
+/// tournament: neighbours first, then the merged results. One overlay of all
+/// pieces at once gets very slow when a wide stroke folds over itself
+/// (thousands of piled-up triangles intersect each other); merged neighbours
+/// have already lost their inner edges.
+fn union_all(pieces: Vec<Vec<Point>>) -> Vec<Vec<Point>> {
+    use i_overlay::core::overlay_rule::OverlayRule;
+    const CHUNK: usize = 48;
+    if pieces.len() <= CHUNK {
+        return boolean_contours(&pieces, &[], OverlayRule::Subject);
+    }
+    // Neighbouring chunks overlap by one cross-section (two triangles): each
+    // overlay rounds its own result, so chunks that merely touched could
+    // leave hairline slivers along the seam.
+    let mut level: Vec<Vec<Vec<Point>>> = (0..pieces.len())
+        .step_by(CHUNK)
+        .map(|i| boolean_contours(&pieces[i..(i + CHUNK + 2).min(pieces.len())], &[], OverlayRule::Subject))
+        .collect();
+    while level.len() > 1 {
+        level = level
+            .chunks(2)
+            .map(|pair| match pair {
+                [a, b] => boolean_contours(a, b, OverlayRule::Union),
+                [a] => a.clone(),
+                _ => unreachable!(),
+            })
+            .collect();
+    }
+    level.pop().unwrap_or_default()
 }
 
 pub fn boolean_contours(
