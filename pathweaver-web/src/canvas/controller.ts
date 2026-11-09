@@ -66,8 +66,11 @@ export function createCanvas(ed: Editor) {
     // Pen point placed ON another path (Shift+click): the next point snaps to
     // that path's normal there, and the normal is drawn as a guide.
     pathFrame: null as {origin: Vec2; tangent: Vec2; node: number} | null,
+    // Where the pen would land right now (snapped), shown while hovering.
+    snapAt: null as Vec2 | null,
   })
   let frames: Frame[] = []
+  let framesKey = ''  // what `frames` was captured for while hovering
   let lastClick = {t: 0, p: ZERO}
 
   // A replaced document (new / open / example) owns none of the old
@@ -213,6 +216,19 @@ export function createCanvas(ed: Editor) {
       }
     }
     frames = list.length && snapping() ? call<Frame[]>('frames', {doc: ed.doc, anchors: list}) : []
+    framesKey = ''
+  }
+  /** Snap while hovering with the pen, so the guide (normal, tangent, grid)
+   *  is visible BEFORE clicking, at the same spot the click will use. */
+  function hoverSnap(p: Vec2, bypass: boolean): Vec2 {
+    const s = state.penPath !== null ? stroke(state.penPath) : null
+    const last = s?.nodes.at(-1)
+    const primary = s && last ? {stroke: s.id, node: last.id} : null
+    const key = `${ed.revision}:${primary ? akey(primary) : '-'}`
+    if (snapping() && key !== framesKey) { captureFrames(primary, () => false); framesKey = key }
+    const q = snap(p, bypass, !snapping())
+    state.snapAt = state.snap ? q : null
+    return q
   }
   function snap(p: Vec2, bypass: boolean, pathFrameOnly = false): Vec2 {
     if (bypass) { state.snap = null; return p }
@@ -749,6 +765,8 @@ export function createCanvas(ed: Editor) {
 
   function hover(e: PointerEvent, local: Vec2, p: Vec2) {
     const h = state.hover
+    state.snap = null
+    state.snapAt = null
     h.segment = null
     h.anchor = null
     if (state.space) { h.cursor = 'grab'; return }
@@ -772,8 +790,8 @@ export function createCanvas(ed: Editor) {
           const seg = segmentAt(p, 8, state.penPath)
           if (seg) { h.segment = {stroke: seg.stroke, point: seg.point}; h.cursor = 'var(--pen-on-path)'; h.pointer = seg.point; return }
         }
-        // Preview where the next click lands on the start point's normal.
-        if (activePathFrame()) h.pointer = snap(p, e.ctrlKey, true)
+        // Preview where the next click lands (normal / tangent / grid).
+        h.pointer = hoverSnap(p, e.ctrlKey)
         return
       }
       const end = anchorAt(p, s => !s.closed)
@@ -784,6 +802,7 @@ export function createCanvas(ed: Editor) {
       const seg = segmentAt(p, e.shiftKey ? 8 : 5)
       if (seg) { h.segment = {stroke: seg.stroke, point: seg.point}; h.cursor = e.shiftKey ? 'var(--pen-on-path)' : 'var(--pen-add)'; return }
       h.cursor = 'var(--pen)'
+      hoverSnap(p, e.ctrlKey)
       return
     }
     if (ed.tool === 'direct' || ed.tool === 'convert') {

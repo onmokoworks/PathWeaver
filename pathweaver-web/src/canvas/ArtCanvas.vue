@@ -173,9 +173,12 @@ const snapLine = computed(() => {
   const g = cv.state.snap
   if (!g) return null
   const far = 1e5 / view.zoom
-  if (g.kind === 'Grid' || g.kind === 'Intersection') return {point: S(g.origin)}
+  const at = cv.state.snapAt && !cv.state.drag ? S(cv.state.snapAt) : null
+  if (g.kind === 'Grid' || g.kind === 'Intersection') return {point: S(g.origin), at: null, label: ''}
   const a = S(sub(g.origin, scale(g.direction, far))), b = S(add(g.origin, scale(g.direction, far)))
-  return {a, b, point: S(g.origin)}
+  // Normal / tangent: mark the anchor it comes from and name the line.
+  const label = g.kind === 'Normal' ? '法線' : g.kind === 'Tangent' ? '接線' : ''
+  return {a, b, point: S(g.origin), at, label, source: label !== ''}
 })
 
 // ---- rulers & grid ----
@@ -304,7 +307,9 @@ const cursor = computed(() => {
       <rect v-if="marquee" class="marquee" :x="marquee.x" :y="marquee.y" :width="marquee.w" :height="marquee.h" />
       <g v-if="snapLine" class="snap">
         <line v-if="snapLine.a" :x1="snapLine.a.x" :y1="snapLine.a.y" :x2="snapLine.b!.x" :y2="snapLine.b!.y" />
-        <circle :cx="snapLine.point.x" :cy="snapLine.point.y" r="4" />
+        <circle :cx="snapLine.point.x" :cy="snapLine.point.y" r="4" :class="{source: snapLine.source}" />
+        <circle v-if="snapLine.at" :cx="snapLine.at.x" :cy="snapLine.at.y" r="3" class="at" />
+        <text v-if="snapLine.label" class="snap-label" :x="(snapLine.at ?? snapLine.point).x + 8" :y="(snapLine.at ?? snapLine.point).y - 8">{{ snapLine.label }}</text>
       </g>
 
       <!-- rulers -->
@@ -391,6 +396,9 @@ const cursor = computed(() => {
 .path-frame line {stroke: var(--pw-snap); stroke-width: 1; stroke-dasharray: 5 4; opacity: .7}
 .path-frame text {fill: var(--pw-snap); font-size: 10px; pointer-events: none}
 .snap circle {fill: none; stroke: var(--pw-snap); stroke-width: 1.5}
+.snap circle.source {stroke-width: 2}
+.snap circle.at {fill: var(--pw-snap); stroke: var(--pw-paper); stroke-width: 1}
+.snap-label {fill: var(--pw-snap); font-size: 10px; font-weight: 600; pointer-events: none; paint-order: stroke; stroke: var(--pw-paper); stroke-width: 3px}
 .ruler rect {fill: var(--tq-color-surface, var(--tq-color-input)); }
 .ruler .corner {fill: var(--tq-color-input)}
 .ruler line {stroke: var(--tq-color-border); stroke-width: 1}

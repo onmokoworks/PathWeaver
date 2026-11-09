@@ -248,6 +248,27 @@ test('normal: Shift+click on a path starts a line on it; the next point snaps pe
   expect(errors).toEqual([])
 })
 
+test('normal snap shows while hovering with the pen, at the spot the click will use', async ({page}) => {
+  const errors = await boot(page)
+  await page.getByTestId('snap-bar').locator('[data-snap="snap_normal"]').click()
+  await pen(page, [{p: {x: 0, y: 100}}, {p: {x: 300, y: 100}}])
+  await page.keyboard.press('p')
+  const at = await screen(page, {x: 304, y: 180})
+  await page.mouse.move(at.x - 20, at.y)
+  await page.mouse.move(at.x, at.y, {steps: 4})
+  const snap = page.locator('.snap')
+  await expect(snap).toHaveCount(1) // visible before any click
+  await expect(snap.locator('.snap-label')).toHaveText('法線')
+  await expect(snap.locator('circle.at')).toHaveCount(1)
+  await page.waitForTimeout(150)
+  await expect(snap).toHaveCount(1) // and it stays while the pointer rests
+  await page.mouse.down(); await page.mouse.up()
+  const n = (await doc(page)).strokes[1].nodes[0].p
+  expect(n.x).toBeCloseTo(300, 1) // landed on the normal of (300, 100)
+  expect(n.y).toBeCloseTo(180, 0)
+  expect(errors).toEqual([])
+})
+
 test('snap bar on the canvas toggles snapping in one click', async ({page}) => {
   await boot(page)
   const bar = page.getByTestId('snap-bar')
