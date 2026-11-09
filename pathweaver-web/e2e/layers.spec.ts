@@ -124,3 +124,37 @@ test('H-03 folders: an empty folder with nothing selected, folders inside folder
   expect(d.strokes.find((s: any) => s.id === b).folder ?? null).toBe(null)
   expect(errors).toEqual([])
 })
+
+test('N-03 the layer list shows each path\'s appearance like an outliner: bypass and select from there', async ({page}) => {
+  const errors = await boot(page)
+  await pen(page, [{p: {x: 0, y: 100}}, {p: {x: 300, y: 100}}])
+  await page.evaluate(() => {
+    const {ed, call} = (window as any).__pw
+    ed.edit(() => {
+      const s = ed.doc.strokes[0]
+      let g = call('graphDefault'); g.name = 'ふわっと'
+      g.nodes.push(call('nodeNew', {kind: 'Rough', id: 10, position: [150, 0]}))
+      g.nodes.push(call('nodeNew', {kind: 'Glow', id: 11, position: [380, 0]}))
+      g = call('graphConnect', {graph: g, from: 1, to: 10, port: 0})
+      g = call('graphConnect', {graph: g, from: 10, to: 11, port: 0})
+      g = call('graphConnect', {graph: g, from: 11, to: 2, port: 0})
+      s.appearance = g
+    })
+  })
+  const list = page.getByTestId('path-list')
+  await list.locator('[data-look-toggle]').click()
+  await expect(list.locator('[data-look-of]')).toContainText('ふわっと')
+  await expect(list.locator('[data-effect]')).toHaveCount(2)
+  await expect(list.locator('[data-effect]').first()).toContainText('ラフ') // source side first
+  // the eye bypasses that node
+  await list.locator('[data-effect="11"] .eye').click()
+  expect((await doc(page)).strokes[0].appearance.nodes.find((n: any) => n.id === 11).bypass).toBe(true)
+  // a click selects the path and that node, and opens the node area
+  await page.locator('[data-fold="nodes"]').click()
+  await list.locator('[data-effect="10"]').click()
+  expect(await page.evaluate(() => (window as any).__pw.ed.selectedNodes)).toEqual([10])
+  await expect(page.getByTestId('node-editor')).toBeVisible()
+  // reordering paths still works with the appearance rows open
+  await pen(page, [{p: {x: 0, y: 250}}, {p: {x: 300, y: 250}}])
+  expect(errors).toEqual([])
+})

@@ -2,13 +2,15 @@
 // Layers: front-most first. Folders group paths and nest; drag rows to
 // reorder, onto a folder to put a path or folder inside, out to take it out.
 // Click selects (Shift/⌘ adds), double-click renames, the eye hides.
-import {computed, nextTick, ref} from 'vue'
+import {computed, nextTick, reactive, ref} from 'vue'
 import {Icon} from '../../vendor/tweeq/src/Icon'
 import type {Editor} from '../core/editor'
-import type {Folder, Stroke} from '../core/types'
+import type {Folder, GraphNode, Stroke} from '../core/types'
 import {renderBounds} from '../canvas/geometry'
 import PanelPin from './PanelPin.vue'
-import {layout} from '../core/layout'
+import {layout, setFolded} from '../core/layout'
+import {categoryOf, nodeInfo} from '../nodes/catalog'
+import {lookOf} from '../core/looks'
 
 const props = defineProps<{ed: Editor}>()
 const ed = props.ed
@@ -16,6 +18,43 @@ const ed = props.ed
 type Row =
   | {type: 'folder'; key: string; folder: Folder; count: number; depth: number}
   | {type: 'path'; key: string; stroke: Stroke; depth: number}
+  | {type: 'look'; key: string; stroke: Stroke; depth: number}
+  | {type: 'effect'; key: string; stroke: Stroke; node: GraphNode; depth: number}
+
+/** Rows that can be dragged and dropped on (paths and folders). */
+type DataRow = Extract<Row, {type: 'folder' | 'path'}>
+const dataRows = computed(() => rows.value.filter((r): r is DataRow => r.type === 'folder' || r.type === 'path'))
+
+// ---- appearance under each path (Blender's outliner shows modifiers) ----
+const openLooks = reactive(new Set<number>()) // per viewer, not saved in the file
+const toggleLook = (id: number) => (openLooks.has(id) ? openLooks.delete(id) : openLooks.add(id))
+/** The nodes that reach the output, from the source side to the output. */
+function chain(s: Stroke): GraphNode[] {
+  const g = s.appearance
+  if (!g) return []
+  const byId = new Map(g.nodes.map(n => [n.id, n]))
+  const seen = new Set<number>(), out: GraphNode[] = []
+  const visit = (id: number | null | undefined) => {
+    if (id == null || seen.has(id)) return
+    seen.add(id)
+    const n = byId.get(id)
+    if (!n) return
+    for (const i of n.inputs) visit(i)
+    for (const [, src] of n.bindings) visit(src)
+    if (n.kind !== 'Input' && n.kind !== 'Output' && n.kind !== 'Reroute') out.push(n)
+  }
+  visit(g.output)
+  return out
+}
+function selectEffect(s: Stroke, n: GraphNode) {
+  ed.anchors = []
+  ed.selected = [s.id]
+  setFolded('nodes', false)
+  // after the selection watcher (which clears node selection for a new path)
+  nextTick(() => { ed.selectedNodes = [n.id] })
+}
+function toggleBypass(n: GraphNode) { ed.edit(() => { n.bypass = !n.bypass }) }
+function toggleLookEnabled(s: Stroke) { ed.edit(() => { if (s.appearance) s.appearance.enabled = !s.appearance.enabled }) }
 
 /** Paths in list order (top first), including those in closed folders. */
 const order = computed(() => {
@@ -43,7 +82,14 @@ const rows = computed<Row[]>(() => {
     const emitted = new Set<number>()
     for (const s of members) {
       const c = childOf(s, parent)
-      if ('nodes' in c) { out.push({type: 'path', key: `p${s.id}`, stroke: s, depth}); continue }
+      if ('nodes' in c) {
+        out.push({type: 'path', key: `p${s.id}`, stroke: s, depth})
+        if (s.appearance && openLooks.has(s.id)) {
+          out.push({type: 'look', key: `l${s.id}`, stroke: s, depth: depth + 1})
+          for (const n of chain(s)) out.push({type: 'effect', key: `e${s.id}:${n.id}`, stroke: s, node: n, depth: depth + 2})
+        }
+        continue
+      }
       if (emitted.has(c.id)) continue
       emitted.add(c.id)
       const inside = members.filter(m => ed.inFolder(m, c.id)).length
@@ -136,10 +182,10 @@ function ungroupActive() {
 // ---- drag to reorder / move in and out of folders ----
 const list = ref<HTMLElement>()
 type Drop = {index: number; into: number | null; line: number; folderRow: number | null}
-const dragging = ref<{row: Row; startY: number; active: boolean} | null>(null)
+const dragging = ref<{row: DataRow; startY: number; active: boolean} | null>(null)
 const drop = ref<Drop | null>(null)
 
-function onRowDown(e: PointerEvent, row: Row) {
+function onRowDown(e: PointerEvent, row: DataRow) {
   if (e.button !== 0 || (e.target as HTMLElement).closest('button, input')) return
   dragging.value = {row, startY: e.clientY, active: false}
   ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
@@ -161,7 +207,7 @@ function onRowUp() {
   else ed.moveInList({folder: d.row.folder.id}, t.index, t.into)
 }
 /** Where a drop at this height goes, in path positions from the top. */
-function dropAt(y: number, moving: Row): Drop | null {
+function dropAt(y: number, moving: DataRow): Drop | null {
   const els = [...(list.value?.querySelectorAll<HTMLElement>('[data-row]') ?? [])]
   if (!els.length) return null
   const movingTree = moving.type === 'folder' ? ed.folderTree(moving.folder.id) : new Set<number>()
@@ -181,7 +227,7 @@ function dropAt(y: number, moving: Row): Drop | null {
   for (let i = 0; i < els.length; i++) {
     const r = els[i].getBoundingClientRect()
     if (y > r.bottom && i < els.length - 1) continue
-    const row = rows.value[i]
+    const row = dataRows.value[i]
     const upper = y < r.top + r.height / 2
     if (row.type === 'folder') {
       if (movingTree.has(row.folder.id)) return null
@@ -217,7 +263,7 @@ function dropAt(y: number, moving: Row): Drop | null {
       <template v-for="row in rows" :key="row.key">
         <li
           v-if="row.type === 'folder'" data-row :data-folder="row.folder.id" class="folder" :style="{paddingLeft: 10 + row.depth * 16 + 'px'}"
-          :class="{selected: folderSelected(row.folder), hidden: !row.folder.visible, target: drop?.folderRow !== null && rows[drop?.folderRow ?? -1] === row}"
+          :class="{selected: folderSelected(row.folder), hidden: !row.folder.visible, target: drop?.folderRow !== null && dataRows[drop?.folderRow ?? -1] === row}"
           @pointerdown="onRowDown($event, row)" @click="clickFolder($event, row.folder)" @dblclick="startRename(row.key, row.folder.name)"
         >
           <button type="button" class="chevron" :aria-label="row.folder.open ? '閉じる' : '開く'" @click.stop="toggleOpen(row.folder)">
@@ -232,6 +278,28 @@ function dropAt(y: number, moving: Row): Drop | null {
           <span class="count">{{ row.count }}</span>
           <button type="button" class="eye" :aria-label="row.folder.visible ? 'フォルダを隠す' : 'フォルダを表示'" @click.stop="toggleFolderVisible(row.folder)">
             <Icon :icon="row.folder.visible ? 'material-symbols:visibility-outline' : 'material-symbols:visibility-off-outline'" />
+          </button>
+        </li>
+        <li
+          v-else-if="row.type === 'look'" class="look" :data-look-of="row.stroke.id" :style="{paddingLeft: 10 + row.depth * 16 + 'px'}"
+          :class="{off: !row.stroke.appearance?.enabled}" @click="ed.selected = [row.stroke.id]; setFolded('nodes', false)"
+        >
+          <Icon class="look-icon" icon="material-symbols:texture" />
+          <span class="name">{{ lookOf(ed.doc, row.stroke)?.name }}</span>
+          <span v-if="(lookOf(ed.doc, row.stroke)?.users.length ?? 0) > 1" class="count" title="共有している外観">共有 {{ lookOf(ed.doc, row.stroke)!.users.length }}</span>
+          <button type="button" class="eye" :aria-label="row.stroke.appearance?.enabled ? '外観をオフ' : '外観をオン'" @click.stop="toggleLookEnabled(row.stroke)">
+            <Icon :icon="row.stroke.appearance?.enabled ? 'material-symbols:visibility-outline' : 'material-symbols:visibility-off-outline'" />
+          </button>
+        </li>
+        <li
+          v-else-if="row.type === 'effect'" class="effect" :data-effect="row.node.id" :style="{paddingLeft: 10 + row.depth * 16 + 'px'}"
+          :class="{off: row.node.bypass, selected: ed.active?.id === row.stroke.id && ed.selectedNodes.includes(row.node.id)}"
+          @click="selectEffect(row.stroke, row.node)"
+        >
+          <span class="dot" :style="{background: categoryOf(row.node.kind).color}" />
+          <span class="name">{{ row.node.label || nodeInfo(row.node).label }}</span>
+          <button type="button" class="eye" :aria-label="row.node.bypass ? 'ノードを有効にする' : 'ノードをバイパス'" :title="row.node.bypass ? 'バイパス中（クリックで有効）' : 'バイパス（オフ）'" @click.stop="toggleBypass(row.node)">
+            <Icon :icon="row.node.bypass ? 'material-symbols:visibility-off-outline' : 'material-symbols:visibility-outline'" />
           </button>
         </li>
         <li
@@ -252,7 +320,11 @@ function dropAt(y: number, moving: Row): Drop | null {
             @click.stop @keydown.enter.stop="finishRename(true)" @keydown.escape.stop="finishRename(false)" @blur="finishRename(true)"
           >
           <span v-else class="name" :title="row.stroke.name">{{ row.stroke.name }}</span>
-          <Icon v-if="row.stroke.appearance" class="badge" icon="material-symbols:account-tree-outline" title="外観ノードあり" />
+          <button
+            v-if="row.stroke.appearance" type="button" class="badge" :class="{open: openLooks.has(row.stroke.id)}" :data-look-toggle="row.stroke.id"
+            :aria-label="openLooks.has(row.stroke.id) ? '外観をたたむ' : '外観を表示'" title="このパスの外観（ノード）を一覧に出す"
+            @pointerdown.stop @click.stop="toggleLook(row.stroke.id)"
+          ><Icon icon="material-symbols:account-tree-outline" /></button>
           <button type="button" class="eye" :aria-label="row.stroke.visible ? '隠す' : '表示する'" @click.stop="toggleVisible(row.stroke)">
             <Icon :icon="row.stroke.visible ? 'material-symbols:visibility-outline' : 'material-symbols:visibility-off-outline'" />
           </button>
@@ -292,7 +364,18 @@ li.folder.target {background: var(--tq-color-accent-soft); box-shadow: inset 0 0
 .thumb svg {width: 26px; height: 16px; display: block}
 .name {flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis}
 .rename {flex: 1; min-width: 0; height: 20px; border: 0; padding: 0 4px; font: inherit; color: var(--tq-color-text); background: var(--tq-color-input); outline: 1px solid var(--tq-color-accent)}
-.badge {color: var(--tq-color-text-mute); font-size: 13px; flex: none}
+.badge {
+  display: grid; place-items: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 2px; flex: none;
+  background: transparent; color: var(--tq-color-text-mute); font-size: 13px; cursor: pointer;
+}
+.badge:hover {color: var(--tq-color-text)}
+.badge.open {color: var(--tq-color-accent)}
+li.look, li.effect {height: 24px; font-size: 11px}
+li.look .name {color: var(--tq-color-text-mute)}
+li.off .name, li.off .dot {opacity: .45}
+li.effect.selected {background: var(--tq-color-accent-soft)}
+.look-icon {color: var(--tq-color-text-mute); font-size: 13px; flex: none}
+.dot {width: 7px; height: 7px; border-radius: 1px; flex: none}
 .none {color: var(--tq-color-text-mute); padding-left: 10px}
 .drop-line {position: absolute; left: 6px; right: 6px; height: 2px; background: var(--tq-color-accent); pointer-events: none}
 </style>

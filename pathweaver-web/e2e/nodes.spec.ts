@@ -632,3 +632,42 @@ test('appearances are data-blocks: path 2 picks path 1\'s, edits sync, the user 
   expect(a.nodes.some((n: any) => n.kind === 'Zigzag')).toBe(true)
   expect(errors).toEqual([])
 })
+
+test('N-01 Ctrl+Shift+click a node makes it the final output; again puts the old link back', async ({page}) => {
+  const errors = await setup(page)
+  await page.evaluate(() => {
+    const {ed, call} = (window as any).__pw
+    ed.edit(() => {
+      const s = ed.doc.strokes[0]
+      let g = s.appearance
+      g.nodes.push(call('nodeNew', {kind: 'Rough', id: 10, position: [150, 220]}))
+      g.nodes.push(call('nodeNew', {kind: 'Glow', id: 11, position: [480, 380]}))
+      g = call('graphConnect', {graph: g, from: 1, to: 10, port: 0})
+      g = call('graphConnect', {graph: g, from: 10, to: 11, port: 0})
+      g = call('graphConnect', {graph: g, from: 11, to: 2, port: 0})
+      s.appearance = g
+    })
+  })
+  const g0 = await graph(page)
+  const rough = g0.nodes.find((n: any) => n.kind === 'Rough'), glow = g0.nodes.find((n: any) => n.kind === 'Glow')
+  const output = g0.nodes.find((n: any) => n.kind === 'Output')
+  const before = output.inputs[0]
+  const outSrc = async () => (await graph(page)).nodes.find((n: any) => n.kind === 'Output').inputs[0]
+  const click = (id: number) => page.locator(`[data-node="${id}"] .head`).click({modifiers: ['Control', 'Shift'], position: {x: 40, y: 8}})
+  expect(before).toBe(glow.id)
+  await click(rough.id)
+  expect(await outSrc()).toBe(rough.id)
+  await expect(page.getByTestId('status')).toContainText('最終出力')
+  // again on the viewed node: the original link (光彩) comes back
+  await click(rough.id)
+  expect(await outSrc()).toBe(before)
+  // one undo per click
+  await page.keyboard.press('Meta+z')
+  expect(await outSrc()).toBe(rough.id)
+  // a number node cannot be the output
+  await page.evaluate(() => { const {ed, call} = (window as any).__pw; ed.edit(() => { ed.doc.strokes[0].appearance.nodes.push(call('nodeNew', {kind: 'Value', id: 12, position: [150, 520]})) }) })
+  await click(12)
+  expect(await outSrc()).toBe(rough.id)
+  await expect(page.getByTestId('status')).toContainText('最終出力にできません')
+  expect(errors).toEqual([])
+})

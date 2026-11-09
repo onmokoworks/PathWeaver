@@ -114,6 +114,9 @@ function onKeyDown(e: KeyboardEvent) {
   const k = e.key.toLowerCase()
   if (e.key === 'Meta') canvas.state.meta = true
   if (e.key === 'Alt') canvas.state.alt = true
+  // Space belongs to the canvas (pan, Ctrl+Space): a button clicked earlier
+  // must not keep focus and get pressed by it.
+  if (k === ' ' && document.activeElement instanceof HTMLButtonElement) document.activeElement.blur()
   if (e.ctrlKey && k === ' ') { toggleMaximize(); e.preventDefault(); return }
   if (k === ' ') { canvas.state.space = true; nodeEditor.value?.setSpace(true); e.preventDefault(); return }
   if (mod && k === 'z') { e.shiftKey ? ed.redo() : ed.undo(); e.preventDefault(); return }
@@ -176,14 +179,13 @@ const nodesFolded = computed(() => isFolded('nodes'))
 // ---- Ctrl+Space: the area under the pointer fills the workspace (Blender) ----
 type AreaId = 'canvas' | PanelId
 const maximized = ref<AreaId | null>(null)
-let pointerArea: AreaId | null = null
-function trackArea(e: PointerEvent) {
-  const el = (e.target as Element | null)?.closest?.('[data-area]') as HTMLElement | null
-  pointerArea = (el?.dataset.area as AreaId) ?? null
-}
+let pointerAt = {x: -1, y: -1}
+function trackArea(e: PointerEvent) { pointerAt = {x: e.clientX, y: e.clientY} }
 function toggleMaximize() {
   if (maximized.value) { maximized.value = null; return }
-  const a = pointerArea ?? 'canvas'
+  // the area under the pointer right now (not where an event last landed)
+  const el = document.elementFromPoint(pointerAt.x, pointerAt.y)?.closest('[data-area]') as HTMLElement | null
+  const a = (el?.dataset.area as AreaId | undefined) ?? 'canvas'
   if (a !== 'canvas' && layout[a].floating) return
   maximized.value = a
   ed.status = '最大化しました（Ctrl＋Space で戻す）'

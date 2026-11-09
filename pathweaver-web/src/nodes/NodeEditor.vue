@@ -232,6 +232,33 @@ function onSet(n: GraphNode, patch: (n: GraphNode) => void) {
 function onCommit() { ed.commit() }
 function toggleBypass(n: GraphNode) { mutate(() => { n.bypass = !n.bypass }) }
 
+// Ctrl+Shift+click: show this node's result as the final output (Node
+// Wrangler's viewer). The link it replaced is remembered: Ctrl+Shift+click the
+// same node (or 出力) again to put it back. One undo step either way.
+const viewerPrev = new Map<number, number | null>() // path id → Output's previous source
+function viewNode(id: number) {
+  const g = graph.value, s = stroke.value
+  const n = node(id)
+  if (!g || !s || !n) return
+  const out = node(g.output)!
+  const back = (n.kind === 'Output' || out.inputs[0] === id) && viewerPrev.has(s.id)
+  if (back) {
+    const prev = viewerPrev.get(s.id)!
+    viewerPrev.delete(s.id)
+    ed.edit(() => { out.inputs[0] = prev; call('graphValidate', {graph: g}) })
+    ed.status = '最終出力を元のつなぎに戻しました'
+    return
+  }
+  if (n.kind === 'Output' || out.inputs[0] === id) return
+  if (!hasOutput(n.kind) || outputsNumber(n.kind)) { ed.status = `「${nodeInfo(n).label}」は形を出さないので、最終出力にできません`; return }
+  const prev = out.inputs[0] ?? null
+  ed.edit(() => replaceGraph(call<Graph>('graphConnect', {graph: g, from: id, to: g.output, port: 0})))
+  if (!ed.error) {
+    if (!viewerPrev.has(s.id)) viewerPrev.set(s.id, prev)
+    ed.status = `「${nodeInfo(n).label}」を最終出力にしました（もう一度 Ctrl＋Shift＋クリックで戻す）`
+  }
+}
+
 // ---- pointer ----
 function onDown(e: PointerEvent) {
   const target = e.target as HTMLElement
@@ -251,6 +278,11 @@ function onDown(e: PointerEvent) {
   }
   if (!graph.value) return
   const onNode = target.closest<HTMLElement>('[data-node]')
+  if (e.ctrlKey && e.shiftKey && e.button === 0 && onNode && !target.closest('[data-socket], input, button')) {
+    viewNode(+onNode.dataset.node!)
+    e.preventDefault()
+    return
+  }
   if (e.ctrlKey && e.button === 0 && onNode && !target.closest('[data-socket], [data-nodrag], input, button')) {
     // Ctrl-drag a node: pull it out of its links (the chain closes behind it).
     const id = +onNode.dataset.node!
