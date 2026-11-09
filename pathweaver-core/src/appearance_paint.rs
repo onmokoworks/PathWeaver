@@ -11,6 +11,7 @@ use kurbo::{Point, Vec2};
 const MAX_LAYERS: usize = 64;
 const MAX_VERTICES: usize = 200_000;
 const BLUR_BANDS: usize = 8;
+const BLUR_MAX_BANDS: usize = 40;
 
 fn check_layers(layers: &[Layer]) -> Result<(), String> {
     if layers.len() > MAX_LAYERS
@@ -79,40 +80,59 @@ fn coverage(distance_in_sigmas: f64) -> f64 {
 }
 
 pub fn blur(layers: &[Layer], radius: f64) -> Result<Vec<Layer>, String> {
+    blur_within(layers, radius, MAX_LAYERS)
+}
+
+/// Blur producing at most about `limit` layers (fewer, coarser steps if needed).
+fn blur_within(layers: &[Layer], radius: f64, limit: usize) -> Result<Vec<Layer>, String> {
     check_layers(layers)?;
     check_range(radius, 0., 100.)?;
     if radius < 1e-6 {
         return Ok(layers.to_vec());
     }
     let mut result = Vec::new();
+    let total_points: usize = layers.iter().flat_map(|l| l.contours.iter()).map(Vec::len).sum();
+    let visible = layers.iter().filter(|l| l.opacity > 0.).count().max(1);
+    // Steps about 2.5px wide so large radii do not show rings; bounded by the
+    // layer budget. Very detailed sources (thousands of grains) get fewer:
+    // each step is a full offset, and fine grains blur into fuzz either way.
+    let wanted = (4. * radius / 2.5).ceil() as usize;
+    let cap = if total_points > 8_000 { BLUR_BANDS / 2 } else { BLUR_MAX_BANDS };
+    let budget = (limit / visible).saturating_sub(1).max(BLUR_BANDS / 2);
+    let bands = wanted.clamp(BLUR_BANDS / 2, cap.max(BLUR_BANDS / 2)).min(budget);
     for layer in layers.iter().filter(|l| l.opacity > 0.) {
         let source = boolean_contours(&layer.contours, &[], OverlayRule::Subject);
         if source.is_empty() {
             continue;
         }
-        let mut inner = offset_contours(&source, -2. * radius, OffsetJoin::Round)?;
-        push_layer(
-            &mut result,
-            Layer {
-                color: layer.color,
-                opacity: layer.opacity,
-                contours: inner.clone(),
-            },
-        )?;
-        for band in 0..BLUR_BANDS {
-            let a = -2. + 4. * band as f64 / BLUR_BANDS as f64;
-            let b = -2. + 4. * (band + 1) as f64 / BLUR_BANDS as f64;
-            let outer = offset_contours(&source, b * radius, OffsetJoin::Round)?;
-            let shell = boolean_contours(&outer, &inner, OverlayRule::Difference);
+        // Nested regions, outermost first, each drawn over the previous with an
+        // alpha chosen so the composite matches the coverage curve. Every step
+        // edge has solid paint underneath, so no hairline seams appear between
+        // steps (disjoint rings show their anti-aliased edges as faint circles).
+        let mut below = 0.;
+        for k in 0..=bands {
+            let edge = 2. - 4. * k as f64 / bands as f64;
+            let target = if k == bands {
+                layer.opacity
+            } else {
+                let mid = edge - 2. / bands as f64;
+                layer.opacity * coverage(mid)
+            };
+            if target <= below + 1e-6 {
+                continue;
+            }
+            let alpha = if below >= 1. { 1. } else { 1. - (1. - target) / (1. - below) };
+            below = target;
+            let contours = offset_contours(&source, edge * radius, OffsetJoin::Round)?;
             push_layer(
                 &mut result,
                 Layer {
                     color: layer.color,
-                    opacity: layer.opacity * coverage((a + b) * 0.5),
-                    contours: shell,
+                    opacity: alpha.clamp(0., 1.),
+                    contours,
+                    image: None,
                 },
             )?;
-            inner = outer;
         }
     }
     Ok(result)
@@ -146,6 +166,7 @@ pub fn shadow(
             color,
             opacity: amount,
             contours,
+            image: None,
         }],
         radius,
     )?;
@@ -154,47 +175,69 @@ pub fn shadow(
     Ok(result)
 }
 
+/// Which halos a glow draws, and whether the source stays on top.
+#[derive(Clone, Copy, Debug)]
+pub struct GlowMode {
+    pub outer: bool,
+    pub inner: bool,
+    pub keep_source: bool,
+}
+
 pub fn glow(
     layers: &[Layer],
     size: f64,
     color: [u8; 3],
     amount: f64,
-    inner: bool,
+    mode: GlowMode,
 ) -> Result<Vec<Layer>, String> {
     check_layers(layers)?;
     check_range(size, 0., 100.)?;
     check_range(amount, 0., 1.)?;
-    if size < 1e-6 || amount == 0. {
-        return Ok(layers.to_vec());
+    let source_layers = || if mode.keep_source { layers.to_vec() } else { Vec::new() };
+    if size < 1e-6 || amount == 0. || !(mode.outer || mode.inner) {
+        return Ok(source_layers());
     }
     let source = silhouette(layers);
-    let contours = if inner {
-        let inset = offset_contours(&source, -size, OffsetJoin::Round)?;
-        boolean_contours(&source, &inset, OverlayRule::Difference)
-    } else {
-        offset_contours(&source, size * 0.5, OffsetJoin::Round)?
+    let halos = mode.outer as usize + mode.inner as usize;
+    let kept = if mode.keep_source { layers.len() } else { 0 };
+    let limit = (MAX_LAYERS.saturating_sub(kept) / halos).max(BLUR_BANDS / 2 + 1);
+    let halo = |contours: Vec<Vec<Point>>| {
+        blur_within(
+            &[Layer {
+                color,
+                opacity: amount,
+                contours,
+                image: None,
+            }],
+            size * 0.5,
+            limit,
+        )
     };
-    let mut halo = blur(
-        &[Layer {
-            color,
-            opacity: amount,
-            contours,
-        }],
-        size * 0.5,
-    )?;
-    if inner {
-        for l in &mut halo {
+    let mut result = Vec::new();
+    if mode.outer {
+        // Outer halo sits behind the source.
+        let grown = offset_contours(&source, size * 0.5, OffsetJoin::Round)?;
+        let mut outer = halo(grown)?;
+        if !mode.keep_source {
+            // Halo only: the shape itself becomes a hole.
+            for l in &mut outer {
+                l.contours = boolean_contours(&l.contours, &source, OverlayRule::Difference);
+            }
+            outer.retain(|l| !l.contours.is_empty());
+        }
+        result.extend(outer);
+    }
+    result.extend(source_layers());
+    if mode.inner {
+        // Inner halo is painted over the source, clipped to it.
+        let inset = offset_contours(&source, -size, OffsetJoin::Round)?;
+        let ring = boolean_contours(&source, &inset, OverlayRule::Difference);
+        let mut inner = halo(ring)?;
+        for l in &mut inner {
             l.contours = boolean_contours(&l.contours, &source, OverlayRule::Intersect);
         }
-        halo.retain(|l| !l.contours.is_empty());
-    }
-    let mut result = Vec::new();
-    if inner {
-        result.extend_from_slice(layers);
-        result.extend(halo);
-    } else {
-        result.extend(halo);
-        result.extend_from_slice(layers);
+        inner.retain(|l| !l.contours.is_empty());
+        result.extend(inner);
     }
     check_layers(&result)?;
     Ok(result)
@@ -213,6 +256,7 @@ mod tests {
                 Point::new(100., 100.),
                 Point::new(0., 100.),
             ]],
+            image: None,
         }
     }
     fn bounds(layers: &[Layer]) -> kurbo::Rect {
@@ -272,7 +316,7 @@ mod tests {
             vec![original.clone()]
         );
         let blurred = blur(&[original], 10.).unwrap();
-        assert!(blurred.len() <= BLUR_BANDS + 1);
+        assert!(blurred.len() <= BLUR_MAX_BANDS + 1);
         let b = bounds(&blurred);
         assert!(b.x0 >= -20.01 && b.x1 <= 120.01);
         let center = alpha_at(&blurred, Point::new(50., 50.));
@@ -283,18 +327,50 @@ mod tests {
         assert!(blur(&[square()], 101.).is_err());
     }
     #[test]
+    fn large_blur_uses_fine_steps_and_matches_the_coverage_curve() {
+        let blurred = blur(&[square()], 60.).unwrap();
+        assert!(blurred.len() > 24, "{} steps", blurred.len());
+        // Composite alpha falls smoothly: neighbouring samples 3px apart never
+        // jump by more than a few percent (no visible rings).
+        let mut last = alpha_at(&blurred, Point::new(50., 50.));
+        let mut x = 53.;
+        while x < 220. {
+            let a = alpha_at(&blurred, Point::new(x, 50.));
+            assert!(a <= last + 1e-9 && last - a < 0.06, "x={x} {last} -> {a}");
+            last = a;
+            x += 3.;
+        }
+    }
+    #[test]
     fn inner_glow_is_clipped_while_outer_glow_sits_behind_source() {
+        let mode = |outer, inner, keep_source| GlowMode { outer, inner, keep_source };
         let original = square();
-        let inner = glow(std::slice::from_ref(&original), 10., [255, 0, 0], 0.5, true).unwrap();
+        let inner = glow(std::slice::from_ref(&original), 10., [255, 0, 0], 0.5, mode(false, true, true)).unwrap();
         assert_eq!(inner[0], original);
-        assert!(inner[1..].iter().all(|l| l
-            .contours
-            .iter()
-            .flatten()
-            .all(|p| p.x >= -1e-6 && p.x <= 100. + 1e-6 && p.y >= -1e-6 && p.y <= 100. + 1e-6)));
-        let outer = glow(&[square()], 10., [255, 0, 0], 0.5, false).unwrap();
+        let inside = |l: &Layer| {
+            l.contours
+                .iter()
+                .flatten()
+                .all(|p| p.x >= -1e-6 && p.x <= 100. + 1e-6 && p.y >= -1e-6 && p.y <= 100. + 1e-6)
+        };
+        assert!(inner[1..].iter().all(inside));
+        let outer = glow(&[square()], 10., [255, 0, 0], 0.5, mode(true, false, true)).unwrap();
         assert_eq!(outer.last().unwrap(), &square());
         assert!(bounds(&outer).x1 > 100.);
+        // Both sides: halo behind, source, then the clipped inner halo on top.
+        let both = glow(&[square()], 10., [255, 0, 0], 0.5, mode(true, true, true)).unwrap();
+        assert!(glow(&[square()], 100., [255, 0, 0], 0.5, mode(true, true, true)).is_ok());
+        let at = both.iter().position(|l| *l == square()).unwrap();
+        assert!(at > 0 && at < both.len() - 1);
+        assert!(bounds(&both[..at]).x1 > 100.);
+        assert!(both[at + 1..].iter().all(inside));
+        // Halo only: no source layer, and the shape area is left open.
+        let halo = glow(&[square()], 10., [255, 0, 0], 0.5, mode(true, false, false)).unwrap();
+        assert!(!halo.contains(&square()));
+        assert_eq!(alpha_at(&halo, Point::new(50., 50.)), 0.);
+        assert!(alpha_at(&halo, Point::new(103., 50.)) > 0.);
+        let inner_only = glow(&[square()], 10., [255, 0, 0], 0.5, mode(false, true, false)).unwrap();
+        assert!(!inner_only.contains(&square()) && !inner_only.is_empty() && inner_only.iter().all(inside));
     }
     #[test]
     fn graph_opacity_matches_canvas_layers_and_svg() {
@@ -329,6 +405,6 @@ mod tests {
     fn paint_effects_enforce_layer_budget() {
         let source = vec![square(); MAX_LAYERS + 1];
         assert!(opacity(&source, 0.5).is_err());
-        assert!(blur(&vec![square(); 8], 5.).is_err());
+        assert!(blur(&vec![square(); 20], 5.).is_err());
     }
 }

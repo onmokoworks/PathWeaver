@@ -3,7 +3,7 @@ use crate::{
     model::{Document, Stroke, Width, WidthKey},
     outline,
 };
-use kurbo::Vec2;
+use kurbo::{Point, Vec2};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Anchor {
@@ -540,6 +540,143 @@ pub fn union(doc: &mut Document, ids: &[u64]) -> Result<u64, String> {
     })
 }
 
+/// Illustrator-style Pathfinder on whole paths (their painted outlines,
+/// effects baked in). Stacking order decides "front" and "back".
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+pub enum PathfinderOp {
+    /// 合体
+    Unite,
+    /// 前面で型抜き: the backmost path minus everything in front of it
+    MinusFront,
+    /// 背面で型抜き: the frontmost path minus everything behind it
+    MinusBack,
+    /// 交差: only where all paths overlap
+    Intersect,
+    /// 中マド: where an odd number of paths overlap
+    Exclude,
+    /// 分割: every region becomes its own path, coloured by the topmost path over it
+    Divide,
+}
+
+/// Returns the ids of the resulting paths (front-most last).
+pub fn pathfinder(doc: &mut Document, ids: &[u64], op: PathfinderOp) -> Result<Vec<u64>, String> {
+    use i_overlay::core::overlay_rule::OverlayRule;
+    transaction(doc, |d| {
+        // selected paths in stacking order (back first)
+        let order: Vec<usize> = (0..d.strokes.len()).filter(|&i| ids.contains(&d.strokes[i].id)).collect();
+        if order.len() < 2 {
+            return Err("パスファインダーにはパスを2つ以上選択してください".into());
+        }
+        let shapes: Vec<Vec<Vec<Point>>> = order
+            .iter()
+            .map(|&i| outline::paint(&d.strokes[i]).map(|p| p.contours))
+            .collect::<Result<_, _>>()?;
+        let color = |i: usize| {
+            let s = &d.strokes[order[i]];
+            s.fill.or(s.edge).unwrap_or([224; 3])
+        };
+        let union_of = |list: &[Vec<Vec<Point>>]| {
+            let all: Vec<Vec<Point>> = list.iter().flatten().cloned().collect();
+            outline::boolean_contours(&all, &[], OverlayRule::Subject)
+        };
+        let last = order.len() - 1;
+        // (contours, colour, the source path whose place/folder it takes)
+        let mut results: Vec<(Vec<Vec<Point>>, [u8; 3], usize)> = match op {
+            PathfinderOp::Unite => vec![(union_of(&shapes), color(last), last)],
+            PathfinderOp::MinusFront => vec![(
+                outline::boolean_contours(&shapes[0], &union_of(&shapes[1..]), OverlayRule::Difference),
+                color(0),
+                0,
+            )],
+            PathfinderOp::MinusBack => vec![(
+                outline::boolean_contours(&shapes[last], &union_of(&shapes[..last]), OverlayRule::Difference),
+                color(last),
+                last,
+            )],
+            PathfinderOp::Intersect => {
+                let mut acc = outline::boolean_contours(&shapes[0], &[], OverlayRule::Subject);
+                for s in &shapes[1..] {
+                    acc = outline::boolean_contours(&acc, s, OverlayRule::Intersect);
+                }
+                vec![(acc, color(last), last)]
+            }
+            PathfinderOp::Exclude => {
+                let mut acc = outline::boolean_contours(&shapes[0], &[], OverlayRule::Subject);
+                for s in &shapes[1..] {
+                    acc = outline::boolean_contours(&acc, s, OverlayRule::Xor);
+                }
+                vec![(acc, color(last), last)]
+            }
+            PathfinderOp::Divide => {
+                // faces: (region, topmost path index over it)
+                let mut faces: Vec<(Vec<Vec<Point>>, usize)> = vec![];
+                let mut covered: Vec<Vec<Point>> = vec![];
+                for (i, s) in shapes.iter().enumerate() {
+                    let mut next = vec![];
+                    for (f, owner) in faces {
+                        let inside = outline::boolean_contours(&f, s, OverlayRule::Intersect);
+                        let outside = outline::boolean_contours(&f, s, OverlayRule::Difference);
+                        if !inside.is_empty() { next.push((inside, i)); }
+                        if !outside.is_empty() { next.push((outside, owner)); }
+                    }
+                    let fresh = outline::boolean_contours(s, &covered, OverlayRule::Difference);
+                    if !fresh.is_empty() { next.push((fresh, i)); }
+                    covered = outline::boolean_contours(&covered, s, OverlayRule::Union);
+                    faces = next;
+                }
+                // every separate region becomes its own path
+                let mut out = vec![];
+                for (f, owner) in faces {
+                    for shape in outline::boolean_shapes(&f, &[], OverlayRule::Subject) {
+                        out.push((shape, color(owner), owner));
+                    }
+                }
+                out
+            }
+        };
+        results.retain(|r| !r.0.is_empty());
+        if results.is_empty() {
+            return Err("結果の形がありません（重なりがないなど）".into());
+        }
+        // Results replace the sources, placed where the front-most source was.
+        let front = order[last];
+        let anchor_id = d.strokes[front].id;
+        let folder = d.strokes[front].folder;
+        let label = match op {
+            PathfinderOp::Unite => "合体",
+            PathfinderOp::MinusFront => "前面で型抜き",
+            PathfinderOp::MinusBack => "背面で型抜き",
+            PathfinderOp::Intersect => "交差",
+            PathfinderOp::Exclude => "中マド",
+            PathfinderOp::Divide => "分割",
+        };
+        let mut new_strokes = vec![];
+        for (k, (contours, color, src)) in results.into_iter().enumerate() {
+            let (source_id, source_name) = (d.strokes[order[src]].id, d.strokes[order[src]].name.clone());
+            let id = if k == 0 { source_id } else { d.id() };
+            let name = if k == 0 { format!("{source_name} / {label}") } else { format!("{source_name} / {label} {}", k + 1) };
+            let mut s = Stroke::new(id, name);
+            s.fill = Some(color);
+            s.edge = None;
+            s.contours = Some(contours);
+            s.folder = folder;
+            new_strokes.push(s);
+        }
+        let ids_out: Vec<u64> = new_strokes.iter().map(|s| s.id).collect();
+        let at = d.strokes.iter().position(|s| s.id == anchor_id).unwrap();
+        let mut rebuilt = vec![];
+        for (i, s) in d.strokes.iter().enumerate() {
+            if i == at {
+                rebuilt.extend(new_strokes.iter().cloned());
+            } else if !ids.contains(&s.id) {
+                rebuilt.push(s.clone());
+            }
+        }
+        d.strokes = rebuilt;
+        Ok(ids_out)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -710,6 +847,54 @@ mod tests {
         delete_anchors(&mut d, &[a]).unwrap();
         d.validate().unwrap();
         assert!(d.strokes[0].widths.is_empty());
+    }
+    #[test]
+    fn pathfinder_modes_follow_stacking_order() {
+        use super::super::model::Document;
+        fn square(d: &mut Document, x: f64, color: [u8; 3]) -> u64 {
+            let mut s = Stroke::new(d.id(), "sq".into());
+            s.fill = Some(color);
+            s.edge = None;
+            s.contours = Some(vec![vec![Point::new(x, 0.), Point::new(x + 20., 0.), Point::new(x + 20., 20.), Point::new(x, 20.)]]);
+            let id = s.id;
+            d.strokes.push(s);
+            id
+        }
+        let area = |d: &Document, id: u64| -> f64 {
+            let s = d.strokes.iter().find(|s| s.id == id).unwrap();
+            s.contours.as_ref().unwrap().iter().map(|r| {
+                let mut a = 0.;
+                for i in 0..r.len() { let (p, q) = (r[i], r[(i + 1) % r.len()]); a += p.x * q.y - q.x * p.y; }
+                a.abs() * 0.5
+            }).sum()
+        };
+        let setup = || { let mut d = Document::default(); let a = square(&mut d, 0., [255, 0, 0]); let b = square(&mut d, 10., [0, 0, 255]); (d, a, b) };
+        let (mut d, a, b) = setup();
+        let r = pathfinder(&mut d, &[b, a], PathfinderOp::MinusFront).unwrap();
+        assert_eq!(r, vec![a]);
+        assert!((area(&d, a) - 200.).abs() < 1e-6, "back square minus the front one");
+        assert_eq!(d.strokes.len(), 1);
+        assert_eq!(d.strokes[0].fill, Some([255, 0, 0]));
+        let (mut d, a, b) = setup();
+        let r = pathfinder(&mut d, &[a, b], PathfinderOp::Intersect).unwrap();
+        assert!((area(&d, r[0]) - 200.).abs() < 1e-6);
+        assert_eq!(d.strokes[0].fill, Some([0, 0, 255]), "front colour");
+        let (mut d, a, b) = setup();
+        let r = pathfinder(&mut d, &[a, b], PathfinderOp::Exclude).unwrap();
+        assert!((area(&d, r[0]) - 400.).abs() < 1e-6);
+        let (mut d, a, b) = setup();
+        let r = pathfinder(&mut d, &[a, b], PathfinderOp::Divide).unwrap();
+        assert_eq!(r.len(), 3, "left, overlap, right");
+        let total: f64 = r.iter().map(|id| area(&d, *id)).sum();
+        assert!((total - 600.).abs() < 1e-6);
+        // the overlap belongs to the front (blue) path
+        let blue: f64 = d.strokes.iter().filter(|s| s.fill == Some([0, 0, 255])).map(|s| area(&d, s.id)).sum();
+        assert!((blue - 400.).abs() < 1e-6);
+        let (mut d, a, b) = setup();
+        pathfinder(&mut d, &[a, b], PathfinderOp::MinusBack).unwrap();
+        assert_eq!(d.strokes[0].fill, Some([0, 0, 255]));
+        let (mut d, a, _) = setup();
+        assert!(pathfinder(&mut d, &[a], PathfinderOp::Unite).is_err());
     }
     #[test]
     fn union_bakes_effects_and_keeps_disconnected_regions() {

@@ -69,6 +69,19 @@ pub enum Join {
 fn default_miter_limit() -> f64 {
     10.0
 }
+/// End shape of an open path's stroke.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Cap {
+    #[default]
+    Butt,
+    Round,
+    Square,
+}
+impl Cap {
+    pub fn is_butt(&self) -> bool {
+        *self == Cap::Butt
+    }
+}
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CornerKind {
     #[default]
@@ -87,6 +100,9 @@ pub struct Corner {
 pub struct Stroke {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub appearance: Option<super::appearance::Graph>,
+    /// Layer folder (`Document::folders`), if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<u64>,
     #[serde(default)]
     pub closed: bool,
     /// Closed, normalized contours after expansion or a Boolean operation.
@@ -116,6 +132,10 @@ pub struct Stroke {
     /// World angle of the cut line: 0 horizontal, 90 vertical.
     pub start_angle: f64,
     pub end_angle: f64,
+    #[serde(default, skip_serializing_if = "Cap::is_butt")]
+    pub start_cap: Cap,
+    #[serde(default, skip_serializing_if = "Cap::is_butt")]
+    pub end_cap: Cap,
     #[serde(default)]
     pub start_cap_locked: bool,
     #[serde(default)]
@@ -185,6 +205,7 @@ impl Stroke {
     pub fn new(id: u64, name: String) -> Self {
         Self {
             appearance: None,
+            folder: None,
             closed: false,
             contours: None,
             fill: None,
@@ -203,6 +224,8 @@ impl Stroke {
             end_width: Width::default(),
             start_angle: 90.0,
             end_angle: 90.0,
+            start_cap: Cap::Butt,
+            end_cap: Cap::Butt,
             start_cap_locked: false,
             end_cap_locked: false,
         }
@@ -319,29 +342,12 @@ impl Stroke {
     pub fn cubic(&self, i: usize) -> kurbo::CubicBez {
         let a = &self.nodes[i];
         let b = &self.nodes[(i + 1) % self.nodes.len()];
-        let chord = b.p - a.p;
-        let length = chord.hypot();
-        // A collapsed handle is a corner with a chord-aligned departure,
-        // not a zero derivative whose direction comes from the remote handle.
-        // Ramp the implicit length from zero so starting a pen drag is continuous.
-        // Keep stored handles collapsed; only explicit edits create UI handles.
-        let implicit = |other: Vec2| {
-            if length > 1e-8 {
-                chord * (other.hypot().min(length / 3.) / length)
-            } else {
-                Vec2::ZERO
-            }
-        };
-        let out = if !a.exact_outgoing && a.outgoing.hypot() <= 1e-8 {
-            implicit(b.incoming)
-        } else {
-            a.outgoing
-        };
-        let incoming = if !b.exact_incoming && b.incoming.hypot() <= 1e-8 {
-            -implicit(a.outgoing)
-        } else {
-            b.incoming
-        };
+        // Standard Bézier semantics (as in Illustrator, SVG and fonts): a
+        // collapsed handle puts the control point on the anchor. A corner anchor
+        // between two curves therefore stays a visible corner; an earlier
+        // chord-aligned substitute made collinear corners look smooth and
+        // changed how the neighbouring curves bulged.
+        let (out, incoming) = (a.outgoing, b.incoming);
         kurbo::CubicBez::new(a.p, a.p + out, b.p + incoming, b.p)
     }
     pub fn eval(&self, i: usize, t: f64) -> Point {
@@ -361,6 +367,16 @@ impl Stroke {
             + (c.p3 - c.p2) * (3.0 * t * t);
         if v.hypot() > 1e-8 {
             return v / v.hypot();
+        }
+        // Collapsed handle at an end: the limit direction comes from the next
+        // distinct control point (p2 - p0 at the start, p3 - p1 at the end).
+        let limit = if t < 0.5 {
+            [c.p1 - c.p0, c.p2 - c.p0, c.p3 - c.p0]
+        } else {
+            [c.p3 - c.p2, c.p3 - c.p1, c.p3 - c.p0]
+        };
+        if let Some(d) = limit.into_iter().find(|d| d.hypot() > 1e-8) {
+            return d / d.hypot();
         }
         let d = self.eval(i, (t + 1e-4).min(1.0)) - self.eval(i, (t - 1e-4).max(0.0));
         if d.hypot() > 1e-8 {
@@ -431,6 +447,24 @@ impl Stroke {
     }
 }
 
+/// A layer folder. Paths reference it by id; the stacking order is still the
+/// order of `Document::strokes`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Folder {
+    pub id: u64,
+    pub name: String,
+    #[serde(default = "default_true")]
+    pub visible: bool,
+    #[serde(default = "default_true")]
+    pub open: bool,
+    /// Enclosing folder (folders nest); `None` = top level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<u64>,
+}
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Guide {
     pub vertical: bool,
@@ -460,6 +494,8 @@ pub struct Document {
     pub angle_step: f64,
     #[serde(default)]
     pub appearance_presets: Vec<super::appearance_assets::Preset>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folders: Vec<Folder>,
     pub strokes: Vec<Stroke>,
 }
 fn default_angle_step() -> f64 {
@@ -479,11 +515,30 @@ impl Default for Document {
             next_id: 1,
             angle_step: default_angle_step(),
             appearance_presets: vec![],
+            folders: vec![],
             strokes: vec![],
         }
     }
 }
 impl Document {
+    /// Visible on the canvas and in exports: the path and its folder are shown.
+    pub fn shown(&self, s: &Stroke) -> bool {
+        // The path and every enclosing folder must be visible.
+        let mut at = s.folder;
+        let mut depth = 0;
+        while let Some(id) = at {
+            let Some(f) = self.folders.iter().find(|x| x.id == id) else { break };
+            if !f.visible {
+                return false;
+            }
+            at = f.parent;
+            depth += 1;
+            if depth > 64 {
+                break;
+            }
+        }
+        s.visible
+    }
     pub fn id(&mut self) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
@@ -553,6 +608,32 @@ impl Document {
         self.validate()
     }
     pub fn validate(&self) -> Result<(), String> {
+        if self.folders.len() > 1000 {
+            return Err("フォルダが多すぎます".into());
+        }
+        for (i, f) in self.folders.iter().enumerate() {
+            if self.folders[..i].iter().any(|g| g.id == f.id) || self.strokes.iter().any(|s| s.id == f.id) {
+                return Err("フォルダのIDが重複しています".into());
+            }
+            if f.id >= self.next_id {
+                return Err("フォルダのIDが不正です".into());
+            }
+        }
+        for f in &self.folders {
+            // parents exist and never loop back
+            let mut at = f.parent;
+            let mut depth = 0;
+            while let Some(id) = at {
+                if id == f.id || depth > 64 {
+                    return Err("フォルダの入れ子が循環しています".into());
+                }
+                at = self.folders.iter().find(|x| x.id == id).ok_or("存在しない親フォルダがあります")?.parent;
+                depth += 1;
+            }
+        }
+        if self.strokes.iter().any(|s| s.folder.is_some_and(|f| !self.folders.iter().any(|x| x.id == f))) {
+            return Err("存在しないフォルダに属するパスがあります".into());
+        }
         if self.appearance_presets.len() > 32 { return Err("ノードセットは32個までです".into()); }
         for preset in &self.appearance_presets { preset.validate()?; }
         if self.format != "pathweaver" || self.version != 3 {
@@ -713,5 +794,44 @@ impl Document {
         s.end_cap_locked = true;
         d.strokes.push(s);
         d
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn doc_with_nested() -> Document {
+        let mut d = Document::example();
+        let outer = d.id();
+        let inner = d.id();
+        d.folders = vec![
+            Folder { id: outer, name: "外".into(), visible: true, open: true, parent: None },
+            Folder { id: inner, name: "内".into(), visible: true, open: true, parent: Some(outer) },
+        ];
+        d.strokes[0].folder = Some(inner);
+        d
+    }
+    #[test]
+    fn nested_folders_hide_their_contents_and_round_trip() {
+        let mut d = doc_with_nested();
+        assert!(d.validate().is_ok());
+        assert!(d.shown(&d.strokes[0]));
+        d.folders[0].visible = false; // hiding the outer folder hides the inner one's paths
+        assert!(!d.shown(&d.strokes[0]));
+        assert!(!crate::outline::svg(&d).unwrap().contains("<path") || d.strokes.len() > 1);
+        let json = serde_json::to_string(&d).unwrap();
+        let back: Document = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.folders, d.folders);
+    }
+    #[test]
+    fn folder_loops_and_missing_parents_are_rejected() {
+        let mut d = doc_with_nested();
+        let (a, b) = (d.folders[0].id, d.folders[1].id);
+        d.folders[0].parent = Some(b);
+        assert!(d.validate().unwrap_err().contains("循環"));
+        d.folders[0].parent = Some(a);
+        assert!(d.validate().is_err());
+        d.folders[0].parent = Some(9_999_999);
+        assert!(d.validate().is_err());
     }
 }

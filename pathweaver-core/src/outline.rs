@@ -329,9 +329,11 @@ pub struct PaintLayer {
     pub color: [u8; 3],
     pub opacity: f64,
     pub outline: Outline,
+    /// A bitmap from the raster stage; `outline` is then its rectangle.
+    pub image: Option<std::sync::Arc<super::raster::Image>>,
 }
 impl Default for PaintLayer {
-    fn default() -> Self { Self { color: [0; 3], opacity: 1., outline: Outline::default() } }
+    fn default() -> Self { Self { color: [0; 3], opacity: 1., outline: Outline::default(), image: None } }
 }
 #[derive(Clone, Default)]
 pub struct Outline {
@@ -481,6 +483,39 @@ pub fn build(stroke: &Stroke) -> Result<Outline, String> {
     };
     left = assemble(left, start_left, end_left);
     right = assemble(right, start_right, end_right);
+    // Round / square ends sit on the actual end cross-section (asymmetric
+    // widths and rotated cuts included), bulging outward along the path.
+    if !stroke.closed && stroke.nodes.len() >= 2 {
+        let last_segment = stroke.segment_count().saturating_sub(1);
+        for (cap, a, b, outward) in [
+            (stroke.start_cap, left[0], right[0], -stroke.tangent(0, 0.)),
+            (stroke.end_cap, *left.last().unwrap(), *right.last().unwrap(), stroke.tangent(last_segment, 1.)),
+        ] {
+            let m = a.midpoint(b);
+            let r = a.distance(b) * 0.5;
+            if cap == super::model::Cap::Butt || r < 1e-6 {
+                continue;
+            }
+            let u = (a - m) / r;
+            let mut t = outward - u * u.dot(outward);
+            if t.hypot() < 1e-9 {
+                t = Vec2::new(-u.y, u.x);
+            }
+            let t = t / t.hypot();
+            match cap {
+                super::model::Cap::Square => add(vec![a, b, b + t * r, a + t * r]),
+                _ => {
+                    let count = ((r * std::f64::consts::PI / 2.).ceil() as usize).clamp(8, 96);
+                    add((0..=count)
+                        .map(|k| {
+                            let th = std::f64::consts::PI * k as f64 / count as f64;
+                            m + (u * th.cos() + t * th.sin()) * r
+                        })
+                        .collect());
+                }
+            }
+        }
+    }
     let mut ring = left;
     ring.extend(right.into_iter().rev());
     let contours = boolean_contours(
@@ -510,11 +545,47 @@ pub fn boolean_contours(
         .collect()
 }
 
+/// Like `boolean_contours`, but keeps each separate region (outer ring + its
+/// holes) apart.
+pub fn boolean_shapes(
+    a: &[Vec<Point>],
+    b: &[Vec<Point>],
+    rule: i_overlay::core::overlay_rule::OverlayRule,
+) -> Vec<Vec<Vec<Point>>> {
+    use i_overlay::{core::fill_rule::FillRule, float::single::SingleFloatOverlay};
+    let convert = |c: &[Vec<Point>]| {
+        c.iter()
+            .map(|r| r.iter().map(|p| [p.x, p.y]).collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    };
+    convert(a)
+        .overlay(&convert(b), rule, FillRule::NonZero)
+        .into_iter()
+        .map(|shape| shape.into_iter().map(|c| c.into_iter().map(|p| Point::new(p[0], p[1])).collect()).collect())
+        .collect()
+}
+
+thread_local! {
+    /// Set by `contours_only`: callers that only need contours (the web UI
+    /// draws SVG paths) skip GPU triangulation, which dominated render time.
+    static CONTOURS_ONLY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+/// Run `f` without triangulating outlines (vertices/indices stay empty).
+pub fn contours_only<T>(f: impl FnOnce() -> T) -> T {
+    let previous = CONTOURS_ONLY.with(|c| c.replace(true));
+    let result = f();
+    CONTOURS_ONLY.with(|c| c.set(previous));
+    result
+}
+
 pub(super) fn tessellate(
     contours: Vec<Vec<Point>>,
     samples: Vec<Sample>,
     _ring: Vec<Point>,
 ) -> Result<Outline, String> {
+    if CONTOURS_ONLY.with(|c| c.get()) {
+        return Ok(Outline {samples, ring: _ring, contours, ..Outline::default()});
+    }
     use lyon::math::point;
     use lyon::path::Path;
     use lyon::tessellation::{
@@ -563,6 +634,32 @@ pub(super) fn tessellate(
 
 /// Resolve the path interior and its own stroke separately, then union only for hit tests.
 pub fn paint(s: &Stroke) -> Result<Outline, String> {
+    let center = if s.corners.is_empty() {
+        s.clone()
+    } else {
+        super::corners::rounded(s)
+    };
+    let layers = paint_layers(s)?;
+    let contours = layers
+        .iter()
+        .flat_map(|l| l.outline.contours.clone())
+        .collect::<Vec<_>>();
+    let mut result = tessellate(
+        boolean_contours(
+            &contours,
+            &[],
+            i_overlay::core::overlay_rule::OverlayRule::Subject,
+        ),
+        samples(&center),
+        vec![],
+    )?;
+    result.layers = layers;
+    Ok(result)
+}
+
+/// The painted layers (fill, stroke, then the appearance graph) without the
+/// union used for hit testing.
+pub fn paint_layers(s: &Stroke) -> Result<Vec<PaintLayer>, String> {
     let mut layers = Vec::new();
     let center = if s.corners.is_empty() {
         s.clone()
@@ -587,6 +684,7 @@ pub fn paint(s: &Stroke) -> Result<Outline, String> {
             color,
             opacity: 1.,
             outline: tessellate(contours, vec![], vec![])?,
+            image: None,
         });
     }
     if let Some(color) = s.edge {
@@ -625,31 +723,17 @@ pub fn paint(s: &Stroke) -> Result<Outline, String> {
         } else {
             build(s)?
         };
-        layers.push(PaintLayer { color, opacity: 1., outline });
+        layers.push(PaintLayer { color, opacity: 1., outline, image: None });
     }
     if let Some(graph) = &s.appearance {
         let original = layers.iter().map(|layer| super::appearance::Layer {
-            color: layer.color, opacity: layer.opacity, contours: layer.outline.contours.clone(),
+            color: layer.color, opacity: layer.opacity, contours: layer.outline.contours.clone(), image: layer.image.clone(),
         }).collect::<Vec<_>>();
         layers = super::appearance::evaluate(graph, &original)?.into_iter().map(|layer| {
-            Ok(PaintLayer { color: layer.color, opacity: layer.opacity, outline: tessellate(layer.contours, vec![], vec![])? })
+            Ok(PaintLayer { color: layer.color, opacity: layer.opacity, outline: tessellate(layer.contours, vec![], vec![])?, image: layer.image })
         }).collect::<Result<Vec<_>, String>>()?;
     }
-    let contours = layers
-        .iter()
-        .flat_map(|l| l.outline.contours.clone())
-        .collect::<Vec<_>>();
-    let mut result = tessellate(
-        boolean_contours(
-            &contours,
-            &[],
-            i_overlay::core::overlay_rule::OverlayRule::Subject,
-        ),
-        samples(&center),
-        vec![],
-    )?;
-    result.layers = layers;
-    Ok(result)
+    Ok(layers)
 }
 
 pub fn nearest(stroke: &Stroke, p: Point) -> Option<(usize, f64, f64)> {
@@ -710,10 +794,21 @@ pub fn svg(doc: &Document) -> Result<String, String> {
     let mut paths = String::new();
     let mut min = Point::new(f64::INFINITY, f64::INFINITY);
     let mut max = Point::new(f64::NEG_INFINITY, f64::NEG_INFINITY);
-    for s in doc.strokes.iter().filter(|s| s.visible) {
+    for s in doc.strokes.iter().filter(|s| doc.shown(s)) {
         let rendered = paint(s)?;
         for layer in &rendered.layers {
             if layer.opacity <= 0. { continue; }
+            if let Some(img) = &layer.image {
+                min.x = min.x.min(img.x0);
+                min.y = min.y.min(img.y0);
+                max.x = max.x.max(img.x1());
+                max.y = max.y.max(img.y1());
+                paths.push_str(&format!(
+                    "  <image x=\"{:.4}\" y=\"{:.4}\" width=\"{:.4}\" height=\"{:.4}\" opacity=\"{:.6}\" preserveAspectRatio=\"none\" href=\"{}\"/>\n",
+                    img.x0, img.y0, img.x1() - img.x0, img.y1() - img.y0, layer.opacity.clamp(0., 1.), img.data_url()
+                ));
+                continue;
+            }
             let [r, g, b] = layer.color;
             paths.push_str(&format!(
                 "  <path fill=\"#{r:02x}{g:02x}{b:02x}\" fill-opacity=\"{:.6}\" fill-rule=\"nonzero\" d=\"", layer.opacity.clamp(0., 1.)
@@ -803,6 +898,49 @@ mod tests {
         assert_eq!(d, again);
     }
     #[test]
+    fn round_and_square_caps_extend_the_ends() {
+        let area = |c: &[Vec<Point>]| c.iter().map(|r| r.iter().zip(r.iter().cycle().skip(1)).map(|(a, b)| a.x * b.y - b.x * a.y).sum::<f64>() / 2.).sum::<f64>().abs();
+        let mut d = line();
+        let s = &mut d.strokes[0];
+        s.start_cap_locked = false;
+        s.end_cap_locked = false;
+        s.set_line_width(24.);
+        let butt = build(s).unwrap().contours;
+        let xs = |c: &[Vec<Point>]| c.iter().flatten().fold((f64::MAX, f64::MIN), |(lo, hi), p| (lo.min(p.x), hi.max(p.x)));
+        assert!((xs(&butt).0 - 0.).abs() < 1e-6 && (xs(&butt).1 - 200.).abs() < 1e-6);
+        s.start_cap = crate::model::Cap::Round;
+        s.end_cap = crate::model::Cap::Round;
+        let round = build(s).unwrap().contours;
+        assert!((xs(&round).0 + 12.).abs() < 0.05 && (xs(&round).1 - 212.).abs() < 0.05);
+        assert!((area(&round) - area(&butt) - std::f64::consts::PI * 144.).abs() < 6.);
+        s.start_cap = crate::model::Cap::Square;
+        s.end_cap = crate::model::Cap::Butt;
+        let square = build(s).unwrap().contours;
+        assert!((xs(&square).0 + 12.).abs() < 1e-6 && (xs(&square).1 - 200.).abs() < 1e-6);
+        assert!((area(&square) - area(&butt) - 24. * 12.).abs() < 1e-3);
+        // saved and loaded
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(json.contains("\"start_cap\":\"Square\""));
+        let back: crate::model::Document = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.strokes[0].start_cap, crate::model::Cap::Square);
+    }
+    #[test]
+    fn corner_between_two_curves_stays_a_corner() {
+        // Pen: drag (curve) → click (corner) → drag (curve) on one line.
+        let mut d = line();
+        let s = &mut d.strokes[0];
+        s.nodes[0].outgoing = Vec2::new(60., -80.);
+        let mut c = s.nodes[1].clone();
+        c.id = 99;
+        c.p = Point::new(400., 0.);
+        c.incoming = Vec2::new(-60., -80.);
+        s.nodes.push(c);
+        let arrive = s.tangent(0, 1.);
+        let leave = s.tangent(1, 0.);
+        assert!(arrive.dot(leave) < 0.99, "corner was smoothed: {arrive:?} {leave:?}");
+        assert!(build(s).is_ok());
+    }
+    #[test]
     fn corner_directions_and_subdivision_are_consistent() {
         for which in 0..3 {
             let mut d = line();
@@ -813,12 +951,13 @@ mod tests {
             if which == 2 {
                 s.nodes[1].incoming = Vec2::new(-80., -90.);
             }
-            if which != 1 {
-                assert!((s.tangent(0, 0.) - Vec2::new(1., 0.)).hypot() < 1e-6);
-            }
-            if which != 2 {
-                assert!((s.tangent(0, 1.) - Vec2::new(1., 0.)).hypot() < 1e-6);
-            }
+            // Standard Bézier: a collapsed handle aims the end tangent at the
+            // other segment's control point (Illustrator/SVG behaviour).
+            let unit = |v: Vec2| v / v.hypot();
+            let start = if which == 2 { unit(Vec2::new(120., -90.)) } else if which == 1 { unit(Vec2::new(40., 120.)) } else { Vec2::new(1., 0.) };
+            let end = if which == 1 { unit(Vec2::new(160., -120.)) } else if which == 2 { unit(Vec2::new(80., 90.)) } else { Vec2::new(1., 0.) };
+            assert!((s.tangent(0, 0.) - start).hypot() < 1e-6, "{which} start {:?}", s.tangent(0, 0.));
+            assert!((s.tangent(0, 1.) - end).hypot() < 1e-6, "{which} end {:?}", s.tangent(0, 1.));
             let old = s.clone();
             s.split(0, 0.37, 900);
             for j in 0..=100 {

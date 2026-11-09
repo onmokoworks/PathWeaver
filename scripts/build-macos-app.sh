@@ -1,42 +1,52 @@
 #!/usr/bin/env bash
-# Build an ad-hoc signed native GPUI application for this Mac.
+# Build PathWeaver.app: a Swift WKWebView host around the Vue + Tweeq UI,
+# with pathweaver-core compiled to wasm and inlined into one index.html.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 if [[ "$(uname -s)" != Darwin ]]; then echo 'This script requires macOS.' >&2; exit 1; fi
-profile=release
-build_flags=(--release)
-frontend=pathweaver-gpui
 bundle=PathWeaver
 identifier=com.onmokoworks.pathweaver
 app_dir="$PWD/dist"
+legacy=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --debug) profile=debug; build_flags=(); shift ;;
-        --legacy) frontend=threadtype-egui; bundle=PathWeaver-Legacy; identifier=com.onmokoworks.pathweaver.legacy; shift ;;
+        --debug) shift ;; # kept for compatibility; the web build is always optimized
+        --legacy) legacy=1; shift ;;
         --output-dir)
             if [[ $# -lt 2 || -z "$2" ]]; then echo '--output-dir requires a directory.' >&2; exit 2; fi
             app_dir="$2"; shift 2 ;;
-        *) echo "Usage: $0 [--debug] [--legacy] [--output-dir directory]" >&2; exit 2 ;;
+        *) echo "Usage: $0 [--legacy] [--output-dir directory]" >&2; exit 2 ;;
     esac
 done
 mkdir -p "$app_dir"
 app_dir="$(cd "$app_dir" && pwd -P)"
-if ! command -v cargo >/dev/null 2>&1; then echo 'Install Rust from https://rustup.rs first.' >&2; exit 1; fi
-app="$app_dir/$bundle.app"
-# Do not replace a binary while a user is editing in that application.
-ensure_closed() {
-    if ps -axo command= | grep -F -x "$app/Contents/MacOS/pathweaver" >/dev/null; then
+
+if [[ $legacy == 1 ]]; then
+    # egui compatibility build, unchanged.
+    export CARGO_TARGET_DIR="$PWD/threadtype-egui/target"
+    cargo build --manifest-path threadtype-egui/Cargo.toml --locked --release --bin pathweaver
+    app="$app_dir/PathWeaver-Legacy.app"
+    mkdir -p "$app/Contents/MacOS"
+    cp "$CARGO_TARGET_DIR/release/pathweaver" "$app/Contents/MacOS/pathweaver"
+    exec_name=pathweaver; identifier=com.onmokoworks.pathweaver.legacy; bundle=PathWeaver-Legacy
+else
+    app="$app_dir/$bundle.app"
+    if pgrep -f "$app/Contents/MacOS/" >/dev/null; then
         echo "Save your work and close $app before rebuilding it." >&2
         exit 1
     fi
-}
-ensure_closed
-if [[ "$frontend" == pathweaver-gpui ]]; then ./scripts/build-tweeq-ui.sh; fi
-export CARGO_TARGET_DIR="$PWD/$frontend/target"
-cargo build --manifest-path "$frontend/Cargo.toml" --locked --bin pathweaver ${build_flags[@]+"${build_flags[@]}"}
-ensure_closed
-mkdir -p "$app/Contents/MacOS"
-cp "$CARGO_TARGET_DIR/$profile/pathweaver" "$app/Contents/MacOS/pathweaver"
+    (cd pathweaver-web && { [[ -d node_modules ]] || npm ci --no-audit --no-fund; } && npm run build)
+    work="$(mktemp -d)"
+    swiftc -O -o "$work/PathWeaver" pathweaver-mac/main.swift -framework AppKit -framework WebKit
+    rm -rf "$app/Contents"
+    mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/web" "$app/Contents/Resources/Licenses"
+    cp "$work/PathWeaver" "$app/Contents/MacOS/PathWeaver"
+    cp pathweaver-web/dist/index.html "$app/Contents/Resources/web/index.html"
+    cp pathweaver-web/vendor/tweeq/LICENSE "$app/Contents/Resources/Licenses/Tweeq-MIT.txt"
+    cp pathweaver-web/vendor/icon-licenses/* "$app/Contents/Resources/Licenses/"
+    rm -rf "$work"
+    exec_name=PathWeaver
+fi
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -44,20 +54,19 @@ cat > "$app/Contents/Info.plist" <<PLIST
     <key>CFBundleName</key><string>$bundle</string>
     <key>CFBundleDisplayName</key><string>$bundle</string>
     <key>CFBundleIdentifier</key><string>$identifier</string>
-    <key>CFBundleExecutable</key><string>pathweaver</string>
+    <key>CFBundleExecutable</key><string>$exec_name</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.2.0</string>
-    <key>CFBundleVersion</key><string>2</string>
+    <key>CFBundleShortVersionString</key><string>0.3.0</string>
+    <key>CFBundleVersion</key><string>3</string>
+    <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>NSHighResolutionCapable</key><true/>
-    <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
+    <key>CFBundleDocumentTypes</key><array><dict>
+        <key>CFBundleTypeName</key><string>PathWeaver Document</string>
+        <key>CFBundleTypeRole</key><string>Editor</string>
+        <key>CFBundleTypeExtensions</key><array><string>pathweaver</string></array>
+    </dict></array>
 </dict></plist>
 PLIST
-if [[ "$frontend" == pathweaver-gpui ]]; then
-    mkdir -p "$app/Contents/Resources/Licenses"
-    cp tweeq-ui/vendor/tweeq/LICENSE "$app/Contents/Resources/Licenses/Tweeq-MIT.txt"
-    cp tweeq-ui/vendor/icon-licenses/* "$app/Contents/Resources/Licenses/"
-    cp pathweaver-gpui/THIRD_PARTY_NOTICES.md "$app/Contents/Resources/Licenses/THIRD_PARTY_NOTICES.md"
-fi
 plutil -lint "$app/Contents/Info.plist"
 codesign --force --sign - "$app"
-printf 'Built %s (%s, %s)\n' "$app" "$(uname -m)" "$profile"
+printf 'Built %s (%s)\n' "$app" "$(uname -m)"

@@ -35,6 +35,15 @@ pub enum Kind {
     Value,
     Math,
     Measure,
+    Mezzotint,
+    // Raster stage (bitmap at a resolution fixed on the node).
+    Rasterize,
+    RasterBlur,
+    Threshold,
+    Noise,
+    Trace,
+    /// A picture embedded in the document (PNG), drawn as a bitmap.
+    Image,
 }
 impl Kind {
     pub fn label(self) -> &'static str {
@@ -57,6 +66,7 @@ impl Kind {
             Self::Streak => "かすれ",
             Self::Dissolve => "エッジを溶かす",
             Self::Halftone => "ハーフトーン",
+            Self::Mezzotint => "メゾティント",
             Self::Value => "値",
             Self::Math => "計算",
             Self::Measure => "形の大きさ",
@@ -64,14 +74,33 @@ impl Kind {
             Self::Shadow => "ドロップシャドウ",
             Self::Glow => "光彩",
             Self::Blur => "ぼかし",
+            Self::Rasterize => "ラスター化",
+            Self::RasterBlur => "ラスターぼかし",
+            Self::Threshold => "しきい値",
+            Self::Noise => "ノイズ",
+            Self::Trace => "画像トレース",
+            Self::Image => "画像",
         }
+    }
+    /// Nodes that work on bitmaps.
+    pub fn is_raster(self) -> bool {
+        matches!(self, Self::Rasterize | Self::RasterBlur | Self::Threshold | Self::Noise | Self::Trace | Self::Image)
+    }
+    /// Nodes that need vector shapes: bitmaps reaching them are traced first.
+    fn needs_vector(self) -> bool {
+        matches!(
+            self,
+            Self::Rough | Self::Zigzag | Self::Pathfinder | Self::Boolean | Self::Offset | Self::Round | Self::Band
+                | Self::Pucker | Self::Simplify | Self::Streak | Self::Dissolve | Self::Halftone | Self::Mezzotint
+                | Self::Blur | Self::Shadow | Self::Glow
+        )
     }
     pub fn is_number(self) -> bool {
         matches!(self, Self::Value | Self::Math | Self::Measure)
     }
     pub fn inputs(self) -> usize {
         match self {
-            Self::Input | Self::Value | Self::Math => 0,
+            Self::Input | Self::Value | Self::Math | Self::Image => 0,
             Self::Stack | Self::Boolean => 2,
             _ => 1,
         }
@@ -221,6 +250,12 @@ pub struct Node {
     pub blur: f64,
     pub spread: f64,
     pub inner: bool,
+    /// Glow on both sides (outer and inner halo). Takes precedence over `inner`.
+    #[serde(default)]
+    pub both: bool,
+    /// Glow: keep the original shape on top (off = halo only).
+    #[serde(default = "keep_source_default")]
+    pub keep_source: bool,
     pub effect: EffectParams,
     pub operation: Operation,
     pub value: f64,
@@ -228,13 +263,28 @@ pub struct Node {
     pub b: f64,
     pub math: MathOperation,
     pub measure_height: bool,
+    /// 画像 node: the embedded picture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture: Option<Picture>,
     pub bindings: Vec<(Parameter, u64)>,
+}
+/// A picture stored inside the document (base64 PNG, at most ~4M pixels).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Picture {
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    pub png: String,
+}
+
+fn keep_source_default() -> bool {
+    true
 }
 impl Node {
     pub fn new(id: u64, kind: Kind, position: [f32; 2]) -> Self {
         let effect = EffectParams {
             amount: match kind {
-                Kind::Halftone | Kind::Dissolve => 40.,
+                Kind::Halftone | Kind::Dissolve | Kind::Mezzotint => 40.,
                 Kind::Streak => 25.,
                 Kind::Pucker | Kind::Band => 20.,
                 Kind::Simplify => 2.,
@@ -242,6 +292,7 @@ impl Node {
             },
             detail: match kind {
                 Kind::Halftone => 0.3,
+                Kind::Mezzotint => 3.,
                 Kind::Dissolve => 8.,
                 _ => 2.,
             },
@@ -255,8 +306,18 @@ impl Node {
             position,
             inputs: vec![None; kind.inputs()],
             bypass: false,
-            amount: if kind == Kind::Zigzag { 8. } else { 3. },
-            detail: 6.,
+            amount: match kind {
+                Kind::Zigzag => 8.,
+                Kind::Threshold | Kind::Trace => 0.5,
+                Kind::Image => 200.,
+                Kind::Noise => 0.3,
+                _ => 3.,
+            },
+            detail: match kind {
+                Kind::Rasterize | Kind::Noise => 2.,
+                Kind::Trace => 0.75,
+                _ => 6.,
+            },
             seed: 1,
             smooth: true,
             translation: if kind == Kind::Shadow {
@@ -274,16 +335,19 @@ impl Node {
                 [224; 3]
             },
             opacity: 1.,
-            blur: if kind == Kind::Blur { 8. } else { 0. },
-            spread: 0.,
+            blur: if matches!(kind, Kind::Blur | Kind::RasterBlur) { 8. } else { 0. },
+            spread: if kind == Kind::Trace { 1. } else { 0. },
             inner: false,
+            both: false,
+            keep_source: true,
             effect,
             operation: Operation::Union,
-            value: 10.,
+            value: if kind == Kind::Trace { 0. } else { 10. },
             a: 10.,
             b: 1.,
             math: MathOperation::Add,
             measure_height: false,
+            picture: None,
             bindings: vec![],
         }
     }
@@ -339,6 +403,35 @@ impl Node {
                 spec(Spread, "散らばり", 0., 100.),
                 spec(Seed, "シード", 0., u32::MAX as f64),
             ],
+            Kind::Mezzotint => vec![
+                spec(Amount, "密度（%）", 0., 100.),
+                spec(Detail, "粒の大きさ", 0.5, 50.),
+                spec(Angle, "線の角度", -180., 180.),
+                spec(Seed, "シード", 0., u32::MAX as f64),
+            ],
+            Kind::Rasterize => vec![spec(Detail, "解像度（px/単位）", 0.25, 8.)],
+            Kind::Image => vec![
+                spec(X, "左", -100_000., 100_000.),
+                spec(Y, "上", -100_000., 100_000.),
+                spec(Amount, "幅", 1., 1000.),
+                spec(Opacity, "不透明度", 0., 1.),
+            ],
+            Kind::RasterBlur => vec![spec(Blur, "半径", 0., 100.)],
+            Kind::Threshold => vec![
+                spec(Amount, "しきい値", 0., 1.),
+                spec(Spread, "やわらかさ", 0., 1.),
+            ],
+            Kind::Noise => vec![
+                spec(Amount, "強さ", 0., 1.),
+                spec(Detail, "粒の大きさ", 0.1, 100.),
+                spec(Seed, "シード", 0., u32::MAX as f64),
+            ],
+            Kind::Trace => vec![
+                spec(Amount, "しきい値", 0.01, 0.99),
+                spec(Detail, "許容誤差（px）", 0.1, 10.),
+                spec(Spread, "なめらかさ", 0., 4.),
+                spec(Value, "小さな粒を消す（面積）", 0., 10_000.),
+            ],
             Kind::Halftone => vec![
                 spec(Amount, "間隔", 8., 200.),
                 spec(Detail, "点の半径比", 0.05, 0.5),
@@ -358,6 +451,7 @@ impl Node {
                 | Kind::Streak
                 | Kind::Dissolve
                 | Kind::Halftone
+                | Kind::Mezzotint
         )
     }
     pub fn number(&self, key: Parameter) -> f64 {
@@ -630,6 +724,9 @@ impl Graph {
             {
                 return Err("外観ノードの設定が不正です".into());
             }
+            if n.picture.as_ref().is_some_and(|p| p.png.len() > 24_000_000 || p.name.chars().count() > 200) {
+                return Err("画像が大きすぎます".into());
+            }
             if [n.value, n.a, n.b]
                 .iter()
                 .any(|v| !v.is_finite() || v.abs() > 1e6)
@@ -691,13 +788,43 @@ impl Graph {
 pub struct Layer {
     pub color: [u8; 3],
     pub opacity: f64,
+    /// Shape rings; for a bitmap layer, the rectangle it covers.
     pub contours: Vec<Vec<Point>>,
+    /// Bitmap from the raster stage (drawn instead of filling `contours`).
+    pub image: Option<std::sync::Arc<super::raster::Image>>,
 }
 
 #[derive(Clone)]
 struct Value {
     layers: Vec<Layer>,
     number: f64,
+    /// Content key: the node's settings plus the keys of everything it reads.
+    key: u64,
+}
+
+thread_local! {
+    /// Results of recent node evaluations by content key. Editing one node
+    /// re-evaluates only that node and what follows it; unchanged upstream
+    /// work (a heavy mezzotint, blur, …) is reused across renders.
+    static MEMO: std::cell::RefCell<(HashMap<u64, Value>, usize)> = std::cell::RefCell::new((HashMap::new(), 0));
+}
+const MEMO_POINTS: usize = 3_000_000;
+
+fn layers_key(layers: &[Layer]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for l in layers {
+        l.color.hash(&mut h);
+        l.opacity.to_bits().hash(&mut h);
+        for ring in &l.contours {
+            ring.len().hash(&mut h);
+            for p in ring {
+                p.x.to_bits().hash(&mut h);
+                p.y.to_bits().hash(&mut h);
+            }
+        }
+    }
+    h.finish()
 }
 
 pub fn evaluate(graph: &Graph, original: &[Layer]) -> Result<Vec<Layer>, String> {
@@ -737,29 +864,70 @@ fn evaluate_values(
     requested: &[u64],
 ) -> Result<HashMap<u64, Value>, String> {
     graph.validate()?;
+    let original_key = layers_key(original);
+    #[allow(clippy::too_many_arguments)]
     fn visit(
         graph: &Graph,
         id: u64,
         original: &[Layer],
+        original_key: u64,
         cache: &mut HashMap<u64, Value>,
     ) -> Result<Value, String> {
+        use std::hash::{Hash, Hasher};
         if let Some(value) = cache.get(&id) {
             return Ok(value.clone());
         }
         let mut node = graph.node(id).unwrap().clone();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
         for (parameter, source) in node.bindings.clone() {
-            let value = visit(graph, source, original, cache)?.number;
+            let value = visit(graph, source, original, original_key, cache)?.number;
             node.set_number(parameter, value);
         }
         let mut inputs = Vec::new();
+        let mut input_keys = Vec::new();
         for input in &node.inputs {
-            inputs.push(match input {
-                Some(id) => visit(graph, *id, original, cache)?.layers,
-                None => vec![],
-            });
+            match input {
+                Some(id) => {
+                    let v = visit(graph, *id, original, original_key, cache)?;
+                    input_keys.push(v.key);
+                    inputs.push(v.layers);
+                }
+                None => {
+                    input_keys.push(0);
+                    inputs.push(vec![]);
+                }
+            }
+        }
+        // Key: effective settings (bound values applied; layout ignored) + inputs.
+        let mut settings = node.clone();
+        settings.position = [0., 0.];
+        settings.label.clear();
+        settings.bindings.clear();
+        settings.id = 0;
+        settings.inputs = vec![];
+        serde_json::to_string(&settings).unwrap_or_default().hash(&mut hasher);
+        input_keys.hash(&mut hasher);
+        if node.kind == Kind::Input || node.kind == Kind::Measure {
+            original_key.hash(&mut hasher);
+        }
+        let key = hasher.finish();
+        if let Some(hit) = MEMO.with(|m| m.borrow().0.get(&key).cloned()) {
+            cache.insert(id, hit.clone());
+            return Ok(hit);
+        }
+        if !node.bypass && node.kind.needs_vector() {
+            for input in &mut inputs {
+                vectorize(input)?;
+            }
         }
         let mut layers = if node.kind == Kind::Input {
             original.to_vec()
+        } else if node.kind == Kind::Image {
+            match &node.picture {
+                Some(p) if !node.bypass => vec![super::raster::picture(&p.png, node.translation[0], node.translation[1], node.amount)?
+                    .layer(node.opacity)],
+                _ => vec![],
+            }
         } else if node.kind == Kind::Stack && !node.bypass {
             inputs.clone().into_iter().flatten().collect()
         } else {
@@ -802,24 +970,67 @@ fn evaluate_values(
                         }
                         let center = min.lerp(max, 0.5);
                         let angle = node.rotation.to_radians();
-                        for p in layers
-                            .iter_mut()
-                            .flat_map(|l| l.contours.iter_mut().flatten())
-                        {
-                            let d = (*p - center) * node.scale;
-                            *p = center
-                                + Vec2::new(
-                                    d.x * angle.cos() - d.y * angle.sin() + node.translation[0],
-                                    d.x * angle.sin() + d.y * angle.cos() + node.translation[1],
-                                );
+                        let (sin, cos) = angle.sin_cos();
+                        let t = Vec2::new(node.translation[0], node.translation[1]);
+                        let forward = |p: Point| {
+                            let d = (p - center) * node.scale;
+                            center + Vec2::new(d.x * cos - d.y * sin, d.x * sin + d.y * cos) + t
+                        };
+                        let inverse = |p: Point| {
+                            let d = p - center - t;
+                            center + Vec2::new(d.x * cos + d.y * sin, -d.x * sin + d.y * cos) / node.scale
+                        };
+                        for layer in &mut layers {
+                            if let Some(img) = &layer.image {
+                                let moved = super::raster::transform(img, forward, inverse)?;
+                                *layer = moved.layer(layer.opacity);
+                            } else {
+                                for p in layer.contours.iter_mut().flatten() {
+                                    *p = forward(*p);
+                                }
+                            }
                         }
                     }
                 }
                 Kind::Fill => {
                     for layer in &mut layers {
-                        layer.color = node.color;
-                        layer.opacity *= node.opacity;
+                        if let Some(img) = &layer.image {
+                            *layer = super::raster::tint(img, node.color, 1.).layer(layer.opacity * node.opacity);
+                        } else {
+                            layer.color = node.color;
+                            layer.opacity *= node.opacity;
+                        }
                     }
+                }
+                Kind::Rasterize => {
+                    layers = super::raster::rasterize(&layers, node.detail, 0.)?
+                        .map(|img| vec![img.layer(1.)])
+                        .unwrap_or_default();
+                }
+                Kind::RasterBlur => {
+                    layers = match super::raster::as_image(&layers, 0.)? {
+                        Some(img) => vec![super::raster::blur(&img, node.blur)?.layer(1.)],
+                        None => vec![],
+                    };
+                }
+                Kind::Threshold => {
+                    layers = super::raster::as_image(&layers, 0.)?
+                        .map(|img| vec![super::raster::threshold(&img, node.amount, node.spread).layer(1.)])
+                        .unwrap_or_default();
+                }
+                Kind::Noise => {
+                    layers = super::raster::as_image(&layers, 0.)?
+                        .map(|img| vec![super::raster::noise(&img, node.amount, node.detail, node.seed).layer(1.)])
+                        .unwrap_or_default();
+                }
+                Kind::Trace => {
+                    layers = match super::raster::as_image(&layers, 0.)? {
+                        Some(img) => {
+                            let l = super::raster::trace(&img, node.amount, node.detail, node.spread.round() as usize, node.value)?;
+                            if l.contours.is_empty() { vec![] } else { vec![l] }
+                        }
+                        None => vec![],
+                    };
                 }
                 Kind::Opacity => {
                     layers = super::appearance_paint::opacity(&layers, node.opacity)?;
@@ -844,7 +1055,11 @@ fn evaluate_values(
                         node.amount,
                         node.color,
                         node.opacity,
-                        node.inner,
+                        super::appearance_paint::GlowMode {
+                            outer: node.both || !node.inner,
+                            inner: node.both || node.inner,
+                            keep_source: node.keep_source,
+                        },
                     )?;
                 }
                 Kind::Pathfinder | Kind::Boolean => {
@@ -874,6 +1089,7 @@ fn evaluate_values(
                         color: base_color,
                         opacity: base_opacity,
                         contours,
+                        image: None,
                     }];
                 }
                 kind => {
@@ -886,6 +1102,7 @@ fn evaluate_values(
                         Kind::Streak => Some(EffectKind::Streak),
                         Kind::Dissolve => Some(EffectKind::Dissolve),
                         Kind::Halftone => Some(EffectKind::Halftone),
+                        Kind::Mezzotint => Some(EffectKind::Mezzotint),
                         _ => None,
                     };
                     if let Some(kind) = effect {
@@ -944,15 +1161,39 @@ fn evaluate_values(
             }
             _ => 0.,
         };
-        let result = Value { layers, number };
+        let result = Value { layers, number, key };
         cache.insert(id, result.clone());
+        let points: usize = result.layers.iter().flat_map(|l| l.contours.iter()).map(Vec::len).sum::<usize>()
+            + result.layers.iter().filter_map(|l| l.image.as_ref()).map(|i| i.width * i.height / 4).sum::<usize>();
+        MEMO.with(|m| {
+            let mut m = m.borrow_mut();
+            if m.1 + points > MEMO_POINTS {
+                m.0.clear();
+                m.1 = 0;
+            }
+            m.1 += points;
+            m.0.insert(key, result.clone());
+        });
         Ok(result)
     }
     let mut values = HashMap::new();
     for &id in requested {
-        visit(graph, id, original, &mut values)?;
+        visit(graph, id, original, original_key, &mut values)?;
     }
     Ok(values)
+}
+
+/// Bitmaps reaching a vector-only node are traced back into shapes
+/// (threshold 0.5, half-pixel tolerance, one smoothing round).
+fn vectorize(layers: &mut [Layer]) -> Result<(), String> {
+    for layer in layers.iter_mut() {
+        if let Some(img) = layer.image.take() {
+            let mut traced = super::raster::trace(&img, 0.5, 0.5, 1, 0.)?;
+            traced.opacity = layer.opacity;
+            *layer = traced;
+        }
+    }
+    Ok(())
 }
 
 fn random(seed: u32, index: usize) -> f64 {
@@ -1052,6 +1293,109 @@ fn displace(ring: &[Point], node: &Node, salt: u32) -> Vec<Point> {
 
 #[cfg(test)]
 mod tests {
+    fn raster_chain(kinds: &[Kind]) -> (Graph, Vec<u64>) {
+        let mut g = Graph::default();
+        let mut prev = 1;
+        let mut ids = vec![];
+        for (k, kind) in kinds.iter().enumerate() {
+            let id = g.add(*kind, [100. * k as f32, 0.]).unwrap();
+            g.connect(prev, id, 0).unwrap();
+            prev = id;
+            ids.push(id);
+        }
+        g.connect(prev, g.output, 0).unwrap();
+        (g, ids)
+    }
+    fn blob() -> Vec<Layer> {
+        vec![Layer {
+            color: [30, 90, 200],
+            opacity: 1.,
+            contours: vec![vec![Point::new(0., 0.), Point::new(80., 0.), Point::new(80., 40.), Point::new(0., 40.)]],
+            image: None,
+        }]
+    }
+    #[test]
+    fn raster_chain_rasterizes_processes_and_traces_back() {
+        let (mut g, ids) = raster_chain(&[Kind::Rasterize, Kind::RasterBlur, Kind::Threshold, Kind::Trace]);
+        g.node_mut(ids[0]).unwrap().detail = 1.5;
+        g.node_mut(ids[1]).unwrap().blur = 10.;
+        let out = evaluate(&g, &blob()).unwrap();
+        assert_eq!(out.len(), 1);
+        assert!(out[0].image.is_none());
+        assert_eq!(out[0].color, [30, 90, 200]);
+        // blur + threshold 0.5 rounds the corners but keeps the size
+        let xs: Vec<f64> = out[0].contours.iter().flatten().map(|p| p.x).collect();
+        let (min, max) = xs.iter().fold((f64::MAX, f64::MIN), |(a, b), &x| (a.min(x), b.max(x)));
+        assert!((min - 0.).abs() < 2. && (max - 80.).abs() < 2., "{min}..{max}");
+        // the resolution is the node's: the intermediate bitmap is 1.5 px/unit
+        let (g2, _) = raster_chain(&[Kind::Rasterize]);
+        let mut g2 = g2;
+        let r = g2.nodes.iter().find(|n| n.kind == Kind::Rasterize).unwrap().id;
+        g2.node_mut(r).unwrap().detail = 1.5;
+        let img = evaluate(&g2, &blob()).unwrap();
+        let im = img[0].image.as_ref().unwrap();
+        assert_eq!(im.scale, 1.5);
+        assert_eq!(im.width, 120);
+    }
+    #[test]
+    fn a_bitmap_reaching_the_output_is_drawn_and_vector_nodes_trace_it_first() {
+        let (g, _) = raster_chain(&[Kind::RasterBlur]);
+        let out = evaluate(&g, &blob()).unwrap();
+        assert!(out[0].image.is_some());
+        assert_eq!(out[0].contours[0].len(), 4, "a bitmap layer carries its rectangle");
+        let (g, _) = raster_chain(&[Kind::Rasterize, Kind::Offset]);
+        let out = evaluate(&g, &blob()).unwrap();
+        assert!(out.iter().all(|l| l.image.is_none()));
+        assert!(!out[0].contours.is_empty());
+        // 色 on a bitmap recolours it, 変形 moves it
+        let (mut g, ids) = raster_chain(&[Kind::Rasterize, Kind::Fill, Kind::Transform]);
+        g.node_mut(ids[1]).unwrap().color = [255, 0, 0];
+        g.node_mut(ids[2]).unwrap().translation = [100., 0.];
+        let out = evaluate(&g, &blob()).unwrap();
+        let im = out[0].image.as_ref().unwrap();
+        assert!(im.x0 > 95.);
+        let i = (im.height / 2 * im.width + im.width / 2) * 4;
+        assert_eq!(&im.rgba[i..i + 4], &[255, 0, 0, 255]);
+    }
+    #[test]
+    fn an_embedded_picture_is_placed_by_its_node() {
+        let img = super::super::raster::rasterize(&blob(), 1., 0.).unwrap().unwrap();
+        let png = img.data_url().trim_start_matches("data:image/png;base64,").to_string();
+        let mut g = Graph::default();
+        let id = g.add(Kind::Image, [0., 0.]).unwrap();
+        {
+            let n = g.node_mut(id).unwrap();
+            n.picture = Some(Picture { name: "blob.png".into(), width: img.width as u32, height: img.height as u32, png });
+            n.translation = [50., 60.];
+            n.amount = 40.;
+        }
+        let trace = g.add(Kind::Trace, [0., 0.]).unwrap();
+        g.connect(id, trace, 0).unwrap();
+        g.connect(trace, g.output, 0).unwrap();
+        let out = evaluate(&g, &[]).unwrap();
+        let xs: Vec<f64> = out[0].contours.iter().flatten().map(|p| p.x).collect();
+        let (min, max) = xs.iter().fold((f64::MAX, f64::MIN), |(a, b), &x| (a.min(x), b.max(x)));
+        // 80-unit-wide picture placed 40 units wide at x = 50
+        assert!((min - 50.).abs() < 1.5 && (max - 90.).abs() < 1.5, "{min}..{max}");
+        assert_eq!(out[0].color, [30, 90, 200]);
+        // saved and loaded with the document
+        let json = serde_json::to_string(&g).unwrap();
+        let back: Graph = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, g);
+        // a node without a picture draws nothing
+        g.node_mut(id).unwrap().picture = None;
+        assert!(evaluate(&g, &[]).unwrap().is_empty());
+    }
+    #[test]
+    fn raster_nodes_are_memoized_and_deterministic() {
+        let (g, ids) = raster_chain(&[Kind::Rasterize, Kind::Noise, Kind::Trace]);
+        let a = evaluate(&g, &blob()).unwrap();
+        let b = evaluate(&g, &blob()).unwrap();
+        assert_eq!(a, b);
+        let mut g2 = g.clone();
+        g2.node_mut(ids[1]).unwrap().seed = 9;
+        assert_ne!(evaluate(&g2, &blob()).unwrap(), a);
+    }
     use super::*;
     fn layers() -> Vec<Layer> {
         vec![Layer {
@@ -1063,6 +1407,7 @@ mod tests {
                 Point::new(100., 100.),
                 Point::new(0., 100.),
             ]],
+            image: None,
         }]
     }
     #[test]
@@ -1220,6 +1565,32 @@ mod tests {
         assert!(!graph.same_rendering(&changed));
     }
     #[test]
+    fn memoized_results_follow_every_change() {
+        let original = layers();
+        let mut graph = Graph::default();
+        let m = graph.add(Kind::Mezzotint, [100., 0.]).unwrap();
+        let t = graph.add(Kind::Transform, [200., 0.]).unwrap();
+        graph.connect(1, m, 0).unwrap();
+        graph.connect(m, t, 0).unwrap();
+        graph.connect(t, 2, 0).unwrap();
+        let first = evaluate(&graph, &original).unwrap();
+        // upstream change → different result
+        graph.node_mut(m).unwrap().effect.seed = 7;
+        let reseeded = evaluate(&graph, &original).unwrap();
+        assert_ne!(first, reseeded);
+        // back again → identical to the first evaluation
+        graph.node_mut(m).unwrap().effect.seed = 1;
+        assert_eq!(first, evaluate(&graph, &original).unwrap());
+        // downstream change → moved copy of the same grains
+        graph.node_mut(t).unwrap().translation = [10., 0.];
+        let moved = evaluate(&graph, &original).unwrap();
+        assert_eq!(moved[0].contours[0][0].x, first[0].contours[0][0].x + 10.);
+        // a different source shape never reuses the old grains
+        let mut other = original.clone();
+        other[0].contours[0][1].x += 50.;
+        assert_ne!(evaluate(&graph, &other).unwrap(), moved);
+    }
+    #[test]
     fn all_visual_node_kinds_render_finite_and_roundtrip_without_mutating_source() {
         let original = layers();
         for kind in [
@@ -1239,6 +1610,7 @@ mod tests {
             Kind::Streak,
             Kind::Dissolve,
             Kind::Halftone,
+            Kind::Mezzotint,
             Kind::Opacity,
             Kind::Shadow,
             Kind::Glow,

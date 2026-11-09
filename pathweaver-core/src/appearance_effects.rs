@@ -20,6 +20,7 @@ pub enum EffectKind {
     Streak,
     Dissolve,
     Halftone,
+    Mezzotint,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,6 +39,14 @@ pub enum BandPosition {
     Center,
 }
 
+/// Grain of the mezzotint: round dots or short strokes along `angle`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Grain {
+    #[default]
+    Dots,
+    Lines,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EffectParams {
@@ -48,6 +57,7 @@ pub struct EffectParams {
     pub seed: u32,
     pub join: OffsetJoin,
     pub position: BandPosition,
+    pub grain: Grain,
 }
 
 impl Default for EffectParams {
@@ -60,6 +70,7 @@ impl Default for EffectParams {
             seed: 1,
             join: OffsetJoin::Round,
             position: BandPosition::Outer,
+            grain: Grain::Dots,
         }
     }
 }
@@ -98,6 +109,29 @@ fn normalized(contours: &[Vec<Point>]) -> Vec<Vec<Point>> {
 /// Signed silhouette offset. A positive distance expands filled regions and
 /// shrinks holes. Negative offsets remove a boundary band, so narrow regions
 /// disappear instead of turning inside out after erosion.
+/// One positive filled piece of an offset band (strip or join).
+fn add_piece(band: &mut Vec<Vec<Point>>, total_points: &mut usize, mut polygon: Vec<Point>) -> Result<(), String> {
+    let area = polygon
+        .iter()
+        .zip(polygon.iter().cycle().skip(1))
+        .map(|(a, b)| a.x * b.y - b.x * a.y)
+        .sum::<f64>();
+    if area.abs() < 1e-12 {
+        return Ok(());
+    }
+    // Each strip/join is a positive filled primitive. Opposite source
+    // contour winding must never cancel overlapping stroke pieces.
+    if area < 0. {
+        polygon.reverse();
+    }
+    *total_points += polygon.len();
+    if *total_points > MAX_POINTS * 4 {
+        return Err("オフセットの輪郭が複雑すぎます".into());
+    }
+    band.push(polygon);
+    Ok(())
+}
+
 pub fn offset_contours(
     contours: &[Vec<Point>],
     distance: f64,
@@ -110,35 +144,27 @@ pub fn offset_contours(
     if distance.abs() < 1e-8 || contours.is_empty() {
         return Ok(contours.to_vec());
     }
-    let base = normalized(contours);
+    // Drop sub-pixel detail first (0.2 units ≈ invisible). Offsets of offsets
+    // (blur bands, glow) otherwise turn every micro segment into a strip and
+    // the union below explodes (minutes for Rough → Glow).
+    let mut budget = 2_000_000;
+    let simplified: Vec<Vec<Point>> = contours
+        .iter()
+        .map(|ring| simplify(ring, 0.2, &mut budget))
+        .collect::<Result<_, _>>()?;
+    let base = normalized(&simplified);
     let radius = distance.abs();
-    let mut band = Vec::new();
+    let mut band: Vec<Vec<Point>> = Vec::new();
     let mut total_points = 0;
-    let mut add = |mut polygon: Vec<Point>| -> Result<(), String> {
-        let area = polygon
-            .iter()
-            .zip(polygon.iter().cycle().skip(1))
-            .map(|(a, b)| a.x * b.y - b.x * a.y)
-            .sum::<f64>();
-        if area.abs() < 1e-12 {
-            return Ok(());
-        }
-        // Each strip/join is a positive filled primitive. Opposite source
-        // contour winding must never cancel overlapping stroke pieces.
-        if area < 0. {
-            polygon.reverse();
-        }
-        total_points += polygon.len();
-        if total_points > MAX_POINTS {
-            return Err("オフセットの輪郭が複雑すぎます".into());
-        }
-        band.push(polygon);
-        Ok(())
-    };
+    // Strips and joins are merged per ring first. Many small rings (mezzotint
+    // grains, halftone dots) otherwise feed tens of thousands of overlapping
+    // pieces into one union, which took tens of seconds.
+    let mut merged: Vec<Vec<Point>> = Vec::new();
     for ring in &base {
         if ring.len() < 3 {
             continue;
         }
+        let first_piece = band.len();
         for i in 0..ring.len() {
             let p = ring[i];
             let previous = ring[(i + ring.len() - 1) % ring.len()];
@@ -152,7 +178,7 @@ pub fn offset_contours(
             }
             let outgoing = outgoing / out_length;
             let right = Vec2::new(outgoing.y, -outgoing.x) * radius;
-            add(vec![p + right, next + right, next - right, p - right])?;
+            add_piece(&mut band, &mut total_points, vec![p + right, next + right, next - right, p - right])?;
             if in_length < 1e-10 {
                 continue;
             }
@@ -163,39 +189,49 @@ pub fn offset_contours(
                 continue;
             }
             let before = Vec2::new(incoming.y, -incoming.x) * radius;
-            for side in [-1., 1.] {
+            // Only the outer side of a turn opens a gap between neighbouring
+            // strips (the right side of a left turn and vice versa); the inner
+            // side is already covered. Filling both doubled the work.
+            let outer = if turn > 0. { 1. } else { -1. };
+            for side in [outer] {
                 let a = p + before * side;
                 let b = p + right * side;
                 match join {
                     OffsetJoin::Round => {
                         let start = (a.y - p.y).atan2(a.x - p.x);
-                        let count = (turn.abs() * radius / 0.5).ceil().clamp(2., 128.) as usize;
+                        // Segments from a 0.25 px chord tolerance instead of one per
+                        // half unit of arc length (up to 128): same look, far fewer
+                        // points for the union below.
+                        let step = 2. * (1. - (0.25 / radius).min(1.)).acos();
+                        let count = (turn.abs() / step.max(0.05)).ceil().clamp(1., 64.) as usize;
                         let mut sector = Vec::with_capacity(count + 2);
                         sector.push(p);
                         for j in 0..=count {
                             let angle = start + turn * j as f64 / count as f64;
                             sector.push(p + Vec2::new(angle.cos(), angle.sin()) * radius);
                         }
-                        add(sector)?;
+                        add_piece(&mut band, &mut total_points, sector)?;
                     }
                     OffsetJoin::Miter if cross.abs() > 1e-8 => {
                         let delta = b - a;
                         let t = (delta.x * outgoing.y - delta.y * outgoing.x) / cross;
                         let miter = a + incoming * t;
                         if miter.distance(p) <= radius * 10. {
-                            add(vec![p, a, miter, b])?;
+                            add_piece(&mut band, &mut total_points, vec![p, a, miter, b])?;
                         } else {
-                            add(vec![p, a, b])?;
+                            add_piece(&mut band, &mut total_points, vec![p, a, b])?;
                         }
                     }
-                    _ => add(vec![p, a, b])?,
+                    _ => add_piece(&mut band, &mut total_points, vec![p, a, b])?,
                 }
             }
         }
+        merged.extend(boolean_contours(&band[first_piece..], &[], OverlayRule::Subject));
+        band.truncate(first_piece);
     }
     let output = boolean_contours(
         &base,
-        &band,
+        &merged,
         if distance > 0. {
             OverlayRule::Union
         } else {
@@ -217,9 +253,13 @@ fn bounds(contours: &[Vec<Point>]) -> Option<Rect> {
 }
 
 fn circle(center: Point, radius: f64) -> Vec<Point> {
-    (0..12)
+    polygon(center, radius, 12)
+}
+/// Regular polygon; small grains need fewer sides than dots or bites.
+fn polygon(center: Point, radius: f64, sides: usize) -> Vec<Point> {
+    (0..sides)
         .map(|i| {
-            let angle = i as f64 * std::f64::consts::TAU / 12.;
+            let angle = i as f64 * std::f64::consts::TAU / sides as f64;
             center + Vec2::new(angle.cos(), angle.sin()) * radius
         })
         .collect()
@@ -488,10 +528,57 @@ pub fn apply_with_params(
             }
             boolean_contours(&dots, contours, OverlayRule::Intersect)
         }
+        EffectKind::Mezzotint => {
+            // Random grains scattered over the bounds, kept only inside the shape.
+            if !(0. ..=100.).contains(&amount) || !(0.1..=200.).contains(&params.detail) {
+                return Err("メゾティントの密度または粒の大きさが範囲外です".into());
+            }
+            if amount == 0. {
+                return Ok(vec![]);
+            }
+            let Some(bounds) = bounds(contours) else {
+                return Ok(vec![]);
+            };
+            let size = params.detail;
+            let (grain_area, reach) = match params.grain {
+                Grain::Dots => (std::f64::consts::PI * size * size * 0.42, size),
+                Grain::Lines => (size * 6. * size * 0.5, size * 3.5),
+            };
+            let area = bounds.width().max(size) * bounds.height().max(size);
+            let wanted = amount / 100. * area / grain_area.max(1e-6);
+            if wanted > MEZZOTINT_MAX as f64 * 4. {
+                return Err("メゾティントの粒が多すぎます。粒を大きくするか密度を下げてください".into());
+            }
+            let count = (wanted.round() as usize).min(MEZZOTINT_MAX);
+            let mut random = Random(params.seed.wrapping_mul(2_654_435_761).wrapping_add(17));
+            let base = params.angle.to_radians();
+            let mut grains = Vec::with_capacity(count);
+            for _ in 0..count {
+                let p = Point::new(
+                    bounds.x0 - reach + random.next() * (bounds.width() + reach * 2.),
+                    bounds.y0 - reach + random.next() * (bounds.height() + reach * 2.),
+                );
+                let scale = 0.55 + random.next() * 0.9;
+                grains.push(match params.grain {
+                    Grain::Dots => polygon(p, size * 0.5 * scale, if size < 6. { 8 } else { 12 }),
+                    Grain::Lines => {
+                        let a = base + (random.next() - 0.5) * 0.35;
+                        let along = Vec2::new(a.cos(), a.sin()) * (size * 3. * scale);
+                        let across = Vec2::new(-a.sin(), a.cos()) * (size * 0.25 * scale);
+                        vec![p - along - across, p + along - across, p + along + across, p - along + across]
+                    }
+                });
+            }
+            boolean_contours(&grains, contours, OverlayRule::Intersect)
+        }
     };
     validate_contours(&output)?;
     Ok(output)
 }
+
+/// Upper bound on generated grains (each dot is 12 vertices; stays well
+/// under MAX_POINTS after clipping).
+const MEZZOTINT_MAX: usize = 4000;
 
 #[cfg(test)]
 mod tests {
@@ -579,6 +666,29 @@ mod tests {
             assert_ne!(a, c);
             assert!(area(&a) < area(&source));
         }
+    }
+    #[test]
+    fn mezzotint_grains_stay_inside_and_follow_density_and_seed() {
+        let source = donut();
+        let p = |amount: f64, seed: u32, grain: Grain| EffectParams {
+            amount, detail: 3., angle: 30., seed, grain, ..Default::default()
+        };
+        let sparse = apply_with_params(EffectKind::Mezzotint, &source, &p(15., 1, Grain::Dots)).unwrap();
+        let dense = apply_with_params(EffectKind::Mezzotint, &source, &p(60., 1, Grain::Dots)).unwrap();
+        // clipped to the shape, never filling the donut's hole
+        assert!(boolean_contours(&dense, &source, OverlayRule::Difference).is_empty());
+        assert!(area(&sparse) > 0. && area(&sparse) < area(&dense) && area(&dense) < area(&source));
+        // deterministic per seed, different across seeds
+        assert_eq!(sparse, apply_with_params(EffectKind::Mezzotint, &source, &p(15., 1, Grain::Dots)).unwrap());
+        assert_ne!(sparse, apply_with_params(EffectKind::Mezzotint, &source, &p(15., 2, Grain::Dots)).unwrap());
+        // line grains also stay inside
+        let lines = apply_with_params(EffectKind::Mezzotint, &source, &p(40., 1, Grain::Lines)).unwrap();
+        assert!(area(&lines) > 0.);
+        assert!(boolean_contours(&lines, &source, OverlayRule::Difference).is_empty());
+        // zero density = nothing; absurd grain count is refused, not hung
+        assert!(apply_with_params(EffectKind::Mezzotint, &source, &p(0., 1, Grain::Dots)).unwrap().is_empty());
+        let tiny = EffectParams { amount: 100., detail: 0.1, ..Default::default() };
+        assert!(apply_with_params(EffectKind::Mezzotint, &vec![square(0., 0., 5000.)], &tiny).is_err());
     }
     #[test]
     fn halftone_is_clipped_to_source_and_never_fills_holes() {
