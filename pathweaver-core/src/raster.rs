@@ -411,6 +411,21 @@ fn map_alpha(img: &Image, mut f: impl FnMut(usize, usize, f32) -> f32) -> Image 
     Image::new(img.x0, img.y0, img.scale, img.width, img.height, out)
 }
 
+/// Darkness on white paper as black ink: ink = 1 − luminance of the image
+/// composited over white. White (or empty) is no ink, black is full ink, so a
+/// white shape stacked over a dark one erases it.
+pub fn ink(img: &Image) -> Image {
+    let mut out = vec![0u8; img.rgba.len()];
+    for (o, p) in out.chunks_exact_mut(4).zip(img.rgba.chunks_exact(4)) {
+        let a = p[3] as f32 / 255.;
+        // premultiplied colour over white
+        let [r, g, b] = [0, 1, 2].map(|k| p[k] as f32 / 255. + (1. - a));
+        let lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        o[3] = ((1. - lum).clamp(0., 1.) * 255.).round() as u8;
+    }
+    Image::new(img.x0, img.y0, img.scale, img.width, img.height, out).with_soft(img.soft)
+}
+
 /// Hard (or soft) edge: alpha below `level` disappears, above becomes opaque.
 pub fn threshold(img: &Image, level: f64, softness: f64) -> Image {
     let lo = (level - softness * 0.5) as f32;
@@ -977,6 +992,17 @@ mod tests {
         }).sum::<f64>().abs()
     }
 
+    #[test]
+    fn ink_is_darkness_on_white_paper() {
+        // white, black, mid grey, transparent (premultiplied RGBA)
+        let px = [255, 255, 255, 255, 0, 0, 0, 255, 128, 128, 128, 255, 0, 0, 0, 0];
+        let img = Image::new(0., 0., 1., 4, 1, px.to_vec());
+        let a: Vec<u8> = ink(&img).rgba.chunks_exact(4).map(|p| p[3]).collect();
+        assert_eq!(a[0], 0, "white is no ink");
+        assert_eq!(a[1], 255, "black is full ink");
+        assert!((120..=135).contains(&a[2]), "grey is half ink: {}", a[2]);
+        assert_eq!(a[3], 0, "empty is no ink");
+    }
     #[test]
     fn rasterize_covers_the_shape_with_antialiased_edges() {
         let img = rasterize(&[square(0.25, 0., 10.)], 2., 1.).unwrap().unwrap();

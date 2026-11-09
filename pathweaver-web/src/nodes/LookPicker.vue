@@ -6,7 +6,7 @@
 import {computed, nextTick, onBeforeUnmount, ref} from 'vue'
 import type {Editor} from '../core/editor'
 import type {Stroke} from '../core/types'
-import {linkLook, lookOf, looks, makeSingleUser, newLook, unlinkLook, useSet} from '../core/looks'
+import {BUILTIN_SETS, linkLook, lookOf, looks, makeSingleUser, newLook, unlinkLook, useBuiltin, useSet} from '../core/looks'
 import {Icon} from '../../vendor/tweeq/src/Icon'
 import {vTooltip} from '../../vendor/tweeq/src/Tooltip'
 
@@ -37,6 +37,7 @@ function pick(key: string) {
   close()
 }
 function pickSet(name: string) { useSet(ed, props.stroke, name); close() }
+function pickBuiltin(name: string) { useBuiltin(ed, props.stroke, name); close() }
 function deleteSet(name: string) { ed.edit(d => { d.appearance_presets = d.appearance_presets.filter(p => p.name !== name) }) }
 function saveSet() {
   const g = props.stroke.appearance
@@ -116,6 +117,12 @@ const pathNames = (users: Stroke[]) => users.map(s => s.name).join('、')
             <button type="button" class="label" :data-set="n" @click="pickSet(n)">{{ n }}</button>
             <button type="button" class="del" :aria-label="`セット「${n}」を削除`" title="削除" @click="deleteSet(n)"><Icon icon="material-symbols:close" /></button>
           </div>
+        </template>
+        <template v-if="BUILTIN_SETS.some(b => match(b.name))">
+          <div class="group">用意されたセット</div>
+          <button v-for="b in BUILTIN_SETS.filter(v => match(v.name))" :key="b.name" type="button" class="row" :data-builtin="b.name" :title="b.hint" @click="pickBuiltin(b.name)">
+            <span class="label">{{ b.name }}</span>
+          </button>
         </template>
       </div>
       <button v-if="mine" type="button" class="save" @click="saveSet">

@@ -262,6 +262,10 @@ pub struct Node {
     pub b: f64,
     pub math: MathOperation,
     pub measure_height: bool,
+    /// ノイズ・しきい値・画像トレース: judge by darkness on white paper (ink)
+    /// instead of alpha, so a white shape stacked on top erases ink.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub by_darkness: bool,
     /// 画像 node: the embedded picture.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub picture: Option<Picture>,
@@ -346,6 +350,7 @@ impl Node {
             b: 1.,
             math: MathOperation::Add,
             measure_height: false,
+            by_darkness: false,
             picture: None,
             bindings: vec![],
         }
@@ -1027,16 +1032,18 @@ fn evaluate_values(
                 }
                 Kind::Threshold => {
                     layers = super::raster::as_image(&layers, 0.)?
+                        .map(|img| if node.by_darkness { super::raster::ink(&img) } else { img })
                         .map(|img| vec![super::raster::threshold(&img, node.amount, node.spread).layer(1.)])
                         .unwrap_or_default();
                 }
                 Kind::Noise => {
                     layers = super::raster::as_image(&layers, 0.)?
+                        .map(|img| if node.by_darkness { super::raster::ink(&img) } else { img })
                         .map(|img| { let soft = img.soft; vec![super::raster::noise(&img, node.amount, node.detail, node.seed).with_soft(soft).layer(1.)] })
                         .unwrap_or_default();
                 }
                 Kind::Trace => {
-                    layers = match super::raster::as_image(&layers, 0.)? {
+                    layers = match super::raster::as_image(&layers, 0.)?.map(|img| if node.by_darkness { super::raster::ink(&img) } else { img }) {
                         Some(img) => {
                             let l = super::raster::trace(&img, node.amount, node.detail, node.spread.round() as usize, node.value)?;
                             if l.contours.is_empty() { vec![] } else { vec![l] }
@@ -1509,6 +1516,31 @@ mod tests {
         assert_eq!(input, evaluate(&graph, &input).unwrap());
         graph.enabled = false;
         assert_eq!(input, evaluate(&graph, &input).unwrap());
+    }
+    #[test]
+    fn stamp_recipe_inner_glow_then_threshold_by_darkness_leaves_the_middle_open() {
+        // wkwkdesign's stamp: light grey shape, black inner glow, then 2 tones
+        // by darkness: the dark rim stays as ink, the light middle opens up.
+        let square = vec![Layer { color: [221; 3], opacity: 1., contours: vec![vec![
+            Point::new(0., 0.), Point::new(100., 0.), Point::new(100., 100.), Point::new(0., 100.)]], image: None }];
+        let mut g = Graph::default();
+        let glow = g.add(Kind::Glow, [0., 0.]).unwrap();
+        { let n = g.node_mut(glow).unwrap(); n.inner = true; n.color = [0; 3]; n.amount = 20.; n.opacity = 1.; }
+        let th = g.add(Kind::Threshold, [0., 0.]).unwrap();
+        g.node_mut(th).unwrap().by_darkness = true;
+        g.connect(1, glow, 0).unwrap();
+        g.connect(glow, th, 0).unwrap();
+        g.connect(th, g.output, 0).unwrap();
+        let out = evaluate(&g, &square).unwrap();
+        let img = out[0].image.as_ref().unwrap();
+        let alpha = |x: f64, y: f64| img.rgba[(((y - img.y0) * img.scale) as usize * img.width + ((x - img.x0) * img.scale) as usize) * 4 + 3];
+        assert_eq!(alpha(50., 50.), 0, "light middle is open");
+        assert_eq!(alpha(2., 50.), 255, "dark rim is ink");
+        // by alpha (the old way) the whole opaque square is ink
+        g.node_mut(th).unwrap().by_darkness = false;
+        let out = evaluate(&g, &square).unwrap();
+        let img = out[0].image.as_ref().unwrap();
+        assert_eq!(img.rgba[((50. - img.y0) * img.scale) as usize * img.width * 4 + ((50. - img.x0) * img.scale) as usize * 4 + 3], 255);
     }
     #[test]
     fn glow_light_passes_shape_nodes_untouched_and_follows_transforms() {

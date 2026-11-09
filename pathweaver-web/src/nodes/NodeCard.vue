@@ -117,6 +117,13 @@ function fmt(v: number | undefined) {
       <InputCheckbox :model-value="node.keep_source !== false" @update:model-value="v => { emit('set', n => { n.keep_source = v }); emit('commit') }" />
       <span>元の形を残す</span>
     </label>
+    <div v-if="node.kind === 'Noise' || node.kind === 'Threshold' || node.kind === 'Trace'" class="row" data-nodrag>
+      <span class="label" title="不透明度：色に関係なく、描かれている所すべて。暗さ：白い紙に置いたときの暗さ（上に重ねた白はインクを消す）">判定</span>
+      <CycleSelect
+        class="grow" :model-value="node.by_darkness ? 'dark' : 'alpha'" :options="['alpha', 'dark']" :labels="['不透明度', '暗さ']" aria-label="判定"
+        @update:model-value="v => { emit('set', n => { n.by_darkness = v === 'dark' }); emit('commit') }"
+      />
+    </div>
     <label v-if="node.kind === 'Measure'" class="row check" data-nodrag>
       <InputCheckbox :model-value="node.measure_height" @update:model-value="v => { emit('set', n => { n.measure_height = v }); emit('commit') }" />
       <span>高さを計測</span>

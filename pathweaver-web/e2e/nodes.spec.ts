@@ -671,3 +671,23 @@ test('N-01 Ctrl+Shift+click a node makes it the final output; again puts the old
   await expect(page.getByTestId('status')).toContainText('最終出力にできません')
   expect(errors).toEqual([])
 })
+
+test('built-in スタンプ set (wkwkdesign recipe): picked from the appearance list, renders without errors; 判定 switches to 暗さ', async ({page}) => {
+  const errors = await boot(page)
+  await pen(page, [{p: {x: 0, y: 100}}, {p: {x: 300, y: 100}}])
+  await page.getByTestId('look-browse').click()
+  await page.locator('[data-builtin="スタンプ"]').click()
+  const g = await graph(page)
+  expect(g.nodes.map((n: any) => n.kind)).toEqual(['Input', 'Output', 'Fill', 'Glow', 'Noise', 'RasterBlur', 'Threshold', 'Trace', 'Rough', 'Fill'])
+  expect(g.nodes.find((n: any) => n.kind === 'Noise').by_darkness).toBe(true)
+  await page.waitForFunction(() => { const {ed} = (window as any).__pw; const r = ed.renders.get(ed.doc.strokes[0].id); return ed.renderPending === 0 && r && !r.stale }, null, {timeout: 30000})
+  const r = await page.evaluate(() => { const {ed} = (window as any).__pw; const r = ed.renders.get(ed.doc.strokes[0].id); return {n: r.layers.length, err: r.error ?? '', color: r.layers[0]?.color} })
+  expect(r.err).toBe('')
+  expect(r.n).toBeGreaterThan(0)
+  expect(r.color).toBe('#c82828')
+  // the 判定 control on the しきい値 node
+  const th = g.nodes.find((n: any) => n.kind === 'Threshold')
+  await page.locator(`[data-node="${th.id}"] [aria-label="判定 次へ"]`).click()
+  expect((await graph(page)).nodes.find((n: any) => n.id === th.id).by_darkness).toBe(true)
+  expect(errors).toEqual([])
+})

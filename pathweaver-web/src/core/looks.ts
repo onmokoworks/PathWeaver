@@ -96,3 +96,44 @@ export function useSet(ed: Editor, target: Stroke, name: string) {
   if (!p) return
   ed.edit(() => { target.appearance = {...copy(p.graph), shared: null, name} })
 }
+
+// ---- sets that come with the app ----
+type NodeSetup = [kind: string, set?: (n: Record<string, unknown>) => void]
+/** A chain Input → … → Output built from fresh nodes. */
+function chainGraph(name: string, steps: NodeSetup[]): Graph {
+  let g = call<Graph>('graphDefault')
+  g.name = name
+  let prev = 1
+  steps.forEach(([kind, set], i) => {
+    const n = call<Record<string, unknown>>('nodeNew', {kind, id: 10 + i, position: [80 + (i + 1) * 230, 90 + (i % 2) * 40]})
+    set?.(n)
+    g.nodes.push(n as never)
+    g = call<Graph>('graphConnect', {graph: g, from: prev, to: 10 + i, port: 0})
+    prev = 10 + i
+  })
+  const out = g.nodes.find(n => n.kind === 'Output')!
+  out.position = [80 + (steps.length + 1) * 230, 90]
+  return call<Graph>('graphConnect', {graph: g, from: prev, to: g.output, port: 0})
+}
+export const BUILTIN_SETS: {name: string; hint: string; make: () => Graph}[] = [
+  {
+    // wkwkdesign: 光彩（内側）→ メゾティント → スタンプ → 画像トレース → ラフ
+    name: 'スタンプ', hint: 'ハンコを押したようなかすれとにじみ（光彩→ノイズ→しきい値→トレース→ラフ）',
+    make: () => chainGraph('スタンプ', [
+      ['Fill', n => { n.color = [221, 221, 221] }],
+      ['Glow', n => { n.inner = true; n.color = [0, 0, 0]; n.opacity = 1; n.amount = 26 }],
+      ['Noise', n => { n.by_darkness = true; n.amount = 0.5; n.detail = 1; n.seed = 3 }],
+      ['RasterBlur', n => { n.blur = 0.6 }],
+      ['Threshold', n => { n.amount = 0.42; n.spread = 0 }],
+      ['Trace', n => { n.amount = 0.5; n.detail = 0.5; n.value = 2 }],
+      ['Rough', n => { n.amount = 1; n.detail = 30; n.smooth = true }],
+      ['Fill', n => { n.color = [200, 40, 40] }],
+    ]),
+  },
+]
+export function useBuiltin(ed: Editor, target: Stroke, name: string) {
+  const b = BUILTIN_SETS.find(v => v.name === name)
+  if (!b) return
+  ed.edit(d => { const g = b.make(); g.name = freshName(d, b.name); target.appearance = g })
+  ed.status = `「${b.name}」をかけました（ノードで調整できます）`
+}

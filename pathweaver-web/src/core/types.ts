@@ -69,6 +69,8 @@ export interface GraphNode {
   inner: boolean
   both?: boolean
   keep_source?: boolean
+  /** ノイズ・しきい値・画像トレース: judge by darkness on white (ink), not alpha. */
+  by_darkness?: boolean
   picture?: Picture | null
   operation: 'Union' | 'Difference' | 'Intersect' | 'Xor'
   math: string
