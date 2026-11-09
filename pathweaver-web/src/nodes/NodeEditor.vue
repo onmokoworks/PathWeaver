@@ -10,6 +10,7 @@ import InputString from '../../vendor/tweeq/src/InputString/InputString.vue'
 import InputCheckbox from '../../vendor/tweeq/src/InputCheckbox/InputCheckbox.vue'
 import InputDropdown from '../../vendor/tweeq/src/InputDropdown/InputDropdown.vue'
 import {vTooltip} from '../../vendor/tweeq/src/Tooltip'
+import {Icon} from '../../vendor/tweeq/src/Icon'
 import type {Editor} from '../core/editor'
 import {call} from '../core/wasm'
 import type {Graph, GraphNode, NodeKind, ParamKey, Picture, Stroke, Vec2} from '../core/types'
@@ -19,7 +20,7 @@ import {gestureZoom, settings, wheelZoom} from '../core/settings'
 import {renderBounds} from '../canvas/geometry'
 import NodeCard from './NodeCard.vue'
 import AddMenu from './AddMenu.vue'
-import {hasOutput, kindInfo, nodeInfo, outputsNumber} from './catalog'
+import {fitsLink, hasOutput, kindInfo, nodeInfo, outputsNumber} from './catalog'
 
 const props = defineProps<{ed: Editor}>()
 const ed = props.ed
@@ -140,6 +141,43 @@ function enableNodes() {
   if (!s) return
   ed.edit(() => { s.appearance = call<Graph>('graphDefault') })
   nextTick(fit)
+}
+/** Start a path's appearance from the node you want, not from an empty
+ *  graph: Input → (picked node) → Output, as one undo step. */
+function startWith(kind: NodeKind) {
+  const s = stroke.value
+  if (!s) return
+  menu.value = null
+  const g = call<Graph>('graphDefault')
+  const input = g.nodes.find(n => n.kind === 'Input')!
+  const output = g.nodes.find(n => n.kind === 'Output')!
+  const id = Math.max(...g.nodes.map(n => n.id)) + 1
+  const n = call<GraphNode>('nodeNew', {kind, id, position: [Math.round((input.position[0] + output.position[0]) / 2 - 100), input.position[1]]})
+  g.nodes.push(n)
+  if (!kindInfo(kind).number) {
+    // a filter goes between Input and Output; a source (画像) feeds Output
+    const before = output.inputs[0]
+    if (n.inputs.length) n.inputs[0] = input.id
+    output.inputs[0] = id
+    try { call('graphValidate', {graph: g}) } catch { output.inputs[0] = before; if (n.inputs.length) n.inputs[0] = null }
+  }
+  ed.edit(() => { s.appearance = g })
+  ed.selectedNodes = [id]
+  ed.status = `「${nodeInfo(n).label}」から外観ノードを始めました`
+  nextTick(() => { measure(); fit() })
+}
+function onPick(kind: NodeKind) {
+  const m = menu.value
+  if (!m) return
+  if (!graph.value) startWith(kind)
+  else addNode(kind, m.world, m.screen, {link: m.link})
+}
+/** The same add menu, opened from a button (header / empty state). */
+function openMenuAt(e: MouseEvent) {
+  const r = root.value!.getBoundingClientRect()
+  const b = (e.currentTarget as HTMLElement).getBoundingClientRect()
+  const screen = {x: b.left - r.left, y: b.bottom - r.top + 4}
+  menu.value = {screen, world: toWorld(screen)}
 }
 
 // Parameter edits: one gesture per focus → commit.
@@ -812,8 +850,8 @@ function key(e: KeyboardEvent): boolean {
     ed.selectedNodes = []
     return true
   }
+  if (k === 'a' && e.shiftKey && stroke.value) { menu.value = {screen: lastPointer, world: toWorld(lastPointer)}; return true }
   if (!graph.value) return false
-  if (k === 'a' && e.shiftKey) { menu.value = {screen: lastPointer, world: toWorld(lastPointer)}; return true }
   if (k === 'enter' && drag.value?.kind === 'grab') { confirmGrab(); return true }
   if (k === 'x' && e.ctrlKey) { dissolveSelected(); return true }
   if (k === 'g' && !e.metaKey && !e.ctrlKey && ed.selectedNodes.length) { startGrab(ed.selectedNodes, lastPointer, false); return true }
@@ -824,7 +862,13 @@ function key(e: KeyboardEvent): boolean {
   return false
 }
 function trackPointer(e: PointerEvent) { lastPointer = localOf(e); pointerInside.value = true }
-defineExpose({key, isPointerInside: () => pointerInside.value, setSpace: (v: boolean) => { spaceHeld = v }, fit})
+/** Open the add menu in the middle of the editor (from the property panel). */
+function openMenu() {
+  const r = root.value
+  const screen = {x: Math.max(8, (r?.clientWidth ?? 400) / 2 - 100), y: Math.max(8, (r?.clientHeight ?? 300) / 2 - 80)}
+  menu.value = {screen, world: toWorld(screen)}
+}
+defineExpose({key, isPointerInside: () => pointerInside.value, setSpace: (v: boolean) => { spaceHeld = v }, fit, openMenu})
 
 const pendingWire = computed(() => {
   const d = drag.value
@@ -900,7 +944,11 @@ void kindInfo
     <div v-if="!stroke" class="empty">パスを選択すると、その外観ノードを編集できます</div>
     <div v-else-if="!graph" class="empty">
       <p>「{{ stroke.name }}」は外観ノードを使っていません</p>
-      <InputButton icon="material-symbols:account-tree-outline" label="ノードで外観を作る" @click="enableNodes" />
+      <div class="start">
+        <InputButton icon="material-symbols:add" label="ノードを追加…" data-testid="start-with-node" @click="openMenuAt" />
+        <InputButton subtle icon="material-symbols:account-tree-outline" label="入力と出力だけで始める" @click="enableNodes" />
+      </div>
+      <p class="mute">Shift＋A でも追加できます</p>
     </div>
     <template v-else>
       <div ref="layer" class="layer" :style="{transform: `translate(${view.panX}px, ${view.panY}px) scale(${view.zoom})`}">
@@ -923,6 +971,10 @@ void kindInfo
         />
       </div>
       <div class="hud" data-testid="node-bar" @pointerdown.stop @wheel.stop @dblclick.stop>
+        <button type="button" class="add" data-testid="node-add" aria-haspopup="menu" title="ノードを追加（Shift＋A）" @click="openMenuAt">
+          <Icon icon="material-symbols:add" />追加
+        </button>
+        <span class="sep" />
         <span class="target" :title="`編集中のパス：${stroke.name}`">{{ stroke.name }}</span>
         <InputCheckbox v-tooltip="'外観ノードを使う（オフで元の見た目）'" :model-value="graph.enabled" aria-label="外観ノードを使う" @update:model-value="v => mutate(g => { g.enabled = v })" />
         <span class="sep" />
@@ -937,12 +989,13 @@ void kindInfo
         <span class="sep" />
         <button type="button" class="zoom" title="100%に戻す" @click="resetZoom">{{ zoomLabel }}</button>
       </div>
-      <AddMenu
-        v-if="menu" :at="menu.screen" :bounds="{width: root?.clientWidth ?? 600, height: root?.clientHeight ?? 300}"
-        :hint="menu.link ? '選んだノードを引っ張ってきた線につなぎます' : undefined"
-        @pick="k => addNode(k, menu!.world, menu!.screen, {link: menu!.link})" @drag="onMenuDrag" @close="menu = null"
-      />
     </template>
+    <AddMenu
+      v-if="menu && stroke" :at="menu.screen" :bounds="{width: root?.clientWidth ?? 600, height: root?.clientHeight ?? 300}"
+      :hint="menu.link ? 'つなげるノードだけを表示しています' : !graph ? '入力と出力の間に入れて始めます' : undefined"
+      :allow="menu.link ? (k => fitsLink(k, menu!.link!)) : undefined"
+      @pick="onPick" @drag="(k, e) => graph ? onMenuDrag(k, e) : startWith(k)" @close="menu = null"
+    />
   </div>
 </template>
 
@@ -970,6 +1023,13 @@ void kindInfo
   align-items: center; justify-content: center; color: var(--tq-color-text-mute); font-size: 12px;
 }
 .empty p {margin: 0}
+.empty .start {display: flex; gap: 6px}
+.empty .mute {font-size: 10px; opacity: .8}
+.add {
+  display: inline-flex; align-items: center; gap: 2px; height: 20px; padding: 0 8px 0 4px; border: 0; border-radius: 10px;
+  background: var(--tq-color-input); color: var(--tq-color-text); font: inherit; cursor: pointer;
+}
+.add:hover {background: var(--tq-color-input-hover)}
 .pin-corner {position: absolute; right: 8px; top: 12px; z-index: 7}
 .hud {
   position: absolute; left: 10px; top: 10px; z-index: 6; display: flex; align-items: center; gap: 4px;

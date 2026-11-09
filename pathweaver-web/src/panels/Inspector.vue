@@ -334,7 +334,7 @@ function setCap(end: 'start' | 'end', angle: number | null) {
         <Parameter label="H"><InputNumber :model-value="r2(bounds.y1 - bounds.y0)" :min="0.01" :bar="false" @focus="beginTransform" @update:model-value="v => setBounds('h', v)" @confirm="endTransform" @blur="endTransform" /></Parameter>
       </ParameterGrid>
       <div class="buttons">
-        <InputButton subtle class="wide" icon="material-symbols:account-tree-outline" :label="active.appearance ? '外観ノードを編集' : 'ノードで外観を作る'" @click="emit('openNodes')" />
+        <InputButton subtle class="wide" icon="material-symbols:account-tree-outline" :label="active.appearance ? '外観ノードを編集' : 'ノードを追加…'" @click="emit('openNodes')" />
         <InputButton subtle icon="material-symbols:content-copy-outline" label="複製" tooltip="⌘D" @click="ed.duplicateSelection()" />
         <InputButton subtle icon="material-symbols:delete-outline" :label="strokes.length > 1 ? `パスを削除（${strokes.length}本）` : 'パスを削除'" @click="deletePaths" />
       </div>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {computed, onBeforeUnmount, onMounted, ref, watch} from 'vue'
+import {computed, nextTick, onBeforeUnmount, onMounted, ref, watch} from 'vue'
 import {TooltipRoot} from '../vendor/tweeq/src/Tooltip'
 import {useInputColor} from '../vendor/tweeq/src/InputColor/useInputColor'
 import PaneSplit from '../vendor/tweeq/src/PaneSplit/PaneSplit.vue'
@@ -148,10 +148,11 @@ onBeforeUnmount(() => {
 
 const message = computed(() => ed.error || ed.status || toolHint[ed.tool])
 watch(() => ed.status, v => { if (v) setTimeout(() => { if (ed.status === v) ed.status = '' }, 4000) })
+// Without nodes yet, open the add menu: you pick the node first (no empty graph).
 function openNodes() {
   const s = ed.active
-  if (s && !s.appearance) ed.edit(() => { s.appearance = call('graphDefault') })
   nodesOpen.value = true
+  if (s && !s.appearance) nextTick(() => nodeEditor.value?.openMenu())
 }
 
 // ---- top bar = title bar (drag to move the window, double-click = full screen) ----

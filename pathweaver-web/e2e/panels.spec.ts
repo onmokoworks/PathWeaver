@@ -43,7 +43,7 @@ test('dark theme screenshot', async ({page}) => {
   await page.evaluate(() => (window as any).pathweaver.command('example'))
   await page.locator('[data-path]').first().click()
   await page.evaluate(() => (window as any).pathweaver.command('toggleTheme'))
-  await page.getByRole('button', {name: 'ノードで外観を作る'}).first().click()
+  await page.getByRole('button', {name: '入力と出力だけで始める'}).first().click()
   await page.waitForTimeout(300)
   await page.screenshot({path: 'test-results/dark.png'})
 })

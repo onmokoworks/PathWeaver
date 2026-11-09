@@ -35,6 +35,23 @@ export function nodeInfo(n: GraphNode): NodeInfo {
 export const outputsNumber = (k: NodeKind) => kindInfo(k).number
 export const hasOutput = (k: NodeKind) => k !== 'Output'
 
+/** The parameters a fresh node of this kind has (what a number link can drive). */
+const paramCache = new Map<NodeKind, string[]>()
+export function paramKeys(k: NodeKind): string[] {
+  let v = paramCache.get(k)
+  if (!v) paramCache.set(k, v = nodeInfo(call<GraphNode>('nodeNew', {kind: k, id: 1, position: [0, 0]})).params.map(p => p.key))
+  return v
+}
+
+/** Can a new node of this kind continue the link being dragged? A menu
+ *  opened from a link lists only these (no pick that can only fail). */
+export function fitsLink(k: NodeKind, link: {fromNumber: boolean} | {reverse: {param: string | null}}): boolean {
+  if (k === 'Input' || k === 'Output') return false
+  const info = kindInfo(k)
+  if ('reverse' in link) return link.reverse.param ? info.number : !info.number
+  return link.fromNumber ? paramKeys(k).length > 0 : info.inputs > 0
+}
+
 export const inputLabels = (n: GraphNode): string[] => {
   if (n.kind === 'Stack') return ['下', '上']
   if (n.kind === 'Boolean') return ['背面', '前面']

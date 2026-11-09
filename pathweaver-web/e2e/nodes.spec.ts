@@ -4,7 +4,7 @@ import {boot, doc, pen, scrub, state} from './helpers'
 async function setup(page: Page) {
   const errors = await boot(page)
   await pen(page, [{p: {x: 0, y: 100}}, {p: {x: 300, y: 100}}])
-  await page.getByRole('button', {name: 'ノードで外観を作る'}).first().click()
+  await page.getByRole('button', {name: '入力と出力だけで始める'}).first().click()
   await page.waitForTimeout(200)
   return errors
 }
@@ -225,7 +225,7 @@ test('node sets are named, saved and applied from the bar above the node editor'
   expect((await doc(page)).appearance_presets.map((p: any) => p.name)).toEqual(['ざらざら'])
   // a second path gets the set from the bar's picker
   await pen(page, [{p: {x: 0, y: 250}}, {p: {x: 300, y: 250}}])
-  await page.getByRole('button', {name: 'ノードで外観を作る'}).first().click()
+  await page.getByRole('button', {name: '入力と出力だけで始める'}).first().click()
   await bar.locator('[aria-label="セットを呼び出す"]').click()
   const opt = page.locator('.Popover li.option', {hasText: 'ざらざら'})
   await opt.hover(); await opt.click()
@@ -320,7 +320,7 @@ test('F-12 drag a link into empty space: the add menu opens and the chosen node 
   await page.mouse.move(o.x + 160, o.y - 60, {steps: 10}); await page.mouse.up()
   const menu = page.getByTestId('add-menu')
   await expect(menu).toBeVisible()
-  await expect(menu).toContainText('引っ張ってきた線')
+  await expect(menu).toContainText('つなげるノードだけ')
   await menu.locator('input').fill('ジグザグ')
   await page.keyboard.press('Enter')
   const zig = await byKind(page, 'Zigzag')
@@ -540,5 +540,64 @@ test('H-05 node options step with ‹ › (wrapping) without opening the list', 
   await card.getByRole('button', {name: /前へ/}).click()
   expect(await op()).toBe('Xor') // wrapped around
   await expect(page.locator('.Popover li.option')).toHaveCount(0)
+  expect(errors).toEqual([])
+})
+
+test('add menu like Blender: pick the node first — header 追加 → category → type, then it follows the pointer', async ({page}) => {
+  const errors = await setup(page)
+  await page.getByTestId('node-add').click()
+  const menu = page.getByTestId('add-menu')
+  await expect(menu.locator('[data-kind]')).toHaveCount(0) // categories first, no long list
+  await menu.locator('[data-category="shape"]').hover()
+  const item = menu.locator('[data-kind="Zigzag"]')
+  await expect(item).toBeVisible()
+  await item.click()
+  const box = (await page.getByTestId('node-editor').boundingBox())!
+  await page.mouse.move(box.x + 300, box.y + 250, {steps: 5})
+  await page.mouse.down(); await page.mouse.up()
+  expect((await graph(page)).nodes.some((n: any) => n.kind === 'Zigzag')).toBe(true)
+  // keyboard: ↓ category, → into its types, Enter picks; Esc while held leaves nothing
+  await page.mouse.move(box.x + 200, box.y + 200)
+  await page.keyboard.press('Shift+A')
+  await page.keyboard.press('ArrowDown'); await page.keyboard.press('ArrowDown') // 形
+  await page.keyboard.press('ArrowRight'); await page.keyboard.press('Enter')    // ラフ
+  await page.keyboard.press('Escape')
+  expect((await graph(page)).nodes.some((n: any) => n.kind === 'Rough')).toBe(false)
+  expect(errors).toEqual([])
+})
+
+test('a menu opened from a dragged link lists only nodes that can take that link', async ({page}) => {
+  await setup(page)
+  const input = await byKind(page, 'Input')
+  const o = (await page.locator(`[data-socket="out:${input.id}"]`).boundingBox())!
+  await page.mouse.move(o.x + 5, o.y + 5); await page.mouse.down()
+  await page.mouse.move(o.x + 160, o.y - 60, {steps: 10}); await page.mouse.up()
+  const menu = page.getByTestId('add-menu')
+  await menu.locator('input').fill('値')
+  await expect(menu.locator('[data-kind="Value"]')).toHaveCount(0) // a number node cannot take a shape
+  await menu.locator('input').fill('')
+  await menu.locator('[data-category="number"]').hover() // 数値: only 測る (it reads a shape)
+  await expect(menu.locator('[data-kind]')).toHaveCount(1)
+  await expect(menu.locator('[data-kind="Measure"]')).toHaveCount(1)
+})
+
+test('a path without nodes starts from the node you pick: Input → it → Output, one undo', async ({page}) => {
+  const errors = await boot(page)
+  await pen(page, [{p: {x: 0, y: 100}}, {p: {x: 300, y: 100}}])
+  await page.getByTestId('start-with-node').click()
+  const menu = page.getByTestId('add-menu')
+  await menu.locator('input').fill('ラフ')
+  await page.keyboard.press('Enter')
+  const g = await graph(page)
+  const input = g.nodes.find((n: any) => n.kind === 'Input'), output = g.nodes.find((n: any) => n.kind === 'Output')
+  const rough = g.nodes.find((n: any) => n.kind === 'Rough')
+  expect(rough.inputs[0]).toBe(input.id)
+  expect(output.inputs[0]).toBe(rough.id)
+  await page.keyboard.press('Meta+z')
+  expect(await graph(page)).toBeFalsy()
+  // the property panel entry opens the same menu instead of making an empty graph
+  await page.getByRole('button', {name: 'ノードを追加…'}).first().click()
+  await expect(page.getByTestId('add-menu')).toBeVisible()
+  expect(await graph(page)).toBeFalsy()
   expect(errors).toEqual([])
 })
