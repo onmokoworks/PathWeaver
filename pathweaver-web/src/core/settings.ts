@@ -17,10 +17,13 @@ export interface Settings {
   paper: Paper
   showWidth: boolean
   theme: Theme
+  /** Draw appearance nodes on the canvas. Off: every path shows its plain
+   *  look (a view setting: the file and the export are unchanged). */
+  showLooks: boolean
 }
 
 const KEY = 'pw.settings'
-const defaults: Settings = {zoomSpeed: 1, wheel: 'pan', invertZoom: false, paper: 'white', showWidth: true, theme: 'system'}
+const defaults: Settings = {zoomSpeed: 1, wheel: 'pan', invertZoom: false, paper: 'white', showWidth: true, theme: 'system', showLooks: true}
 
 function load(): Settings {
   const out = {...defaults}

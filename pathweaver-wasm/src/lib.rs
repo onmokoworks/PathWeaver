@@ -177,7 +177,7 @@ fn node_info(n: &GraphNode) -> Value {
         "inputs": n.kind.inputs(),
         "number": n.kind.is_number(),
         "params": n.parameters().iter().map(|p| json!({
-            "key": p.key, "label": p.label, "min": p.min, "max": p.max, "value": n.number(p.key),
+            "key": p.key, "label": p.label, "min": p.min, "max": p.max, "soft": p.soft.map(|(a, b)| [a, b]), "value": n.number(p.key),
         })).collect::<Vec<_>>(),
     })
 }

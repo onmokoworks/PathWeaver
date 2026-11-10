@@ -721,3 +721,84 @@ test('スタンプ (wkwkdesign recipe, a .pwn in the library): picked from the a
   expect((await graph(page)).nodes.find((n: any) => n.id === th.id).by_darkness).toBe(true)
   expect(errors).toEqual([])
 })
+
+test('a drag covers each value\'s useful range (soft range), not its huge hard limits; free values move steadily', async ({page}) => {
+  const errors = await setup(page)
+  // a parameter's value as the core reads it (fields differ per node kind)
+  const value = (id: number, key: string) => page.evaluate(([id, key]) => {
+    const pw = (window as any).__pw
+    const n = pw.ed.doc.strokes[0].appearance.nodes.find((v: any) => v.id === id)
+    return pw.call('nodeInfo', {node: n}).params.find((p: any) => p.key === key).value
+  }, [id, key] as const)
+  await addNode(page, 'オフセット', {x: 300, y: 90})
+  const off = (await graph(page)).nodes.find((n: any) => n.kind === 'Offset')
+  const dist = page.locator(`[data-node="${off.id}"] [data-param="Amount"]`)
+  await expect(dist).toHaveAttribute('data-soft', '-50 50')
+  const ne = (await page.getByTestId('node-editor').boundingBox())!
+  const before = await value(off.id, 'Amount')
+  await page.mouse.click(ne.x + ne.width - 30, ne.y + ne.height - 30)
+  await scrub(page, dist, 20)
+  await page.waitForTimeout(100)
+  const after = await value(off.id, 'Amount')
+  const width = (await dist.boundingBox())!.width
+  // 20px of a field `width` wide over a range of 100: about 100·20/width (was 2000·20/width)
+  expect(Math.abs(after - before)).toBeGreaterThan(0)
+  expect(Math.abs(after - before)).toBeLessThan((100 * 20) / width * 1.6)
+  // typed past the bar: kept (hard limit is ±1000), clamped at the hard limit
+  await dist.click(); await page.keyboard.press('Meta+a'); await page.keyboard.type('300'); await page.keyboard.press('Enter')
+  await page.waitForTimeout(100)
+  expect(await value(off.id, 'Amount')).toBe(300)
+  await dist.click(); await page.keyboard.press('Meta+a'); await page.keyboard.type('5000'); await page.keyboard.press('Enter')
+  await page.waitForTimeout(100)
+  expect(await value(off.id, 'Amount')).toBe(1000)
+  // a free value: about one unit per pixel, not 200000 across the field
+  await page.mouse.click(ne.x + ne.width - 30, ne.y + ne.height - 30)
+  await addNode(page, '変形', {x: 600, y: 90})
+  const tf = (await graph(page)).nodes.find((n: any) => n.kind === 'Transform')
+  const tx = page.locator(`[data-node="${tf.id}"] [data-param="X"]`)
+  await expect(tx).toHaveAttribute('data-soft', 'free')
+  await page.mouse.click(ne.x + ne.width - 30, ne.y + ne.height - 30)
+  await scrub(page, tx, 20)
+  await page.waitForTimeout(100)
+  const x = await value(tf.id, 'X')
+  expect(Math.abs(x)).toBeGreaterThan(0)
+  expect(Math.abs(x)).toBeLessThan(60)
+  expect(errors).toEqual([])
+})
+
+test('外観 toggle on the canvas: every appearance off at once for the view only (file, undo and export unchanged)', async ({page}) => {
+  const errors = await setup(page)
+  await page.evaluate(() => {
+    const {ed, call} = (window as any).__pw
+    ed.edit(() => {
+      const s = ed.doc.strokes[0]
+      const g = s.appearance
+      g.nodes.push(call('nodeNew', {kind: 'Rough', id: 10, position: [200, 0]}))
+      let gg = call('graphConnect', {graph: g, from: 1, to: 10, port: 0})
+      gg = call('graphConnect', {graph: gg, from: 10, to: 2, port: 0})
+      s.appearance = gg
+    })
+  })
+  const layers = () => page.evaluate(() => { const {ed} = (window as any).__pw; const r = ed.renders.get(ed.doc.strokes[0].id); return r.stale ? null : JSON.stringify(r.layers) })
+  // wait for the worker's rough result
+  await expect.poll(layers, {timeout: 15000}).not.toBeNull()
+  const rough = await layers()
+  const shape = layers
+  const before = JSON.stringify(await doc(page))
+  const undo = (await state(page)).undo
+  const svg = () => page.evaluate(() => (window as any).__pw.call('svg', {doc: (window as any).__pw.ed.doc}))
+  const exported = await svg()
+
+  await page.getByTestId('looks-toggle').click()
+  await expect(page.getByTestId('looks-toggle')).toHaveAttribute('aria-pressed', 'false')
+  await expect.poll(shape).not.toBe(rough)
+  expect((await shape())!.length).toBeLessThan(rough!.length)
+  expect(await page.evaluate(() => (window as any).__pw.ed.renderPending)).toBe(0)
+  expect(JSON.stringify(await doc(page))).toBe(before)
+  expect((await state(page)).undo).toBe(undo)
+  expect(await svg()).toBe(exported)
+
+  await page.getByTestId('looks-toggle').click()
+  await expect.poll(shape).toBe(rough)
+  expect(errors).toEqual([])
+})

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {gestureZoom} from '../core/settings'
+import {gestureZoom, settings} from '../core/settings'
 import {Icon} from '../../vendor/tweeq/src/Icon'
 import {computed, onBeforeUnmount, onMounted, ref} from 'vue'
 import type {Editor} from '../core/editor'
@@ -402,6 +402,11 @@ const cursor = computed(() => {
     </div>
     <div v-if="ed.renderPending" class="busy-badge" data-testid="render-busy">計算中…</div>
     <CanvasMenu v-if="menu" :at="menu" :bounds="{width: view.width, height: view.height}" :items="menuItems" @close="menu = null" />
+    <button
+      type="button" class="looks-badge" :class="{off: !settings.showLooks}" data-testid="looks-toggle" :aria-pressed="settings.showLooks"
+      v-tooltip="{content: settings.showLooks ? '外観ノードを表示中：クリックで全部オフ（軽くなる。ファイルと書き出しは変わらない）' : '外観ノードを表示していません：クリックで表示', placement: 'top'}"
+      @pointerdown.stop @click="settings.showLooks = !settings.showLooks"
+    ><Icon icon="material-symbols:account-tree-outline" /><span>{{ settings.showLooks ? '外観' : '外観オフ' }}</span></button>
     <button type="button" class="zoom-badge" data-testid="zoom-badge" title="クリックで100%（⌘1）" @pointerdown.stop @click="cv.zoomAt({x: view.width / 2, y: view.height / 2}, 1 / view.zoom)">{{ Math.round(zoom * 100) }}%</button>
   </div>
 </template>
@@ -484,7 +489,7 @@ const cursor = computed(() => {
 .snap-title {display: grid; place-items: center; padding: 0 4px 0 3px; margin-right: 2px; font-size: 14px; color: var(--tq-color-text-mute); border-right: 1px solid var(--tq-color-border); height: 18px}
 .snap-bar :deep(.TqInputButtonToggle) {padding: 0 8px; height: 22px; font-size: 11px; border-radius: 3px}
 .busy-badge {
-  position: absolute; right: 64px; bottom: 10px; font-size: 11px;
+  position: absolute; right: 144px; bottom: 10px; font-size: 11px;
   color: var(--tq-color-text-mute); pointer-events: none;
 }
 .zoom-badge {
@@ -492,5 +497,11 @@ const cursor = computed(() => {
   font: inherit; font-size: 11px; color: var(--tq-color-text); background: var(--tq-color-neutral, var(--tq-color-input));
   font-variant-numeric: tabular-nums; cursor: pointer;
 }
-.zoom-badge:hover {background: var(--tq-color-accent-hover); color: var(--tq-color-on-accent)}
+.zoom-badge:hover, .looks-badge:hover {background: var(--tq-color-input-hover)}
+.looks-badge {
+  position: absolute; right: 64px; bottom: 8px; height: 22px; padding: 0 8px; border-radius: 3px; border: 0;
+  display: flex; align-items: center; gap: 4px;
+  font: inherit; font-size: 11px; color: var(--tq-color-text-mute); background: var(--tq-color-neutral, var(--tq-color-input)); cursor: pointer;
+}
+.looks-badge.off {color: var(--tq-color-text); box-shadow: inset 0 0 0 1px var(--tq-color-text-mute)}
 </style>

@@ -189,8 +189,14 @@ impl MathOperation {
 pub struct ParameterSpec {
     pub key: Parameter,
     pub label: &'static str,
+    /// Hard limits: a typed or linked value is clamped to these.
     pub min: f64,
     pub max: f64,
+    /// Soft range (Blender's soft min/max): what a drag across the field
+    /// covers, and what its bar shows. Typing may go past it, up to the hard
+    /// limits. `None`: no bar, a steady amount per pixel (positions, seeds,
+    /// free numbers), so a drag never jumps by the size of a huge range.
+    pub soft: Option<(f64, f64)>,
 }
 impl ParameterSpec {
     fn new(key: Parameter, label: &'static str, min: f64, max: f64) -> Self {
@@ -199,7 +205,16 @@ impl ParameterSpec {
             label,
             min,
             max,
+            soft: Some((min, max)),
         }
+    }
+    fn soft(mut self, a: f64, b: f64) -> Self {
+        self.soft = Some((a, b));
+        self
+    }
+    fn free(mut self) -> Self {
+        self.soft = None;
+        self
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -360,84 +375,84 @@ impl Node {
         use Parameter::*;
         let spec = ParameterSpec::new;
         match self.kind {
-            Kind::Value => vec![spec(Value, "値", -1e6, 1e6)],
-            Kind::Math => vec![spec(A, "A", -1e6, 1e6), spec(B, "B", -1e6, 1e6)],
+            Kind::Value => vec![spec(Value, "値", -1e6, 1e6).free()],
+            Kind::Math => vec![spec(A, "A", -1e6, 1e6).free(), spec(B, "B", -1e6, 1e6).free()],
             Kind::Rough => vec![
-                spec(Amount, "大きさ", 0., 1000.),
-                spec(Detail, "細かさ", 0.1, 100.),
-                spec(Seed, "シード", 0., u32::MAX as f64),
+                spec(Amount, "大きさ", 0., 1000.).soft(0., 100.),
+                spec(Detail, "細かさ", 0.1, 100.).soft(0.1, 20.),
+                spec(Seed, "シード", 0., u32::MAX as f64).free(),
             ],
             Kind::Zigzag => vec![
-                spec(Amount, "大きさ", 0., 1000.),
-                spec(Detail, "細かさ", 0.1, 100.),
+                spec(Amount, "大きさ", 0., 1000.).soft(0., 100.),
+                spec(Detail, "細かさ", 0.1, 100.).soft(0.1, 20.),
             ],
             Kind::Transform => vec![
-                spec(X, "横移動", -100_000., 100_000.),
-                spec(Y, "縦移動", -100_000., 100_000.),
+                spec(X, "横移動", -100_000., 100_000.).free(),
+                spec(Y, "縦移動", -100_000., 100_000.).free(),
                 spec(Rotation, "回転", -3600., 3600.),
-                spec(Scale, "拡大率", 0.01, 100.),
+                spec(Scale, "拡大率", 0.01, 100.).soft(0.1, 4.),
             ],
             Kind::Fill | Kind::Opacity => vec![spec(Opacity, "不透明度", 0., 1.)],
-            Kind::Blur => vec![spec(Blur, "ぼかし半径", 0., 100.)],
+            Kind::Blur => vec![spec(Blur, "ぼかし半径", 0., 100.).soft(0., 30.)],
             Kind::Shadow => vec![
-                spec(X, "横ずれ", -100_000., 100_000.),
-                spec(Y, "縦ずれ", -100_000., 100_000.),
-                spec(Spread, "広がり", -1000., 1000.),
+                spec(X, "横ずれ", -100_000., 100_000.).free(),
+                spec(Y, "縦ずれ", -100_000., 100_000.).free(),
+                spec(Spread, "広がり", -1000., 1000.).soft(-50., 50.),
                 spec(Opacity, "不透明度", 0., 1.),
-                spec(Blur, "ぼかし", 0., 100.),
+                spec(Blur, "ぼかし", 0., 100.).soft(0., 30.),
             ],
             Kind::Glow => vec![
-                spec(Amount, "大きさ", 0., 100.),
+                spec(Amount, "大きさ", 0., 100.).soft(0., 40.),
                 spec(Opacity, "不透明度", 0., 1.),
             ],
-            Kind::Offset => vec![spec(Amount, "距離", -1000., 1000.)],
-            Kind::Round => vec![spec(Amount, "半径", 0., 1000.)],
-            Kind::Band => vec![spec(Amount, "幅", 0., 1000.)],
+            Kind::Offset => vec![spec(Amount, "距離", -1000., 1000.).soft(-50., 50.)],
+            Kind::Round => vec![spec(Amount, "半径", 0., 1000.).soft(0., 50.)],
+            Kind::Band => vec![spec(Amount, "幅", 0., 1000.).soft(0., 50.)],
             Kind::Pucker => vec![spec(Amount, "膨張（%）", -100., 100.)],
-            Kind::Simplify => vec![spec(Amount, "許容距離", 0.1, 100.)],
+            Kind::Simplify => vec![spec(Amount, "許容距離", 0.1, 100.).soft(0.1, 20.)],
             Kind::Streak => vec![
                 spec(Amount, "本数", 0., 100.),
                 spec(Detail, "細さ", 0.2, 20.),
                 spec(Angle, "角度", -180., 180.),
-                spec(Seed, "シード", 0., u32::MAX as f64),
+                spec(Seed, "シード", 0., u32::MAX as f64).free(),
             ],
             Kind::Dissolve => vec![
                 spec(Amount, "量（%）", 0., 100.),
                 spec(Detail, "粒の大きさ", 1., 60.),
                 spec(Spread, "散らばり", 0., 100.),
-                spec(Seed, "シード", 0., u32::MAX as f64),
+                spec(Seed, "シード", 0., u32::MAX as f64).free(),
             ],
             Kind::Mezzotint => vec![
                 spec(Amount, "密度（%）", 0., 100.),
                 spec(Detail, "粒の大きさ", 0.5, 50.),
                 spec(Angle, "線の角度", -180., 180.),
-                spec(Seed, "シード", 0., u32::MAX as f64),
+                spec(Seed, "シード", 0., u32::MAX as f64).free(),
             ],
             Kind::Rasterize => vec![spec(Detail, "解像度（px/単位）", 0.25, 8.)],
             Kind::Image => vec![
-                spec(X, "左", -100_000., 100_000.),
-                spec(Y, "上", -100_000., 100_000.),
-                spec(Amount, "幅", 1., 1000.),
+                spec(X, "左", -100_000., 100_000.).free(),
+                spec(Y, "上", -100_000., 100_000.).free(),
+                spec(Amount, "幅", 1., 1000.).soft(10., 500.),
                 spec(Opacity, "不透明度", 0., 1.),
             ],
-            Kind::RasterBlur => vec![spec(Blur, "半径", 0., 100.)],
+            Kind::RasterBlur => vec![spec(Blur, "半径", 0., 100.).soft(0., 30.)],
             Kind::Threshold => vec![
                 spec(Amount, "しきい値", 0., 1.),
                 spec(Spread, "やわらかさ", 0., 1.),
             ],
             Kind::Noise => vec![
                 spec(Amount, "強さ", 0., 1.),
-                spec(Detail, "粒の大きさ", 0.1, 100.),
-                spec(Seed, "シード", 0., u32::MAX as f64),
+                spec(Detail, "粒の大きさ", 0.1, 100.).soft(0.5, 20.),
+                spec(Seed, "シード", 0., u32::MAX as f64).free(),
             ],
             Kind::Trace => vec![
                 spec(Amount, "しきい値", 0.01, 0.99),
                 spec(Detail, "許容誤差（px）", 0.1, 10.),
                 spec(Spread, "なめらかさ", 0., 4.),
-                spec(Value, "小さな粒を消す（面積）", 0., 10_000.),
+                spec(Value, "小さな粒を消す（面積）", 0., 10_000.).soft(0., 500.),
             ],
             Kind::Halftone => vec![
-                spec(Amount, "間隔", 8., 200.),
+                spec(Amount, "間隔", 8., 200.).soft(8., 60.),
                 spec(Detail, "点の半径比", 0.05, 0.5),
                 spec(Angle, "角度", -180., 180.),
             ],

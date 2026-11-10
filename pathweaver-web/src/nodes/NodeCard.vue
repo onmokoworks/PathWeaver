@@ -93,13 +93,18 @@ function fmt(v: number | undefined) {
           @confirm="emit('commit')" @blur="emit('commit')"
         />
       </template>
-      <!-- A bounded value shows Tweeq's bar: how far along its range it is. -->
+      <!-- A value with a soft range shows Tweeq's bar, and a drag across the
+           field covers that range (not the hard limits, which may be huge).
+           Past the bar the drag keeps going, up to the hard limits. Without a
+           soft range: no bar, a steady amount per pixel. -->
       <InputNumber
-        v-else class="num" :model-value="p.value" :min="p.min" :max="p.max"
-        :step="isInt(p.key) ? 1 : undefined" :precision="precision(p.min, p.max)"
+        v-else class="num" :model-value="p.value"
+        :min="p.soft ? p.soft[0] : p.min" :max="p.soft ? p.soft[1] : p.max" :bar="p.soft ? 0 : false"
+        :clamp-min="!p.soft || p.soft[0] <= p.min" :clamp-max="!p.soft || p.soft[1] >= p.max"
+        :step="isInt(p.key) ? 1 : undefined" :precision="precision(...(p.soft ?? [p.min, p.max]))"
         :prefix="p.label + ' '" :aria-label="p.label"
-        :data-param="p.key"
-        @focus="emit('begin')" @update:model-value="v => emit('param', p.key, v)"
+        :data-param="p.key" :data-soft="p.soft ? p.soft.join(' ') : 'free'"
+        @focus="emit('begin')" @update:model-value="v => emit('param', p.key, Math.min(p.max, Math.max(p.min, v)))"
         @confirm="emit('commit')" @blur="emit('commit')"
       />
     </div>

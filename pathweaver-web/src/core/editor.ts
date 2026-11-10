@@ -1,6 +1,7 @@
 // Editor state: document, selection, undo history and render cache.
 // One user gesture = begin() … commit() = one undo step. Everything geometric
 // goes through the Rust core (call()).
+import {settings} from './settings'
 import {computed, reactive, ref, shallowRef, triggerRef, watch} from 'vue'
 import {call, CoreError} from './wasm'
 import {createRenderQueue} from './renderQueue'
@@ -366,11 +367,15 @@ export function createEditor() {
     }
   }
   function render(s: Stroke): Render {
-    const key = JSON.stringify(s)
+    // 外観を表示しない (view setting): the plain look, nothing sent to the worker
+    const looks = settings.showLooks
+    const key = (looks ? '' : 'plain:') + JSON.stringify(s)
     const hit = renderCache.get(s.id)
     if (hit && hit.key === key) return hit.render
     let r: Render
-    if (s.appearance && s.appearance.enabled && queue.available) {
+    if (!looks && s.appearance?.enabled) {
+      r = syncRender({...s, appearance: null})
+    } else if (s.appearance && s.appearance.enabled && queue.available) {
       const plain = syncRender({...s, appearance: null})
       const done = effectCache.get(s.id)
       if (done && done.key === key) {

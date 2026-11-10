@@ -133,6 +133,7 @@ export interface WidthHandle {
 }
 export interface Frame {origin: Vec2; tangent: Vec2}
 export interface SnapGuide {origin: Vec2; direction: Vec2; kind: string}
-export interface ParamInfo {key: ParamKey; label: string; min: number; max: number; value: number}
+/** min/max: hard limits. soft: what a drag across the field covers (null: no bar, a steady amount per pixel). */
+export interface ParamInfo {key: ParamKey; label: string; min: number; max: number; soft: [number, number] | null; value: number}
 export interface NodeInfo {label: string; inputs: number; number: boolean; params: ParamInfo[]}
 export interface KindInfo {kind: NodeKind; label: string; inputs: number; number: boolean}
