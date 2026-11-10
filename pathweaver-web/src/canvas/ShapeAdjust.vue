@@ -45,6 +45,11 @@ const fields = computed<Field[]>(() => {
         {key: 'angle', label: '角度', value: ang, suffix: '°', apply: v => ({w: Math.cos(-v * Math.PI / 180) * len, h: Math.sin(-v * Math.PI / 180) * len})},
       ]
     }
+    case 'grid': case 'polar': return [
+      ...size(q),
+      {key: 'rows', label: q.kind === 'grid' ? '横の分割線' : '同心円の分割', value: q.rows, min: 0, max: 100, step: 1, apply: v => ({rows: Math.round(v)})},
+      {key: 'cols', label: q.kind === 'grid' ? '縦の分割線' : '放射の分割', value: q.cols, min: 0, max: 100, step: 1, apply: v => ({cols: Math.round(v)})},
+    ]
     case 'spiral': return [
       {key: 'radius', label: '半径', value: q.radius, min: 0.1, apply: v => ({radius: v})},
       {key: 'decay', label: '減衰率', value: q.decay, min: 5, max: 99, suffix: '%', apply: v => ({decay: v})},

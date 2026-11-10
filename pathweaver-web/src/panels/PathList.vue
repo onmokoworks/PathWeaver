@@ -59,7 +59,8 @@ function toggleLookEnabled(s: Stroke) { ed.edit(() => { if (s.appearance) s.appe
 /** Paths in list order (top first), including those in closed folders. */
 const order = computed(() => {
   void ed.revision
-  return [...ed.doc.strokes].reverse()
+  // Blend steps are generated: the list shows their sources (marked) only.
+  return ed.doc.strokes.filter(s => s.blend_of == null).reverse()
 })
 const rows = computed<Row[]>(() => {
   void ed.revision
@@ -322,6 +323,7 @@ function dropAt(y: number, moving: DataRow): Drop | null {
           >
           <span v-else class="name" :title="row.stroke.name">{{ row.stroke.name }}</span>
           <span v-if="row.stroke.text" class="kind" title="文字（打ち直せます）"><Icon icon="material-symbols:title" /></span>
+          <span v-if="ed.blendOf(row.stroke.id)" class="kind ref" data-blend-source :title="`ブレンドの端（間に${ed.blendOf(row.stroke.id)!.steps}段）`">ブレンド</span>
           <span v-if="row.stroke.image?.reference" class="kind ref" data-reference title="下絵：書き出されず、キャンバスでは選ばれません">下絵</span>
           <button
             v-if="row.stroke.appearance" type="button" class="badge" :class="{open: openLooks.has(row.stroke.id)}" :data-look-toggle="row.stroke.id"

@@ -42,7 +42,7 @@ test('shape tools: every Illustrator shape from the flyout, ↑ adds sides while
   // second press on the active shape button opens the list
   await page.locator('[data-tool=shape]').click()
   const fly = page.getByTestId('shape-flyout')
-  await expect(fly.locator('[data-shape]')).toHaveCount(8)
+  await expect(fly.locator('[data-shape]')).toHaveCount(10)
 
   const expectNodes: Record<string, number> = {rounded: 4, ellipse: 4, polygon: 7, star: 10, line: 2, arc: 2, spiral: 11}
   let x = 0

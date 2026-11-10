@@ -4,7 +4,7 @@
 // is done, the parameters stay adjustable (Blender's "Adjust Last Operation").
 import type {PathNode, Vec2} from './types'
 
-export type ShapeKind = 'rect' | 'rounded' | 'ellipse' | 'polygon' | 'star' | 'line' | 'arc' | 'spiral'
+export type ShapeKind = 'rect' | 'rounded' | 'ellipse' | 'polygon' | 'star' | 'line' | 'arc' | 'spiral' | 'grid' | 'polar'
 
 export const SHAPES: {kind: ShapeKind; label: string; icon: string; key?: string}[] = [
   {kind: 'rect', label: '長方形', icon: 'mdi:rectangle-outline', key: 'M'},
@@ -15,7 +15,11 @@ export const SHAPES: {kind: ShapeKind; label: string; icon: string; key?: string
   {kind: 'line', label: '直線', icon: 'mdi:vector-line', key: '\\'},
   {kind: 'arc', label: '円弧', icon: 'mdi:vector-curve'},
   {kind: 'spiral', label: 'スパイラル', icon: 'mdi:rotate-orbit'},
+  {kind: 'grid', label: '長方形グリッド', icon: 'mdi:grid'},
+  {kind: 'polar', label: '同心円グリッド', icon: 'mdi:radar'},
 ]
+/** Shapes made of several paths (kept together in a folder). */
+export const isGroupShape = (k: ShapeKind) => k === 'grid' || k === 'polar'
 export const shapeInfo = (k: ShapeKind) => SHAPES.find(s => s.kind === k)!
 
 /**
@@ -35,9 +39,11 @@ export interface ShapeParams {
   clockwise: boolean      // spiral direction
   concave: boolean        // arc bulges inwards
   closed: boolean         // arc: closed into a quarter pie
+  rows: number            // grid: horizontal dividers / polar: concentric dividers
+  cols: number            // grid: vertical dividers / polar: radial dividers
 }
 export function defaults(kind: ShapeKind): ShapeParams {
-  return {kind, x: 0, y: 0, w: 100, h: 100, radius: 50, radius2: 25, sides: kind === 'star' ? 5 : kind === 'spiral' ? 10 : 6, angle: 0, corner: kind === 'rounded' ? 12 : 0, decay: 80, clockwise: true, concave: false, closed: false}
+  return {kind, x: 0, y: 0, w: 100, h: 100, radius: 50, radius2: 25, sides: kind === 'star' ? 5 : kind === 'spiral' ? 10 : 6, angle: 0, corner: kind === 'rounded' ? 12 : 0, decay: 80, clockwise: true, concave: false, closed: false, rows: 5, cols: 5}
 }
 
 type Raw = Omit<PathNode, 'id'>
@@ -95,6 +101,8 @@ export function buildShape(s: ShapeParams): BuiltShape {
       if (s.closed) nodes.push(corner(s.concave ? P(s.x, s.y + s.h) : P(s.x + s.w, s.y)))
       return {nodes, closed: s.closed, corners: 0}
     }
+    case 'grid': case 'polar':
+      return buildShapes(s)[0]
     case 'spiral': {
       // Quarter turns, each radius = previous × decay, around a moving centre
       // so the curve stays smooth (Illustrator's Spiral). Starts outside.
@@ -127,12 +135,41 @@ export function buildShape(s: ShapeParams): BuiltShape {
   }
 }
 
+/** Every path a shape is made of (one, or a grid's frame and dividers). */
+export function buildShapes(s: ShapeParams): BuiltShape[] {
+  const x0 = Math.min(s.x, s.x + s.w), y0 = Math.min(s.y, s.y + s.h), w = Math.abs(s.w), h = Math.abs(s.h)
+  const line = (a: Vec2, b: Vec2): BuiltShape => ({nodes: [corner(a), corner(b)], closed: false, corners: 0})
+  if (s.kind === 'grid') {
+    const rows = Math.max(0, Math.round(s.rows)), cols = Math.max(0, Math.round(s.cols))
+    const out: BuiltShape[] = [buildShape({...s, kind: 'rect', corner: 0})]
+    for (let i = 1; i <= rows; i++) { const y = y0 + (h * i) / (rows + 1); out.push(line(P(x0, y), P(x0 + w, y))) }
+    for (let i = 1; i <= cols; i++) { const x = x0 + (w * i) / (cols + 1); out.push(line(P(x, y0), P(x, y0 + h))) }
+    return out
+  }
+  if (s.kind === 'polar') {
+    const rings = Math.max(0, Math.round(s.rows)), spokes = Math.max(0, Math.round(s.cols))
+    const cx = x0 + w / 2, cy = y0 + h / 2
+    const out: BuiltShape[] = []
+    // outer ellipse plus the concentric dividers inside it
+    for (let i = rings + 1; i >= 1; i--) {
+      const k = i / (rings + 1)
+      out.push(buildShape({...s, kind: 'ellipse', x: cx - (w * k) / 2, y: cy - (h * k) / 2, w: w * k, h: h * k}))
+    }
+    for (let i = 0; i < spokes; i++) {
+      const a = -Math.PI / 2 + (i * 2 * Math.PI) / spokes
+      out.push(line(P(cx, cy), P(cx + Math.cos(a) * w / 2, cy + Math.sin(a) * h / 2)))
+    }
+    return out
+  }
+  return [buildShape(s)]
+}
+
 /** Parameters from a drag (start → current), with Illustrator's modifiers. */
 export function fromDrag(kind: ShapeKind, base: ShapeParams, a: Vec2, b: Vec2, shift: boolean, alt: boolean, angleStep: number): ShapeParams {
   const s: ShapeParams = {...base, kind}
   let dx = b.x - a.x, dy = b.y - a.y
   switch (kind) {
-    case 'rect': case 'rounded': case 'ellipse': case 'arc': {
+    case 'rect': case 'rounded': case 'ellipse': case 'arc': case 'grid': case 'polar': {
       if (shift) { const m = Math.max(Math.abs(dx), Math.abs(dy)); dx = Math.sign(dx || 1) * m; dy = Math.sign(dy || 1) * m }
       // Option: from the centre (not for the arc, which runs corner to corner).
       if (alt && kind !== 'arc') return {...s, x: a.x - dx, y: a.y - dy, w: 2 * dx, h: 2 * dy}

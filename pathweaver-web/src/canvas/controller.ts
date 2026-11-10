@@ -8,7 +8,7 @@
 import {reactive, watch} from 'vue'
 import {call} from '../core/wasm'
 import {baselineTop, DEFAULT_FONT} from '../core/textOutline'
-import {buildShape, defaults, fromDrag, shapeInfo, type ShapeKind, type ShapeParams} from '../core/shapes'
+import {buildShapes, defaults, fromDrag, isGroupShape, shapeInfo, type ShapeKind, type ShapeParams} from '../core/shapes'
 import {settings, wheelZoom, type Paper} from '../core/settings'
 import type {Editor} from '../core/editor'
 import type {Anchor, CornerWidget, Document, Frame, PathNode, SnapGuide, Stroke, Vec2, WidthHandle} from '../core/types'
@@ -33,7 +33,7 @@ type Drag =
   | {kind: 'cap'; stroke: number; end: 'start' | 'end'; anchor: Vec2}
   | {kind: 'corner'; stroke: number; node: number}
   | {kind: 'guide'; index: number}
-  | {kind: 'shape'; start: Vec2; stroke: number; moved: boolean; params: ShapeParams}
+  | {kind: 'shape'; start: Vec2; strokes: number[]; moved: boolean; params: ShapeParams}
 
 export interface Hover {
   cursor: string
@@ -82,7 +82,7 @@ export function createCanvas(ed: Editor) {
     // Shape tool: the kind drawn next, and the shape just made (its
     // parameters stay adjustable until the document changes otherwise).
     shapeKind: loadShapeKind(),
-    lastShape: null as {stroke: number; params: ShapeParams; revision: number} | null,
+    lastShape: null as {strokes: number[]; params: ShapeParams; revision: number} | null,
   })
   let frames: Frame[] = []
   let framesKey = ''  // what `frames` was captured for while hovering
@@ -106,9 +106,9 @@ export function createCanvas(ed: Editor) {
   const toScreen = (p: Vec2): Vec2 => ({x: p.x * view.zoom + view.panX, y: p.y * view.zoom + view.panY})
   const tol = (px = 7) => px / view.zoom
   /** A 下絵 (tracing reference) stays put: only the layer list selects it. */
-  const pickable = (s: Stroke) => ed.shown(s) && !s.image?.reference
+  const pickable = (s: Stroke) => ed.shown(s) && !s.image?.reference && s.blend_of == null
 
-  const editable = () => ed.doc.strokes.filter(s => ed.shown(s) && !s.contours && !s.guide)
+  const editable = () => ed.doc.strokes.filter(s => ed.shown(s) && !s.contours && !s.guide && s.blend_of == null)
   const pathGuides = () => ed.doc.strokes.filter(s => ed.shown(s) && s.guide && s.nodes.length > 1)
   const stroke = (id: number) => ed.findStroke(id)
   const nodeOf = (at: Anchor): PathNode | undefined => stroke(at.stroke)?.nodes.find(n => n.id === at.node)
@@ -149,6 +149,12 @@ export function createCanvas(ed: Editor) {
   }
   function pathAt(p: Vec2): number | null {
     for (const s of [...ed.doc.strokes].reverse()) {
+      // A blend step stands for its blend: picking it picks the first source.
+      if (s.blend_of != null && ed.shown(s)) {
+        const r = ed.renders.get(s.id)
+        if (r && inside(p, rings(r))) return ed.blendOf(s.id)?.a ?? null
+        continue
+      }
       if (!pickable(s)) continue
       const r = ed.renders.get(s.id)
       if (r && inside(p, rings(r))) return s.id
@@ -362,44 +368,79 @@ export function createCanvas(ed: Editor) {
   }
 
   // ---------- shapes ----------
-  /** Write a shape's anchors into its path (ids are fresh; live corners re-applied). */
-  function applyShape(s: Stroke, params: ShapeParams) {
-    const b = buildShape(params)
+  /** Write one generated path into a stroke (fresh anchor ids, live corners re-applied). */
+  function fillPath(s: Stroke, b: ReturnType<typeof buildShapes>[number]) {
     s.nodes = b.nodes.map(n => ({...n, id: ed.nextId()}))
     s.closed = b.closed
     s.widths = []
     s.corners = []
     if (b.corners > 0 && s.nodes.length > 2) {
       try {
-        const mini = {...ed.doc, strokes: [s], folders: [], assets: {}}
+        const mini = {...ed.doc, strokes: [s], folders: [], assets: {}, blends: []}
         const r = call<{doc: Document}>('edit', {doc: mini, kind: 'setCorner', stroke: s.id, nodes: s.nodes.map(n => n.id), radius: b.corners, cornerKind: 'Circular'})
         s.corners = r.doc.strokes[0].corners
       } catch { /* too small for a corner: stays sharp */ }
     }
   }
+  /**
+   * Make the shape's paths from its parameters into the given strokes; grids
+   * add or remove strokes as their divider counts change. Returns the ids.
+   */
+  function applyShape(ids: number[], params: ShapeParams): number[] {
+    const built = buildShapes(params)
+    const first = stroke(ids[0])
+    if (!first) return ids
+    const out: number[] = []
+    built.forEach((b, i) => {
+      let s = stroke(ids[i])
+      if (!s) {
+        s = {...JSON.parse(JSON.stringify(first)), id: ed.nextId()} as Stroke
+        const at = ed.doc.strokes.findIndex(v => v.id === out[out.length - 1])
+        ed.doc.strokes.splice(at + 1, 0, s)
+        s.name = `${first.name.replace(/ \d+$/, '')} ${i + 1}`
+      }
+      // A grid is lines and rings: no fills stacked on each other.
+      if (isGroupShape(params.kind)) s.fill = null
+      fillPath(s, b)
+      out.push(s.id)
+    })
+    const extra = new Set(ids.slice(built.length))
+    if (extra.size) ed.doc.strokes = ed.doc.strokes.filter(v => !extra.has(v.id))
+    return out
+  }
   function shapeDown(e: PointerEvent, raw: Vec2) {
     const kind = state.shapeKind
+    const info = shapeInfo(kind)
     captureFrames(null, () => false)
     const p = snap(raw, e.ctrlKey)
     ed.begin()
     const s = ed.newPath(p)
-    const count = ed.doc.strokes.filter(v => v.name.startsWith(shapeInfo(kind).label)).length
-    s.name = `${shapeInfo(kind).label} ${count}`
+    if (isGroupShape(kind)) {
+      // A grid's paths live together in a folder (Illustrator groups them).
+      const d = ed.doc
+      d.folders ??= []
+      const folder = ed.nextId(d)
+      d.folders.push({id: folder, name: `${info.label} ${d.folders.filter(f => f.name.startsWith(info.label)).length + 1}`, visible: true, open: false})
+      s.folder = folder
+      s.name = `${info.label} 1`
+    } else {
+      const count = ed.doc.strokes.filter(v => v.name.startsWith(info.label)).length
+      s.name = `${info.label} ${count + 1}`
+    }
     const params = {...(state.lastShape?.params.kind === kind ? state.lastShape.params : defaults(kind)), kind}
     ed.anchors = []
-    state.drag = {kind: 'shape', start: p, stroke: s.id, moved: false, params}
+    state.drag = {kind: 'shape', start: p, strokes: [s.id], moved: false, params}
   }
   function shapeMove(d: Extract<Drag, {kind: 'shape'}>, e: PointerEvent, raw: Vec2) {
     if (!d.moved && dist(raw, d.start) < tol(3)) return
     d.moved = true
     const b = snap(raw, e.ctrlKey)
     d.params = fromDrag(d.params.kind, d.params, d.start, b, e.shiftKey, e.altKey, ed.doc.angle_step || 15)
-    const s = stroke(d.stroke)
-    if (s) { applyShape(s, d.params); ed.changed() }
+    d.strokes = applyShape(d.strokes, d.params)
+    ed.changed()
   }
   function shapeUp(d: Extract<Drag, {kind: 'shape'}>) {
-    const s = stroke(d.stroke)
-    if (!s) return ed.commit()
+    if (!stroke(d.strokes[0])) return ed.commit()
     if (!d.moved) {
       // A click makes a default-size shape there (Illustrator asks for the
       // size in a dialog; here the adjust panel takes it afterwards).
@@ -408,27 +449,28 @@ export function createCanvas(ed: Editor) {
       d.params = radial
         ? {...d.params, x: d.start.x, y: d.start.y, radius: d.params.radius || 50, radius2: d.params.radius2 || 25}
         : {...d.params, x: d.start.x, y: d.start.y, w: Math.abs(d.params.w) || 100, h: k === 'line' ? 0 : Math.abs(d.params.h) || 100}
-      applyShape(s, d.params)
+      d.strokes = applyShape(d.strokes, d.params)
       ed.changed()
     }
+    const s = stroke(d.strokes[0])!
     const tiny = d.moved && s.nodes.every(n => dist(n.p, s.nodes[0].p) < 1e-6)
     if (tiny) { ed.cancel(); return }
     ed.commit()
-    ed.selected = [s.id]
-    state.lastShape = {stroke: s.id, params: d.params, revision: ed.revision}
+    ed.selected = [...d.strokes]
+    state.lastShape = {strokes: d.strokes, params: d.params, revision: ed.revision}
   }
   /** Adjust Last Operation: rebuild the shape just made, still one undo step. */
   function adjustShape(patch: Partial<ShapeParams>) {
     const last = state.lastShape
-    const s = last && stroke(last.stroke)
-    if (!last || !s || ed.revision !== last.revision) return
+    if (!last || !stroke(last.strokes[0]) || ed.revision !== last.revision) return
     last.params = {...last.params, ...patch}
-    applyShape(s, last.params)
+    last.strokes = applyShape(last.strokes, last.params)
+    ed.selected = [...last.strokes]
     ed.changed()
     last.revision = ed.revision
   }
   /** The adjust panel shows while nothing else changed the document. */
-  const shapeAdjustable = () => !!state.lastShape && state.lastShape.revision === ed.revision && !!stroke(state.lastShape.stroke)
+  const shapeAdjustable = () => !!state.lastShape && state.lastShape.revision === ed.revision && !!stroke(state.lastShape.strokes[0])
   function setShapeKind(k: ShapeKind) {
     state.shapeKind = k
     try { localStorage.setItem('pw.shape', k) } catch { /* preference only */ }
@@ -512,6 +554,12 @@ export function createCanvas(ed: Editor) {
     const hit = pathAt(p)
     if (hit !== null) {
       ed.selectPath(hit, e.shiftKey)
+      // The selection tool takes a blend as one object (both sources).
+      const bl = ed.blendOf(hit)
+      if (bl && ed.selected.includes(hit)) {
+        const partner = bl.a === hit ? bl.b : bl.a
+        ed.selected = [...ed.selected.filter(v => v !== partner && v !== hit), partner, hit]
+      }
       if (!ed.selected.includes(hit)) return
       ed.begin()
       if (e.altKey) ed.duplicateSelection()
@@ -1122,8 +1170,8 @@ export function createCanvas(ed: Editor) {
       const d = state.drag
       if (['polygon', 'star', 'spiral'].includes(d.params.kind)) {
         d.params = {...d.params, sides: Math.max(d.params.kind === 'polygon' ? 3 : 2, d.params.sides + (k === 'arrowup' ? 1 : -1))}
-        const s = stroke(d.stroke)
-        if (s) { applyShape(s, d.params); ed.changed() }
+        d.strokes = applyShape(d.strokes, d.params)
+        ed.changed()
       }
       return true
     }

@@ -144,8 +144,21 @@ impl Placed {
     }
 }
 
+/// A live blend (Illustrator's Blend): the steps between two source paths
+/// are generated paths (`Stroke::blend_of`), rebuilt whenever a source changes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Blend {
+    pub id: u64,
+    pub a: u64,
+    pub b: u64,
+    pub steps: u32,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Stroke {
+    /// Generated step of the blend with this id (not edited directly).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blend_of: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<Text>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -266,6 +279,7 @@ impl Stroke {
     }
     pub fn new(id: u64, name: String) -> Self {
         Self {
+            blend_of: None,
             text: None,
             image: None,
             appearance: None,
@@ -563,6 +577,8 @@ pub struct Document {
     pub folders: Vec<Folder>,
     /// Placed images by key (data URLs). The web side leaves this out of most
     /// core calls, so a big picture is not copied on every edit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blends: Vec<Blend>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub assets: std::collections::BTreeMap<String, String>,
     pub strokes: Vec<Stroke>,
@@ -585,6 +601,7 @@ impl Default for Document {
             angle_step: default_angle_step(),
             appearance_presets: vec![],
             folders: vec![],
+            blends: vec![],
             assets: Default::default(),
             strokes: vec![],
         }
@@ -738,6 +755,9 @@ impl Document {
                 && (0.0..=1000.0).contains(&w.left)
                 && (0.0..=1000.0).contains(&w.right)
         };
+        if self.blends.len() > 1000 || self.blends.iter().any(|b| b.steps == 0 || b.steps > 1000) {
+            return Err("ブレンドが不正です".into());
+        }
         if self.strokes.len() > 1000 {
             return Err("パスが多すぎます".into());
         }

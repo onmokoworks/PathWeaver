@@ -21,8 +21,13 @@ export interface TextSpec {text: string; font: string; size: number; line_height
 export interface Placed {asset: string; width: number; height: number; matrix: Matrix; opacity: number; reference?: boolean}
 export type Matrix = [number, number, number, number, number, number]
 
+/** Live blend: `steps` generated paths between sources a and b. */
+export interface Blend {id: number; a: number; b: number; steps: number}
+
 export interface Stroke {
   id: number
+  /** A generated step of this blend (rebuilt from its sources). */
+  blend_of?: number | null
   text?: TextSpec | null
   image?: Placed | null
   name: string
@@ -106,6 +111,7 @@ export interface Document {
   folders?: Folder[]
   /** Placed images by key (data URLs). Left out of most core calls. */
   assets?: Record<string, string>
+  blends?: Blend[]
   strokes: Stroke[]
 }
 export interface Folder {id: number; name: string; visible: boolean; open: boolean; parent?: number | null}

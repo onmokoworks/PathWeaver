@@ -85,6 +85,14 @@ function outlineTexts() {
   ed.edit(() => { for (const s of list) { s.text = null; s.name = `${s.name}（アウトライン）` } })
 }
 
+// ---- blend ----
+const blend = computed(() => {
+  void ed.revision
+  const id = strokes.value.map(s => ed.blendOf(s.id)).find(Boolean)
+  return id ?? null
+})
+const canBlend = computed(() => strokes.value.length === 2 && !blend.value)
+
 // ---- placed images ----
 const images = computed(() => strokes.value.filter(s => s.image))
 const onlyImages = computed(() => strokes.value.length > 0 && images.value.length === strokes.value.length)
@@ -391,6 +399,19 @@ function setCap(end: 'start' | 'end', angle: number | null) {
           <InputCheckbox data-field="reference" :model-value="!!image.reference" label="下絵にする" @update:model-value="setReference" />
         </Parameter>
       </ParameterGrid>
+      <ParameterGrid v-if="blend" data-testid="blend-props">
+        <ParameterHeading>ブレンド</ParameterHeading>
+        <Parameter label="段数" hint="2つのパスの間に作る形の数。端の形・色・位置を変えると間も追従します">
+          <InputNumber data-field="blend-steps" :model-value="blend.steps" :min="1" :max="200" :step="1" :bar="false" @focus="begin" @update:model-value="v => ed.setBlendSteps(blend!.id, v)" @confirm="commit" @blur="commit" />
+        </Parameter>
+      </ParameterGrid>
+      <div v-if="blend" class="buttons">
+        <InputButton subtle icon="material-symbols:link-off" label="ブレンドを解除" tooltip="⌥⇧⌘B：間の形を消して2つに戻す" @click="ed.releaseBlend(blend.id)" />
+        <InputButton subtle icon="material-symbols:call-split" label="拡張" tooltip="間の形を普通のパスにする（フォルダにまとまる）" data-testid="blend-expand" @click="ed.expandBlend(blend.id)" />
+      </div>
+      <div v-if="canBlend" class="buttons">
+        <InputButton subtle class="wide" icon="material-symbols:blur-linear" label="ブレンド（2つの間をつなぐ）" tooltip="⌥⌘B" data-testid="make-blend" @click="ed.makeBlend()" />
+      </div>
       <ParameterGrid v-if="strokes.length >= 2">
         <Parameter label="パスファインダー" hint="選んだパスの見えている輪郭どうしを合成します（効果は焼き込み）。前後は重なり順">
           <div class="pathfinder" data-testid="pathfinder">

@@ -110,6 +110,9 @@ const commands: Record<string, () => void> = {
   toolShape: () => canvas.setTool('shape'),
   place: () => { settle(); host.place((name, kind, data) => placeData(placeTarget(), name, kind, data), files => placeFiles(placeTarget(), files)) },
   outline: () => createOutlines(),
+  makeBlend: () => ed.makeBlend(),
+  releaseBlend: () => { const b = ed.selected.map(id => ed.blendOf(id)).find(Boolean); if (b) ed.releaseBlend(b.id) },
+  expandBlend: () => { const b = ed.selected.map(id => ed.blendOf(id)).find(Boolean); if (b) ed.expandBlend(b.id) },
 }
 /** Where placed material goes: the given world point, else the middle of the view. */
 function placeTarget(at?: Vec2): PlaceTarget {
@@ -167,6 +170,7 @@ function onKeyDown(e: KeyboardEvent) {
   if (k === ' ') { canvas.state.space = true; nodeEditor.value?.setSpace(true); e.preventDefault(); return }
   if (mod && k === 'z') { e.shiftKey ? ed.redo() : ed.undo(); e.preventDefault(); return }
   if (mod && k === 's') { (e.shiftKey ? commands.saveAs : commands.save)(); e.preventDefault(); return }
+  if (mod && e.altKey && e.code === 'KeyB') { (e.shiftKey ? commands.releaseBlend : commands.makeBlend)(); e.preventDefault(); return }
   if (mod && e.shiftKey && k === 'p') { commands.place(); e.preventDefault(); return }
   if (mod && e.shiftKey && k === 'o') { commands.outline(); e.preventDefault(); return }
   if (mod && k === 'o') { commands.open(); e.preventDefault(); return }

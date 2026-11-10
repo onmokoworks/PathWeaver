@@ -90,6 +90,8 @@ const menuItems = computed<MenuItem[]>(() => {
     {label: '最背面へ', disabled: !any, action: () => ed.arrange('back')},
     {label: '', separator: true},
     {label: 'フォルダにまとめる', shortcut: '⌘G', action: () => emit('command', 'group')},
+    {label: 'ブレンド', shortcut: '⌥⌘B', disabled: sel.length !== 2 || sel.some(s => ed.blendOf(s.id)), action: () => emit('command', 'makeBlend')},
+    {label: 'ブレンドを解除', shortcut: '⌥⇧⌘B', disabled: !sel.some(s => ed.blendOf(s.id)), action: () => emit('command', 'releaseBlend')},
     {label: one?.appearance ? '外観ノードを編集' : '外観ノードを開く', disabled: !one || !!one.guide, action: () => emit('command', 'openNodes')},
     {label: '', separator: true},
     {label: 'すべてを選択', shortcut: '⌘A', action: () => emit('command', 'selectAll')},

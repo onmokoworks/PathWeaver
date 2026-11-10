@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest'
-import {buildShape, defaults, fromDrag} from './shapes'
+import {buildShape, buildShapes, defaults, fromDrag} from './shapes'
 
 const at = (b: ReturnType<typeof buildShape>) => b.nodes.map(n => [Math.round(n.p.x * 1000) / 1000, Math.round(n.p.y * 1000) / 1000])
 const P = (x: number, y: number) => ({x, y})
@@ -64,5 +64,23 @@ describe('shapes', () => {
       if (Math.hypot(n.outgoing.x, n.outgoing.y) < 1e-9) continue
       expect(n.incoming.x * n.outgoing.y - n.incoming.y * n.outgoing.x).toBeCloseTo(0, 6)
     }
+  })
+})
+
+describe('grids', () => {
+  it('rectangular grid: frame + dividers, evenly spaced', () => {
+    const g = buildShapes({...defaults('grid'), x: 0, y: 0, w: 100, h: 60, rows: 2, cols: 3})
+    expect(g).toHaveLength(1 + 2 + 3)
+    expect(g[0].closed).toBe(true)
+    expect(g[1].nodes.map(n => n.p.y)).toEqual([20, 20])
+    expect(g[3].nodes.map(n => n.p.x)).toEqual([25, 25])
+  })
+  it('polar grid: outer ellipse, concentric dividers, radial spokes from the centre', () => {
+    const g = buildShapes({...defaults('polar'), x: 0, y: 0, w: 100, h: 100, rows: 3, cols: 4})
+    expect(g).toHaveLength(4 + 4)
+    const radii = g.slice(0, 4).map(b => b.nodes[1].p.x - 50)
+    expect(radii).toEqual([50, 37.5, 25, 12.5])
+    expect(g[4].nodes[0].p).toEqual({x: 50, y: 50})
+    expect(g[4].nodes[1].p.y).toBeCloseTo(0)
   })
 })

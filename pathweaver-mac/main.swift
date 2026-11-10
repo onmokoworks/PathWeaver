@@ -529,6 +529,11 @@ final class Host: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMes
             .separator(),
             item("すべてを選択", "selectAll", "a"),
         ])
+        add("オブジェクト", [
+            item("ブレンドを作成", "makeBlend", "b", [.command, .option]),
+            item("ブレンドを解除", "releaseBlend", "b", [.command, .option, .shift]),
+            item("ブレンドを拡張", "expandBlend"),
+        ])
         add("書式", [
             item("アウトラインを作成", "outline", "o", [.command, .shift]),
         ])

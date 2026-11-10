@@ -4,6 +4,7 @@
 import {computed, reactive, ref, shallowRef, triggerRef, watch} from 'vue'
 import {call, CoreError} from './wasm'
 import {createRenderQueue} from './renderQueue'
+import {blendProblem, syncBlends} from './blend'
 import type {Anchor, Cap, Document, Folder, Graph, Join, Render, RGB, Stroke, Vec2} from './types'
 
 export interface DrawStyle {fill: RGB | null; edge: RGB | null; width: number; join: Join; cap: Cap}
@@ -56,8 +57,10 @@ export function createEditor() {
     changed()
   }
 
+  const blendSeen = new Map<number, string>()
   function changed() {
     syncShared()
+    syncBlends(doc.value, () => nextId(), blendSeen)
     revision.value++
     triggerRef(doc)
   }
@@ -481,6 +484,55 @@ export function createEditor() {
     })
   }
 
+  // ---- blends (Object → Blend) ----
+  /** The blend a path takes part in (as a source or a generated step). */
+  function blendOf(id: number) {
+    const s = findStroke(id)
+    return doc.value.blends?.find(b => b.a === id || b.b === id || b.id === s?.blend_of)
+  }
+  function makeBlend(steps = 5) {
+    const sel = selected.value.map(id => findStroke(id)).filter((s): s is Stroke => !!s && s.blend_of == null)
+    if (sel.length !== 2) { status.value = 'ブレンドするパスを2つ選んでください'; return }
+    const [a, b] = sel
+    const problem = blendProblem(a, b)
+    if (problem) { error.value = problem; return }
+    if (blendOf(a.id) || blendOf(b.id)) { error.value = 'すでにブレンドに使われているパスです（いったん解除してください）'; return }
+    edit(d => { (d.blends ??= []).push({id: nextId(d), a: a.id, b: b.id, steps}) })
+    status.value = `ブレンドしました（${steps}段）。どちらかを動かす・形や色を変えると間も追従します`
+  }
+  function setBlendSteps(id: number, steps: number) {
+    const bl = doc.value.blends?.find(b => b.id === id)
+    if (!bl) return
+    begin()
+    bl.steps = Math.max(1, Math.min(200, Math.round(steps)))
+    changed()
+  }
+  /** Release: the steps go away, the two sources stay. */
+  function releaseBlend(id: number) {
+    edit(d => {
+      d.blends = (d.blends ?? []).filter(b => b.id !== id)
+      d.strokes = d.strokes.filter(s => s.blend_of !== id)
+    })
+    blendSeen.delete(id)
+  }
+  /** Expand: the steps become ordinary paths, gathered with the sources in a folder. */
+  function expandBlend(id: number) {
+    const bl = doc.value.blends?.find(b => b.id === id)
+    if (!bl) return
+    edit(d => {
+      const members = d.strokes.filter(s => s.blend_of === id || s.id === bl.a || s.id === bl.b)
+      d.folders ??= []
+      const folder = nextId(d)
+      const parent = findStroke(bl.a)?.folder ?? null
+      d.folders.push({id: folder, name: 'ブレンド（拡張）', visible: true, open: false, ...(parent != null ? {parent} : {})})
+      for (const s of members) { s.blend_of = null; delete s.blend_of; s.folder = folder }
+      d.blends = (d.blends ?? []).filter(b => b.id !== id)
+      regroup(d)
+      selected.value = members.map(s => s.id)
+    })
+    blendSeen.delete(id)
+  }
+
   /** Illustrator's Make / Release Guides on the selected paths. */
   function makeGuides(on: boolean) {
     const ids = new Set(selected.value)
@@ -577,6 +629,7 @@ export function createEditor() {
     history, dirty, active, renders, renderPending,
     begin, commit, cancel, inGesture, edit, coreEdit, changed, undo, redo, load, markSaved,
     findStroke, nextId, shown, folderTree, inFolder, folderOf, groupSelection, ungroup, moveInList, regroup, selectPath, selectAnchor, clearSelection, isAnchorSelected,
+    blendOf, makeBlend, setBlendSteps, releaseBlend, expandBlend,
     render, newPath, deleteSelection, duplicateSelection, copySelection, cutSelection, paste, makeGuides, arrange, hasClipboard,
   })
 }
