@@ -293,10 +293,12 @@ final class Host: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMes
     /// report state and blank icons, snapshot the real WKWebView, then quit.
     func selfTest(_ out: String) {
         js("window.pathweaver.command('example')")
+        // Live text through CoreText (Latin + Japanese fallback): ring count.
+        js("window.__pw.textProbe('Aあ')")
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             self.js("document.querySelector('[data-path]')?.click()")
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-                let probe = "JSON.stringify({strokes: window.__pw.ed.doc.strokes.length, selected: window.__pw.ed.selected.length, blankIcons: [...document.querySelectorAll('svg.iconify')].filter(e => !e.innerHTML.trim()).length, error: window.__pw.ed.error})"
+                let probe = "JSON.stringify({strokes: window.__pw.ed.doc.strokes.length, selected: window.__pw.ed.selected.length, blankIcons: [...document.querySelectorAll('svg.iconify')].filter(e => !e.innerHTML.trim()).length, error: window.__pw.ed.error, textRings: window.__pwTextProbe})"
                 self.web.evaluateJavaScript(probe) { r, e in
                     print("selftest:", r ?? "nil", e.map { "\($0)" } ?? "")
                     self.web.takeSnapshot(with: nil) { image, _ in

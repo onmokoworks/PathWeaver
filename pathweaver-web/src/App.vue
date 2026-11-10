@@ -23,7 +23,7 @@ import {createHost, isNative} from './host'
 import {call} from './core/wasm'
 import type {Document, Vec2} from './core/types'
 import {placeData, placeFiles, type PlaceTarget} from './core/place'
-import {relayout} from './core/textOutline'
+import {DEFAULT_FONT, outlineText, relayout} from './core/textOutline'
 
 useAppConfigStore().appId = 'pathweaver'
 useInputColor(['#202124', '#ffffff', '#e66b5b', '#e8b655', '#70a774', '#5c88c5', '#9b7ac3'])
@@ -99,7 +99,7 @@ const commands: Record<string, () => void> = {
   toolConvert: () => canvas.setTool('convert'),
   toolText: () => canvas.setTool('text'),
   place: () => { settle(); host.place((name, kind, data) => placeData(placeTarget(), name, kind, data), files => placeFiles(placeTarget(), files)) },
-  outline: () => outlineText(),
+  outline: () => createOutlines(),
 }
 /** Where placed material goes: the given world point, else the middle of the view. */
 function placeTarget(at?: Vec2): PlaceTarget {
@@ -109,7 +109,7 @@ function placeTarget(at?: Vec2): PlaceTarget {
   return {ed, at: at ?? canvas.toWorld({x: v.width / 2, y: v.height / 2}), viewSize: {w: v.width / v.zoom, h: v.height / v.zoom}}
 }
 /** Type → Create Outlines: the selected text becomes plain shapes. */
-function outlineText() {
+function createOutlines() {
   const texts = ed.selected.map(id => ed.findStroke(id)).filter(s => s?.text)
   if (!texts.length) { ed.status = 'アウトライン化する文字を選んでください'; return }
   ed.edit(() => { for (const s of texts) { s!.text = null; s!.name = `${s!.name}（アウトライン）` } })
@@ -290,6 +290,9 @@ function setSideTab(id: string) { sideTab.value = id; try { localStorage.setItem
 ;(window as unknown as {__pw: unknown}).__pw = {
   ed, canvas, call,
   // test hook: lay out the active text again and finish its gesture
+  textProbe: async (t: string) => {
+    try { (window as unknown as {__pwTextProbe: unknown}).__pwTextProbe = (await outlineText({text: t, font: DEFAULT_FONT, size: 48, line_height: 1.2})).length } catch (e) { (window as unknown as {__pwTextProbe: unknown}).__pwTextProbe = String(e) }
+  },
   relayoutActive: async () => { const s = ed.active; if (s) await relayout(ed, s); ed.commit() },
 }
 </script>
