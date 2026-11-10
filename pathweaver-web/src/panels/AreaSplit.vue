@@ -112,7 +112,7 @@ function toggle() { st.value[props.fixed] = !st.value[props.fixed] }
 .divider:hover {background: var(--tq-color-accent)}
 .strip {
   display: flex; align-items: center; gap: 4px; width: 100%; height: 100%; padding: 0 8px; border: 0; margin: 0;
-  background: var(--tq-color-background); color: var(--tq-color-text-mute); font: inherit; font-size: 11px; font-weight: 600;
+  background: var(--tq-color-background); color: var(--tq-color-text-mute); font: inherit; font-size: 11px; font-weight: 500;
   cursor: pointer; touch-action: none; box-shadow: inset 0 0 0 1px var(--tq-color-border);
 }
 .strip:hover {color: var(--tq-color-text); background: var(--tq-color-input-hover)}

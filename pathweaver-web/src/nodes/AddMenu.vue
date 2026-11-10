@@ -154,7 +154,7 @@ function onItemMove(e: PointerEvent) {
   box-shadow: 0 4px 16px var(--tq-color-shadow, rgba(0,0,0,.2)); overflow: hidden; font-size: 12px;
 }
 .add-menu.sub {width: auto; min-width: 170px; padding: 4px; overflow-y: auto}
-.title {padding: 6px 8px 0; font-size: 11px; font-weight: 600; color: var(--tq-color-text-mute)}
+.title {padding: 6px 8px 0; font-size: 11px; font-weight: 500; color: var(--tq-color-text-mute)}
 .hint {padding: 6px 8px 0; font-size: 10px; color: var(--tq-color-text-mute)}
 .search {
   margin: 6px; padding: 4px 8px; height: 24px; border: 0; border-radius: 3px; outline: none;
@@ -162,7 +162,7 @@ function onItemMove(e: PointerEvent) {
 }
 .search:focus {box-shadow: 0 0 0 1px var(--tq-color-accent)}
 .list {overflow-y: auto; padding: 0 4px 6px; min-height: 0}
-.group {padding: 6px 6px 2px; font-size: 10px; font-weight: 600; color: var(--tq-color-text-mute)}
+.group {padding: 6px 6px 2px; font-size: 10px; font-weight: 500; color: var(--tq-color-text-mute)}
 .item {
   display: flex; align-items: center; gap: 6px; width: 100%; padding: 4px 6px; border: 0; border-radius: 3px;
   background: transparent; color: var(--tq-color-text); font: inherit; text-align: left; cursor: pointer; white-space: nowrap;

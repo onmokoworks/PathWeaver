@@ -3,6 +3,7 @@ import {createPinia} from 'pinia'
 import './icons.generated'
 import {initCore} from './core/wasm'
 import App from './App.vue'
+import './quiet.css'
 
 // WebKit returns a Promise from requestPointerLock and rejects it when the lock
 // is refused (WKWebView, no gesture). VueUse ignores that Promise, which would

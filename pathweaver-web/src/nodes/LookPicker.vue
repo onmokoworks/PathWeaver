@@ -163,7 +163,7 @@ button {font: inherit; color: var(--tq-color-text); cursor: pointer}
 .browse .caret {margin-left: -2px}
 .browse.on, .browse:hover, .icon:hover, .users:hover, .new:hover {background: var(--tq-color-input-hover)}
 .icon {width: 20px; padding: 0; background: transparent; color: var(--tq-color-text-mute)}
-.users {min-width: 20px; padding: 0 6px; font-variant-numeric: tabular-nums; font-weight: 600}
+.users {min-width: 20px; padding: 0 6px; font-variant-numeric: tabular-nums; font-weight: 500}
 .new {padding: 0 8px 0 4px; gap: 2px}
 .name {
   width: 120px; height: 20px; padding: 0 8px; border: 0; border-radius: 3px; outline: none;
@@ -180,7 +180,7 @@ button {font: inherit; color: var(--tq-color-text); cursor: pointer}
   background: var(--tq-color-input); color: var(--tq-color-text); font: inherit;
 }
 .list {max-height: 260px; overflow-y: auto; padding: 0 4px 4px}
-.group {padding: 6px 6px 2px; font-size: 10px; font-weight: 600; color: var(--tq-color-text-mute)}
+.group {padding: 6px 6px 2px; font-size: 10px; font-weight: 500; color: var(--tq-color-text-mute)}
 .row {display: flex; align-items: center; gap: 6px; width: 100%; padding: 4px 6px; border: 0; border-radius: 3px; background: transparent; text-align: left}
 .row:hover {background: var(--tq-color-input-hover)}
 .row.current {background: var(--tq-color-accent); color: var(--tq-color-on-accent)}

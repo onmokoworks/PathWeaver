@@ -245,6 +245,9 @@ const ticks = computed(() => {
   for (let x = x0; S({x, y: 0}).x < view.width; x += step) xs.push({pos: S({x, y: 0}).x, label: fmt(x)})
   const y0 = Math.floor(cv.toWorld({x: 0, y: RULER}).y / step) * step
   for (let y = y0; S({x: 0, y}).y < view.height; y += step) ys.push({pos: S({x: 0, y}).y, label: fmt(y)})
+  // a label that would run under the corner square is left out (its tick stays)
+  for (const t of xs) if (t.pos + 3 < RULER) t.label = ''
+  for (const t of ys) if (t.pos + 3 - t.label.length * 5.5 < RULER) t.label = ''
   return {xs, ys, minor: step / 5 * view.zoom}
 })
 const fmt = (v: number) => (Math.abs(v) < 1e-9 ? '0' : String(+v.toFixed(3)))

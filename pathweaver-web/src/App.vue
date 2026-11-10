@@ -426,8 +426,8 @@ html.fullscreen .app.native .topbar {padding-left: 12px}
 }
 .native .topbar {padding-left: 80px}
 .doc {display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1}
-.name {font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis}
-.dirty {color: var(--tq-color-accent); font-size: 9px}
+.name {font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis}
+.dirty {color: var(--tq-color-text-mute); font-size: 9px}
 .actions {display: flex; align-items: center; gap: 2px; -webkit-app-region: no-drag}
 .sep {width: 1px; height: 16px; background: var(--tq-color-border); margin: 0 4px}
 .body {flex: 1; display: flex; min-height: 0}
@@ -440,7 +440,7 @@ html.fullscreen .app.native .topbar {padding-left: 12px}
   color: var(--tq-color-text-mute); box-shadow: inset 0 -2px 0 transparent;
 }
 .tab:hover {color: var(--tq-color-text)}
-.tab.active {color: var(--tq-color-text); font-weight: 600; box-shadow: inset 0 -2px 0 var(--tq-color-accent)}
+.tab.active {color: var(--tq-color-text); font-weight: 500; box-shadow: inset 0 -2px 0 var(--tq-color-text)}
 .tab-panel {flex: 1; min-height: 0; overflow-y: auto}
 .tab-spacer {flex: 1}
 .tab-bar {align-items: center}

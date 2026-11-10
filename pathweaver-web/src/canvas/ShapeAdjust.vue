@@ -97,14 +97,14 @@ const toggles = computed<Toggle[]>(() => {
 
 <style scoped>
 .adjust {
-  position: absolute; left: 28px; bottom: 48px; z-index: 6; width: 220px; padding: 6px 8px 8px;
+  position: absolute; left: 28px; bottom: 48px; z-index: 6; width: 220px; padding: 8px 12px 12px;
   display: flex; flex-direction: column; gap: 4px; font-size: 11px;
   background: color-mix(in srgb, var(--tq-color-background) 92%, transparent);
   -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
   border: 1px solid var(--tq-color-border); border-radius: 6px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, .12);
 }
-.title {font-weight: 600; color: var(--tq-color-text-mute); padding-bottom: 2px}
-.row {display: grid; grid-template-columns: 70px 1fr; align-items: center; gap: 6px}
+.title {font-weight: 500; color: var(--tq-color-text-mute); padding-bottom: 4px}
+.row {display: grid; grid-template-columns: 68px 1fr; align-items: center; gap: 8px}
 .row:has(.TqInputCheckbox) {grid-template-columns: 1fr}
 </style>

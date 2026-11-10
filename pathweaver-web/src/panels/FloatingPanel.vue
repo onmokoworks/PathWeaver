@@ -75,7 +75,7 @@ function up() {
 }
 .bar {
   display: flex; align-items: center; gap: 2px; height: 24px; padding: 0 4px 0 4px; flex: none; cursor: grab;
-  font-size: 11px; font-weight: 600; color: var(--tq-color-text-mute); border-bottom: 1px solid var(--tq-color-border);
+  font-size: 11px; font-weight: 500; color: var(--tq-color-text-mute); border-bottom: 1px solid var(--tq-color-border);
   touch-action: none;
 }
 .bar:active {cursor: grabbing}

@@ -344,7 +344,7 @@ function dropAt(y: number, moving: DataRow): Drop | null {
 
 <style scoped>
 .path-list {display: flex; flex-direction: column; height: 100%; font-size: 12px}
-.head {display: flex; align-items: center; gap: 2px; height: 28px; padding: 0 6px 0 10px; font-weight: 600; font-size: 11px; color: var(--tq-color-text-mute); flex: none}
+.head {display: flex; align-items: center; gap: 2px; height: 28px; padding: 0 6px 0 12px; font-weight: 500; font-size: 11px; color: var(--tq-color-text-mute); flex: none}
 .spacer {flex: 1}
 .head button, .eye, .chevron {
   display: grid; place-items: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 2px;
@@ -356,8 +356,8 @@ ul {position: relative; list-style: none; margin: 0; padding: 0; overflow-y: aut
 /* Flat rows: one straight highlight, no rounded corners or side bars. */
 li {display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 6px 0 10px; cursor: default; border-bottom: 1px solid transparent}
 li:hover {background: var(--tq-color-input)}
-li.selected {background: var(--tq-color-accent-soft)}
-li.active .name {font-weight: 600}
+li.selected {background: color-mix(in srgb, var(--tq-color-text) 9%, transparent)}
+li.active .name {font-weight: 500}
 li.hidden .name, li.hidden .thumb {opacity: .4}
 li.folder .chevron {margin-left: -6px; width: 16px}
 li.folder.target {background: var(--tq-color-accent-soft); box-shadow: inset 0 0 0 1px var(--tq-color-accent)}
@@ -379,7 +379,7 @@ li.folder.target {background: var(--tq-color-accent-soft); box-shadow: inset 0 0
 li.look, li.effect {height: 24px; font-size: 11px}
 li.look .name {color: var(--tq-color-text-mute)}
 li.off .name, li.off .dot {opacity: .45}
-li.effect.selected {background: var(--tq-color-accent-soft)}
+li.effect.selected {background: color-mix(in srgb, var(--tq-color-text) 9%, transparent)}
 .look-icon {color: var(--tq-color-text-mute); font-size: 13px; flex: none}
 .dot {width: 7px; height: 7px; border-radius: 1px; flex: none}
 .none {color: var(--tq-color-text-mute); padding-left: 10px}

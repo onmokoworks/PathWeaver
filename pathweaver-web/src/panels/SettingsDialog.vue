@@ -65,7 +65,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey, true))
   box-shadow: 0 12px 40px rgba(0, 0, 0, .25);
 }
 header {display: flex; align-items: center; height: 36px; padding: 0 6px 0 14px; border-bottom: 1px solid var(--tq-color-border)}
-.title {flex: 1; font-weight: 600}
+.title {flex: 1; font-weight: 500}
 .body {padding: 12px 14px; overflow-y: auto}
 footer {display: flex; justify-content: flex-end; padding: 8px 14px; border-top: 1px solid var(--tq-color-border)}
 </style>
