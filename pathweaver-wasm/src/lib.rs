@@ -205,7 +205,9 @@ pub fn dispatch(op: &str, a: &Value) -> Result<Value, String> {
         }
         "svg" => {
             let doc: Document = field(a, "doc")?;
-            json!(outline::svg(&doc)?)
+            let frame: Option<[f64; 4]> = field(a, "frame")?;
+            let background: Option<[u8; 3]> = field(a, "background")?;
+            json!(outline::svg_frame(&doc, frame, background)?)
         }
         "render" => render(&field::<Stroke>(a, "stroke")?),
         "widthHandles" => json!(width_handles(&field::<Stroke>(a, "stroke")?)),

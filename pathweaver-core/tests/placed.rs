@@ -82,3 +82,21 @@ fn even_odd_rings_keep_their_hole() {
     assert!((area(&outline::fill_rule_contours(&rings, false)) - 10000.).abs() < 1.);
     assert!((area(&outline::fill_rule_contours(&rings, true)) - 7500.).abs() < 1.);
 }
+
+#[test]
+fn svg_frames_an_artboard_at_its_size() {
+    use pathweaver_core::model::Artboard;
+    let mut d = image_doc(false);
+    let svg = outline::svg_frame(&d, Some([0., 0., 200., 100.]), Some([255, 255, 255])).unwrap();
+    assert!(svg.contains("width=\"200.0000\" height=\"100.0000\" viewBox=\"0.0000 0.0000 200.0000 100.0000\""));
+    assert!(svg.contains("fill=\"#ffffff\""));
+    assert!(outline::svg_frame(&d, Some([0., 0., 0., 10.]), None).is_err());
+    // artboards round-trip and are validated
+    let id = d.id();
+    d.artboards.push(Artboard { id, name: "A4".into(), x: 0., y: 0., w: 595., h: 842. });
+    d.validate().unwrap();
+    let back: pathweaver_core::model::Document = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+    assert_eq!(back.artboards, d.artboards);
+    d.artboards[0].w = -1.;
+    assert!(d.validate().is_err());
+}

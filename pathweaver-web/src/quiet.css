@@ -8,7 +8,7 @@
  * Tweeq's components are left as they are; these rules sit on top of their
  * scoped styles (one extra class wins over `.x[data-v]`).
  */
-.app {
+body {
   /* a chosen segment: one step up from the input, with a hairline */
   --pw-chip: color-mix(in srgb, var(--tq-color-input), var(--tq-color-text) 12%);
   --pw-chip-hover: color-mix(in srgb, var(--tq-color-input), var(--tq-color-text) 18%);
@@ -17,42 +17,42 @@
 }
 
 /* Segmented choices (角・線端・抜き…): the chosen one is a raised chip, not a blue block */
-.app .TqInputRadio .indicator,
-.app .TqInputRadio:has(label.active:hover) .indicator,
-.app .TqInputRadio .indicator.dragging {
+body .TqInputRadio .indicator,
+body .TqInputRadio:has(label.active:hover) .indicator,
+body .TqInputRadio .indicator.dragging {
   background: var(--pw-chip);
   box-shadow: inset 0 0 0 1px var(--pw-hairline);
 }
-.app .TqInputRadio:has(label.active:hover) .indicator {background: var(--pw-chip-hover)}
-.app .TqInputRadio label.active {color: var(--tq-color-text); font-weight: 500}
+body .TqInputRadio:has(label.active:hover) .indicator {background: var(--pw-chip-hover)}
+body .TqInputRadio label.active {color: var(--tq-color-text); font-weight: 500}
 
 /* On/off toggles (吸着のガイド・グリッド…): on = chip with ink, off = flat and muted.
    The tool palette is left out: the current tool keeps its blue. */
-.app :not(.slot) > .TqInputButtonToggle:not(:disabled) {color: var(--tq-color-text-mute)}
-.app :not(.slot) > .TqInputButtonToggle.checked:not(:disabled) {
+body :not(.slot) > .TqInputButtonToggle:not(:disabled) {color: var(--tq-color-text-mute)}
+body :not(.slot) > .TqInputButtonToggle.checked:not(:disabled) {
   background: var(--pw-chip);
   color: var(--tq-color-text);
   box-shadow: inset 0 0 0 1px var(--pw-hairline);
 }
-.app :not(.slot) > .TqInputButtonToggle.checked:not(:disabled):hover {background: var(--pw-chip-hover)}
+body :not(.slot) > .TqInputButtonToggle.checked:not(:disabled):hover {background: var(--pw-chip-hover)}
 
 /* Angle dials: a grey knob with a light tip; blue only while it is being turned */
-.app .TqInputRotary .circle {fill: var(--tq-color-text-mute)}
-.app .TqInputRotary .circle:hover,
-.app .TqInputRotary.tweaking .circle {fill: var(--tq-color-accent)}
+body .TqInputRotary .circle {fill: var(--tq-color-text-mute)}
+body .TqInputRotary .circle:hover,
+body .TqInputRotary.tweaking .circle {fill: var(--tq-color-accent)}
 
 /* The 2D position pad's button and the size chain: quiet until touched */
-.app .TqInputTranslate {background: var(--tq-color-input)}
-.app .TqInputTranslate:hover {background: var(--tq-color-input-hover)}
-.app .TqInputTranslate .grid-icon {color: var(--tq-color-text-mute)}
-.app .TqInputSize .chain {color: var(--tq-color-text-mute)}
-.app .TqInputSize .chain:hover {color: var(--tq-color-text)}
+body .TqInputTranslate {background: var(--tq-color-input)}
+body .TqInputTranslate:hover {background: var(--tq-color-input-hover)}
+body .TqInputTranslate .grid-icon {color: var(--tq-color-text-mute)}
+body .TqInputSize .chain {color: var(--tq-color-text-mute)}
+body .TqInputSize .chain:hover {color: var(--tq-color-text)}
 
 /* Section headings: hierarchy from size and ink, not from a heavy weight.
    (Hiragino has no 500: anything from 500 up draws as W6, so the regular
    weight at a step larger size is what reads as a quiet heading.) */
-.app .TqParameterHeading .heading {font-size: 14px; font-weight: 400}
+body .TqParameterHeading .heading {font-size: 14px; font-weight: 400}
 
 /* A dark colour must not vanish into a dark input: every swatch gets a hairline
    (an outline, drawn over the colour fill, which an inset shadow would sit under) */
-.app .TqInputColorPad .default-button {outline: 1px solid color-mix(in srgb, var(--tq-color-text) 22%, transparent); outline-offset: -1px}
+body .TqInputColorPad .default-button {outline: 1px solid color-mix(in srgb, var(--tq-color-text) 22%, transparent); outline-offset: -1px}

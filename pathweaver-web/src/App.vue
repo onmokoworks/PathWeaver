@@ -14,6 +14,7 @@ import PathList from './panels/PathList.vue'
 import Inspector from './panels/Inspector.vue'
 import GridPanel from './panels/GridPanel.vue'
 import SettingsDialog from './panels/SettingsDialog.vue'
+import ExportDialog from './panels/ExportDialog.vue'
 import FloatingPanel from './panels/FloatingPanel.vue'
 import PanelPin from './panels/PanelPin.vue'
 import AreaSplit from './panels/AreaSplit.vue'
@@ -39,6 +40,7 @@ function applyTheme() {
 watch(() => settings.theme, applyTheme, {immediate: true})
 darkQuery?.addEventListener?.('change', applyTheme)
 const settingsOpen = ref(false)
+const exportOpen = ref(false)
 
 const ed = createEditor()
 const canvas = createCanvas(ed)
@@ -50,6 +52,7 @@ const toolList: {id: Tool; icon: string; label: string; key: string}[] = [
   {id: 'pen', icon: 'pw:pen', label: 'ペン', key: 'P'},
   {id: 'convert', icon: 'pw:anchor', label: 'アンカーポイント（角⇄スムーズ）', key: '⇧C'},
   {id: 'text', icon: 'material-symbols:title', label: '文字', key: 'T'},
+  {id: 'artboard', icon: 'mdi:artboard', label: 'アートボード', key: '⇧O'},
 ]
 // The shape button shows the shape it will draw (Illustrator's tool group).
 const tools = computed(() => {
@@ -59,11 +62,12 @@ const tools = computed(() => {
   return list
 })
 const toolHint: Record<Tool, string> = {
-  select: 'クリックで選択・ドラッグで移動。枠の角で拡大縮小、角の外側で回転（Shiftで比率固定／角度刻み、Optionで複製・中心基準）',
+  select: 'クリックで選択・ドラッグで移動。枠の角で拡大縮小、角の外側で基準点（十字）まわりに回転（Shiftで比率固定／角度刻み、Optionで複製・基準点から拡大縮小）',
   direct: 'アンカー・ハンドルをドラッグ。線分をOption＋クリック／ダブルクリックでアンカー追加。太さはオレンジの端をドラッグ（Optionで片側）、⌘＋芯クリックで幅点追加、⌘＋端点ドラッグで切り口回転',
   pen: 'クリックで角、ドラッグで曲線。線分上でクリックでアンカー追加。Shift＋パスをクリックでその上から描き始め（次の点は法線方向）。太さはオレンジの端をドラッグ（Optionで片側）。Enter/Escで終了',
   convert: 'アンカーをクリックで角に、ドラッグでスムーズに。ハンドルをドラッグで片側だけ動かす',
   shape: 'ドラッグで描く（Shiftで縦横同じ・角度刻み、Optionで中心から）。多角形・スターはドラッグ中に↑↓で辺の数。クリックで標準の大きさ。作った直後は左下で寸法や数を変えられる',
+  artboard: '空いた所をドラッグでアートボードを作る。アートボードをドラッグで移動、枠の四角で大きさ。Deleteで削除。名前と寸法は右のパネル',
   text: 'クリックした所に文字を打つ。文字をクリックで打ち直し。Esc／ほかをクリックで確定。フォントと大きさは右のパネル',
 }
 
@@ -96,7 +100,7 @@ const commands: Record<string, () => void> = {
   open: () => { settle(); host.open() },
   save: () => { settle(); host.save(false) },
   saveAs: () => { settle(); host.save(true) },
-  export: () => { settle(); host.exportSvg() },
+  export: () => { settle(); exportOpen.value = true },
   group: () => ed.groupSelection(),
   ungroup: () => { const f = ed.active?.folder; if (f != null) ed.ungroup(f) },
   snapGrid: () => ed.edit(d => { d.snap_grid = !d.snap_grid }),
@@ -109,6 +113,7 @@ const commands: Record<string, () => void> = {
   toolConvert: () => canvas.setTool('convert'),
   toolText: () => canvas.setTool('text'),
   toolShape: () => canvas.setTool('shape'),
+  toolArtboard: () => canvas.setTool('artboard'),
   place: () => { settle(); host.place((name, kind, data) => placeData(placeTarget(), name, kind, data), files => placeFiles(placeTarget(), files)) },
   outline: () => createOutlines(),
   makeBlend: () => ed.makeBlend(),
@@ -144,6 +149,8 @@ const host = createHost(ed, commands)
 // keys while the pointer is over it; everything else goes to the canvas. ----
 function onKeyDown(e: KeyboardEvent) {
   if (e.isComposing) return
+  // a dialog is open: its own keys only (no tool switching underneath)
+  if (exportOpen.value || settingsOpen.value) return
   if (typing(e.target)) {
     // In a field: text keys stay with it, but file commands still work
     // (the field is confirmed first, like any Mac app).
@@ -327,7 +334,7 @@ function setSideTab(id: string) { sideTab.value = id; try { localStorage.setItem
           <template v-if="!isNative()">
             <InputButton subtle narrow icon="material-symbols:folder-open-outline" tooltip="開く ⌘O" @click="host.open()" />
             <InputButton subtle narrow icon="material-symbols:save-outline" tooltip="保存 ⌘S" @click="host.save()" />
-            <InputButton subtle narrow icon="material-symbols:ios-share" tooltip="SVG書き出し ⌘E" @click="host.exportSvg()" />
+            <InputButton subtle narrow icon="material-symbols:ios-share" tooltip="書き出し（SVG・PNG・JPEG）⌘E" data-testid="export-open" @click="commands.export()" />
             <span class="sep" />
           </template>
           <InputButton subtle narrow icon="material-symbols:undo" tooltip="取り消す ⌘Z" :disabled="!ed.history.undo" @click="ed.undo()" />
@@ -388,6 +395,7 @@ function setSideTab(id: string) { sideTab.value = id; try { localStorage.setItem
       <footer class="status" :class="{error: !!ed.error}" role="status" data-testid="status">{{ message }}</footer>
     </div>
   <SettingsDialog v-if="settingsOpen" @close="settingsOpen = false" />
+  <ExportDialog v-if="exportOpen" :ed="ed" :canvas="canvas" @close="exportOpen = false" @files="host.saveFiles" />
   <TooltipRoot />
 </template>
 

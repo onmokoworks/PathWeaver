@@ -11,7 +11,7 @@ import {baselineTop, DEFAULT_FONT} from '../core/textOutline'
 import {buildShapes, defaults, fromDrag, isGroupShape, shapeInfo, type ShapeKind, type ShapeParams} from '../core/shapes'
 import {settings, wheelZoom, type Paper} from '../core/settings'
 import type {Editor} from '../core/editor'
-import type {Anchor, CornerWidget, Document, Frame, PathNode, SnapGuide, Stroke, Vec2, WidthHandle} from '../core/types'
+import type {Anchor, Artboard, CornerWidget, Document, Frame, PathNode, SnapGuide, Stroke, Vec2, WidthHandle} from '../core/types'
 import {add, affine, Bounds, dist, inside, len, rectHitsRings, renderBounds, rings, scale, sub, ZERO} from './geometry'
 
 export interface View {panX: number; panY: number; zoom: number; width: number; height: number}
@@ -25,6 +25,7 @@ type Drag =
   | {kind: 'scale'; base: string; box: Bounds; corner: Vec2; fixed: Vec2}
   | {kind: 'rotate'; base: string; center: Vec2; startAngle: number}
   | {kind: 'pivot'; box: Bounds}
+  | {kind: 'artboard'; mode: 'create' | 'move' | 'resize'; id: number; start: Vec2; base: Artboard; handle: number}
   | {kind: 'anchors'; start: Vec2; origin: Vec2; base: Map<string, Vec2>; moved: boolean}
   | {kind: 'handle'; at: Anchor; side: 'in' | 'out'}
   | {kind: 'pen'; at: Anchor; start: Vec2; moved: boolean; mode: 'new' | 'out' | 'close'}
@@ -97,6 +98,8 @@ export function createCanvas(ed: Editor) {
     // Reference point for position, size and rotation (a view setting: one
     // for every selection, like Blender's pivot point). Not undoable.
     pivot: loadPivot(),
+    // Artboard tool: the artboard being edited (its panel shows on the right).
+    artboard: null as number | null,
   })
   watch(() => [state.pivot.u, state.pivot.v], () => { try { localStorage.setItem('pw.pivot', JSON.stringify(state.pivot)) } catch { /* preference only */ } })
   function setPivot(q: Pivot) { state.pivot = {u: q.u, v: q.v} }
@@ -376,11 +379,92 @@ export function createCanvas(ed: Editor) {
     switch (ed.tool) {
       case 'text': return textDown(p)
       case 'shape': return shapeDown(e, p)
+      case 'artboard': return artboardDown(e, p)
       case 'pen': return penDown(e, p)
       case 'direct': return directDown(e, p, double)
       case 'convert': return convertDown(e, p)
       default: return selectDown(e, p, double)
     }
+  }
+
+  // ---------- artboards ----------
+  // Artboard tool (⇧O): drag on empty canvas = a new artboard, drag one =
+  // move it, its handles = resize. The panel on the right edits the numbers.
+  const boards = () => ed.doc.artboards ?? []
+  const boardBounds = (a: Artboard): Bounds => ({x0: a.x, y0: a.y, x1: a.x + a.w, y1: a.y + a.h})
+  function artboardAt(p: Vec2): Artboard | null {
+    const list = boards()
+    for (let i = list.length - 1; i >= 0; i--) { const a = list[i]; if (inBox(boardBounds(a), p)) return a }
+    return null
+  }
+  /** The selected artboard's handle under p (index into boxHandles), or -1. */
+  function artboardHandleAt(p: Vec2): number {
+    const a = boards().find(b => b.id === state.artboard)
+    if (!a) return -1
+    return boxHandles(boardBounds(a)).findIndex(h => dist(h, p) < tol(6))
+  }
+  function artboardDown(e: PointerEvent, p: Vec2) {
+    const hi = artboardHandleAt(p)
+    const sel = boards().find(b => b.id === state.artboard)
+    if (sel && hi >= 0) {
+      ed.begin()
+      state.drag = {kind: 'artboard', mode: 'resize', id: sel.id, start: p, base: {...sel}, handle: hi}
+      return
+    }
+    const hit = artboardAt(p)
+    if (hit) {
+      state.artboard = hit.id
+      ed.begin()
+      state.drag = {kind: 'artboard', mode: 'move', id: hit.id, start: p, base: {...hit}, handle: -1}
+      return
+    }
+    ed.begin()
+    const id = ed.nextId()
+    const list = ed.doc.artboards ?? (ed.doc.artboards = [])
+    const q = snap(p, e.ctrlKey)
+    const a: Artboard = {id, name: `アートボード ${list.length + 1}`, x: q.x, y: q.y, w: 1, h: 1}
+    list.push(a)
+    state.artboard = id
+    state.drag = {kind: 'artboard', mode: 'create', id, start: q, base: {...a}, handle: -1}
+  }
+  function artboardMove(d: Extract<Drag, {kind: 'artboard'}>, raw: Vec2, e: PointerEvent) {
+    const a = boards().find(b => b.id === d.id)
+    if (!a) return
+    const b = d.base
+    if (d.mode === 'create') {
+      let q = snap(raw, e.ctrlKey)
+      if (e.shiftKey) { const m = Math.max(Math.abs(q.x - d.start.x), Math.abs(q.y - d.start.y)); q = {x: d.start.x + Math.sign(q.x - d.start.x || 1) * m, y: d.start.y + Math.sign(q.y - d.start.y || 1) * m} }
+      Object.assign(a, {x: Math.min(d.start.x, q.x), y: Math.min(d.start.y, q.y), w: Math.max(Math.abs(q.x - d.start.x), 1), h: Math.max(Math.abs(q.y - d.start.y), 1)})
+    } else if (d.mode === 'move') {
+      let delta = sub(raw, d.start)
+      if (e.shiftKey) delta = Math.abs(delta.x) > Math.abs(delta.y) ? {x: delta.x, y: 0} : {x: 0, y: delta.y}
+      const q = snap({x: b.x + delta.x, y: b.y + delta.y}, e.ctrlKey)
+      Object.assign(a, {x: q.x, y: q.y})
+    } else {
+      // handles: 0 tl, 1 t, 2 tr, 3 r, 4 br, 5 b, 6 bl, 7 l
+      const q = snap(raw, e.ctrlKey)
+      let x0 = b.x, y0 = b.y, x1 = b.x + b.w, y1 = b.y + b.h
+      if ([0, 6, 7].includes(d.handle)) x0 = q.x
+      if ([2, 3, 4].includes(d.handle)) x1 = q.x
+      if ([0, 1, 2].includes(d.handle)) y0 = q.y
+      if ([4, 5, 6].includes(d.handle)) y1 = q.y
+      Object.assign(a, {x: Math.min(x0, x1), y: Math.min(y0, y1), w: Math.max(Math.abs(x1 - x0), 1), h: Math.max(Math.abs(y1 - y0), 1)})
+    }
+    ed.changed()
+  }
+  function artboardUp(d: Extract<Drag, {kind: 'artboard'}>) {
+    const a = boards().find(b => b.id === d.id)
+    // A click on empty canvas (no real drag) makes no artboard: it deselects.
+    if (d.mode === 'create' && a && (a.w < tol(4) || a.h < tol(4))) {
+      ed.doc.artboards = boards().filter(b => b.id !== d.id)
+      state.artboard = null
+      ed.changed()
+    }
+    ed.commit()
+  }
+  function deleteArtboard(id: number) {
+    ed.edit(() => { ed.doc.artboards = boards().filter(b => b.id !== id) })
+    if (state.artboard === id) state.artboard = null
   }
 
   // ---------- shapes ----------
@@ -910,6 +994,7 @@ export function createCanvas(ed: Editor) {
         ed.changed()
         return
       }
+      case 'artboard': return artboardMove(d, raw, e)
       case 'pivot': {
         const b = d.box, w = b.x1 - b.x0, h = b.y1 - b.y0
         // near one of the nine points: onto it; else anywhere (also outside the box)
@@ -1029,6 +1114,11 @@ export function createCanvas(ed: Editor) {
     h.anchor = null
     if (state.space) { h.cursor = 'grab'; return }
     if (local.x < RULER || local.y < RULER) { h.cursor = local.x < RULER ? 'col-resize' : 'row-resize'; return }
+    if (ed.tool === 'artboard') {
+      const hi = artboardHandleAt(p)
+      h.cursor = hi >= 0 ? ['nwse-resize', 'ns-resize', 'nesw-resize', 'ew-resize'][hi % 4] : artboardAt(p) ? 'move' : 'crosshair'
+      return
+    }
     if (ed.tool === 'pen' || ed.tool === 'direct' || ed.tool === 'convert') {
       const wh = widthHandleAt(p)
       state.hoverGrip = wh?.side ? {stroke: wh.stroke, target: wh.target, side: wh.side} : null
@@ -1103,6 +1193,7 @@ export function createCanvas(ed: Editor) {
     switch (d.kind) {
       case 'pan': return
       case 'pivot': return
+      case 'artboard': return artboardUp(d)
       case 'marquee': {
         const b: Bounds = {x0: Math.min(d.start.x, d.current.x), y0: Math.min(d.start.y, d.current.y), x1: Math.max(d.start.x, d.current.x), y1: Math.max(d.start.y, d.current.y)}
         if (b.x1 - b.x0 < tol(2) && b.y1 - b.y0 < tol(2)) return
@@ -1225,6 +1316,11 @@ export function createCanvas(ed: Editor) {
     if (e.altKey) return false
     const tools: Record<string, typeof ed.tool> = {v: 'select', a: 'direct', p: 'pen', t: 'text'}
     if (k === 'c' && e.shiftKey) { setTool('convert'); return true }
+    if (k === 'o' && e.shiftKey) { setTool('artboard'); return true }
+    if ((k === 'delete' || k === 'backspace') && ed.tool === 'artboard') {
+      if (state.artboard !== null) deleteArtboard(state.artboard)
+      return true
+    }
     const shapeKeys: Record<string, ShapeKind> = {m: 'rect', l: 'ellipse', '\\': 'line'}
     if (shapeKeys[k] && !e.shiftKey) { setShapeKind(shapeKeys[k]); return true }
     if (tools[k] && !e.shiftKey) { setTool(tools[k]); return true }
@@ -1261,7 +1357,7 @@ export function createCanvas(ed: Editor) {
   return reactive({
     view, state, toWorld, toScreen, down, move, up, wheel, zoomAt, fit, key, setTool, cancelDrag, setPaper,
     selectionBounds, boxHandles, widthHandles, widthGrips, finishPen, activePathFrame, cornerWidgets, widthVisible, setShowWidth, pathAt,
-    editText, finishText, adjustShape, shapeAdjustable, setShapeKind, setPivot,
+    editText, finishText, adjustShape, shapeAdjustable, setShapeKind, setPivot, deleteArtboard, artboardAt,
   })
 }
 export type Canvas = ReturnType<typeof createCanvas>

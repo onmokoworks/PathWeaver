@@ -114,8 +114,12 @@ export interface Document {
   /** Placed images by key (data URLs). Left out of most core calls. */
   assets?: Record<string, string>
   blends?: Blend[]
+  /** Named pages on the canvas: what an export frames. */
+  artboards?: Artboard[]
   strokes: Stroke[]
 }
+/** An artboard (top-left x, y; size w, h in document units). */
+export interface Artboard {id: number; name: string; x: number; y: number; w: number; h: number}
 export interface Folder {id: number; name: string; visible: boolean; open: boolean; parent?: number | null}
 
 export interface Anchor {stroke: number; node: number}

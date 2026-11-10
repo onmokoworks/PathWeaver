@@ -832,6 +832,13 @@ pub fn width_location(s: &Stroke, target: WidthTarget) -> Option<(Point, Vec2)> 
 }
 
 pub fn svg(doc: &Document) -> Result<String, String> {
+    svg_frame(doc, None, None)
+}
+
+/// SVG of the drawing seen through `frame` (an artboard or the selection's
+/// box: x, y, w, h; `None` = everything with a small margin), at its size in
+/// units, optionally over a solid `background`.
+pub fn svg_frame(doc: &Document, frame: Option<[f64; 4]>, background: Option<[u8; 3]>) -> Result<String, String> {
     // Export the normalized contours shared with the canvas and expansion.
     let mut paths = String::new();
     let mut min = Point::new(f64::INFINITY, f64::INFINITY);
@@ -899,7 +906,14 @@ pub fn svg(doc: &Document) -> Result<String, String> {
         min = Point::ZERO;
         max = Point::new(100., 100.);
     }
-    Ok(format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"{:.4} {:.4} {:.4} {:.4}\">\n{paths}</svg>\n",min.x-16.,min.y-16.,max.x-min.x+32.,max.y-min.y+32.))
+    let [x, y, w, h] = frame.unwrap_or([min.x - 16., min.y - 16., max.x - min.x + 32., max.y - min.y + 32.]);
+    if !(w > 0. && h > 0.) {
+        return Err("書き出す範囲が空です".into());
+    }
+    let bg = background.map_or(String::new(), |[r, g, b]| format!("  <rect x=\"{x:.4}\" y=\"{y:.4}\" width=\"{w:.4}\" height=\"{h:.4}\" fill=\"#{r:02x}{g:02x}{b:02x}\"/>\n"));
+    Ok(format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w:.4}\" height=\"{h:.4}\" viewBox=\"{x:.4} {y:.4} {w:.4} {h:.4}\">\n{bg}{paths}</svg>\n"
+    ))
 }
 
 #[cfg(test)]

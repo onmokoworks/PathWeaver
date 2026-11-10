@@ -563,6 +563,16 @@ pub struct Folder {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<u64>,
 }
+/// An artboard: a named page on the canvas, what an export frames.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Artboard {
+    pub id: u64,
+    pub name: String,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
 fn default_true() -> bool {
     true
 }
@@ -602,6 +612,8 @@ pub struct Document {
     /// core calls, so a big picture is not copied on every edit.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blends: Vec<Blend>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artboards: Vec<Artboard>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub assets: std::collections::BTreeMap<String, String>,
     pub strokes: Vec<Stroke>,
@@ -625,6 +637,7 @@ impl Default for Document {
             appearance_presets: vec![],
             folders: vec![],
             blends: vec![],
+            artboards: vec![],
             assets: Default::default(),
             strokes: vec![],
         }
@@ -718,6 +731,20 @@ impl Document {
         self.validate()
     }
     pub fn validate(&self) -> Result<(), String> {
+        if self.artboards.len() > 1000 {
+            return Err("アートボードが多すぎます".into());
+        }
+        for (i, a) in self.artboards.iter().enumerate() {
+            if self.artboards[..i].iter().any(|b| b.id == a.id) {
+                return Err("アートボードのIDが重複しています".into());
+            }
+            if a.id >= self.next_id {
+                return Err("アートボードのIDが不正です".into());
+            }
+            if ![a.x, a.y, a.w, a.h].iter().all(|v| v.is_finite()) || a.w <= 0. || a.h <= 0. || a.w > 1e6 || a.h > 1e6 {
+                return Err(format!("アートボード「{}」の大きさが不正です", a.name));
+            }
+        }
         if self.folders.len() > 1000 {
             return Err("フォルダが多すぎます".into());
         }

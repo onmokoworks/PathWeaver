@@ -17,6 +17,7 @@ import InputCheckbox from '../../vendor/tweeq/src/InputCheckbox/InputCheckbox.vu
 import {fontFamilies, relayout} from '../core/textOutline'
 import PaintField from './PaintField.vue'
 import PivotPicker from './PivotPicker.vue'
+import ArtboardPanel from './ArtboardPanel.vue'
 import {pivotIn} from '../canvas/controller'
 import {vTooltip} from '../../vendor/tweeq/src/Tooltip'
 import type {Editor} from '../core/editor'
@@ -320,6 +321,7 @@ function setCap(end: 'start' | 'end', angle: number | null) {
 
 <template>
   <div class="inspector" data-testid="inspector">
+    <ArtboardPanel v-if="ed.tool === 'artboard'" :ed="ed" :canvas="canvas" />
     <!-- anchors -->
     <template v-if="ed.anchors.length && lastAnchor">
       <ParameterGrid>

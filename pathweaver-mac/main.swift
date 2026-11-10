@@ -177,14 +177,50 @@ final class Host: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMes
                     else { self.closeAfterSave = false }
                 }
             }
-        case "export":
-            let panel = NSSavePanel()
-            panel.allowedContentTypes = [.svg]
-            panel.nameFieldStringValue = m["name"] as? String ?? "PathWeaver.svg"
-            panel.beginSheetModal(for: window) { r in
-                if r == .OK, let url = panel.url { self.write(m["text"] as? String ?? "", to: url, callback: "exported") }
+        case "exportFiles":
+            // From the export dialog: one file → a save panel; several → a folder.
+            let files = (m["files"] as? [[String: Any]]) ?? []
+            if files.isEmpty { return }
+            if files.count == 1 {
+                let f = files[0]
+                let panel = NSSavePanel()
+                let name = f["name"] as? String ?? "PathWeaver"
+                if let type = UTType(filenameExtension: (name as NSString).pathExtension) { panel.allowedContentTypes = [type] }
+                panel.nameFieldStringValue = name
+                panel.beginSheetModal(for: window) { r in
+                    if r == .OK, let url = panel.url { self.writeExport([f], to: [url]) }
+                }
+            } else {
+                let panel = NSOpenPanel()
+                panel.canChooseDirectories = true
+                panel.canChooseFiles = false
+                panel.canCreateDirectories = true
+                panel.prompt = "ここに書き出す"
+                panel.message = "\(files.count) 個のファイルを書き出すフォルダを選んでください（同じ名前のファイルは置き換えます）"
+                panel.beginSheetModal(for: window) { r in
+                    if r == .OK, let dir = panel.url {
+                        self.writeExport(files, to: files.map { dir.appendingPathComponent(($0["name"] as? String ?? "PathWeaver").replacingOccurrences(of: "/", with: "_")) })
+                    }
+                }
             }
         default: break
+        }
+    }
+
+    /// Exported files: text (SVG) or base64 bytes (pictures), each written atomically.
+    func writeExport(_ files: [[String: Any]], to urls: [URL]) {
+        do {
+            for (f, url) in zip(files, urls) {
+                if let text = f["text"] as? String {
+                    try text.write(to: url, atomically: true, encoding: .utf8)
+                } else if let b64 = f["base64"] as? String, let data = Data(base64Encoded: b64) {
+                    try data.write(to: url, options: .atomic)
+                }
+            }
+            let shown = urls.count == 1 ? urls[0].path : "\(urls.count) 個 → \(urls[0].deletingLastPathComponent().path)"
+            js("window.pathweaver.exported(\(json(shown)))")
+        } catch {
+            js("window.pathweaver.failed(\(json("書き出せませんでした：\(error.localizedDescription)")))")
         }
     }
 
@@ -515,7 +551,7 @@ final class Host: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMes
             item("保存", "save", "s"), item("別名で保存…", "saveAs", "s", [.command, .shift]),
             .separator(),
             item("配置…（SVG・画像）", "place", "p", [.command, .shift]),
-            item("SVGを書き出す…", "export", "e"),
+            item("書き出し…", "export", "e"),
         ])
         add("編集", [
             item("取り消す", "undo", "z"), item("やり直す", "redo", "z", [.command, .shift]),
@@ -562,6 +598,7 @@ final class Host: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMes
             item("ペン（P）", "toolPen"), item("アンカーポイント（⇧C）", "toolConvert"),
             item("図形（M 長方形・L 楕円・\\ 直線）", "toolShape"),
             item("文字（T）", "toolText"),
+            item("アートボード（⇧O）", "toolArtboard"),
         ])
         let windowMenu = NSMenu(title: "ウインドウ")
         windowMenu.addItem(NSMenuItem(title: "しまう", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m"))

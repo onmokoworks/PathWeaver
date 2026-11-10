@@ -141,6 +141,17 @@ const box = computed(() => {
   return {x: a.x, y: a.y, w: c.x - a.x, h: c.y - a.y, handles: cv.boxHandles(b).map(S), pivot: S(pivotIn(b, cv.state.pivot))}
 })
 
+// Artboards: a hairline frame with its name above; in the artboard tool the
+// edited one gets the accent and handles.
+const boards = computed(() => {
+  void ed.revision
+  return (ed.doc.artboards ?? []).map(a => {
+    const p = S({x: a.x, y: a.y}), q = S({x: a.x + a.w, y: a.y + a.h})
+    const on = ed.tool === 'artboard' && cv.state.artboard === a.id
+    return {a, x: p.x, y: p.y, w: q.x - p.x, h: q.y - p.y, on, handles: on ? cv.boxHandles({x0: a.x, y0: a.y, x1: a.x + a.w, y1: a.y + a.h}).map(S) : []}
+  })
+})
+
 const marquee = computed(() => {
   const d = cv.state.drag
   if (!d || d.kind !== 'marquee') return null
@@ -356,6 +367,15 @@ const cursor = computed(() => {
         <circle v-if="w.key" :cx="w.c.x" :cy="w.c.y" r="2.5" class="key-dot" />
       </g>
 
+      <!-- artboards -->
+      <g class="artboards" :class="{editing: ed.tool === 'artboard'}">
+        <g v-for="b in boards" :key="b.a.id" :class="{on: b.on}" :data-artboard="b.a.id">
+          <rect :x="b.x" :y="b.y" :width="b.w" :height="b.h" class="frame" />
+          <text :x="b.x" :y="b.y - 5" class="name">{{ b.a.name }}</text>
+          <rect v-for="(h, i) in b.handles" :key="i" :x="h.x - 3.5" :y="h.y - 3.5" width="7" height="7" class="handle" />
+        </g>
+      </g>
+
       <!-- bounding box -->
       <g v-if="box" class="bbox">
         <rect :x="box.x" :y="box.y" :width="box.w" :height="box.h" />
@@ -470,6 +490,11 @@ const cursor = computed(() => {
 .width-handle text {font-size: 10px; font-weight: 600; fill: var(--pw-width); paint-order: stroke; stroke: var(--pw-paper); stroke-width: 3px; pointer-events: none}
 .bbox rect {fill: none; stroke: var(--tq-color-accent); stroke-width: 1}
 .bbox .bbox-handle {fill: var(--pw-paper)}
+.artboards .frame {fill: none; stroke: color-mix(in srgb, var(--tq-color-text) 45%, transparent); stroke-width: 1; pointer-events: none}
+.artboards .name {font-size: 10px; fill: var(--tq-color-text-mute); pointer-events: none}
+.artboards .on .frame {stroke: var(--tq-color-accent)}
+.artboards .on .name {fill: var(--tq-color-accent)}
+.artboards .handle {fill: var(--pw-paper); stroke: var(--tq-color-accent); stroke-width: 1}
 .bbox .pivot circle {fill: none; stroke: var(--tq-color-accent); stroke-width: 1}
 .bbox .pivot line {stroke: var(--tq-color-accent); stroke-width: 1}
 .marquee {fill: color-mix(in srgb, var(--tq-color-accent) 10%, transparent); stroke: var(--tq-color-accent); stroke-dasharray: 3 2}

@@ -7,7 +7,7 @@ import type {Document} from './core/types'
 import {installNativePointerLock} from './nativePointerLock'
 import {initLibrary} from './core/library'
 import {initTextHost} from './core/textOutline'
-import {exportAssets} from './core/knockout'
+import type {ExportFile} from './core/exporter'
 
 interface NativeMessage {type: string; [k: string]: unknown}
 declare global {
@@ -63,16 +63,22 @@ export function createHost(ed: Editor, commands: Record<string, () => void>) {
     download(text, ed.fileName.endsWith('.pathweaver') ? ed.fileName : `${ed.fileName}.pathweaver`, 'application/json')
     ed.markSaved(null)
   }
-  async function exportSvg() {
-    let text: string
-    try { text = call<string>('svg', {doc: {...ed.doc, assets: await exportAssets(ed.doc)}}) } catch (e) { ed.error = String(e instanceof Error ? e.message : e); return }
-    const name = ed.fileName.replace(/\.pathweaver$/, '') + '.svg'
-    if (isNative()) return post({type: 'export', text, name})
-    download(text, name, 'image/svg+xml')
+  /** Written files from the export dialog: the Mac asks where (one file: a
+   *  save panel, several: a folder); the browser downloads each. */
+  async function saveFiles(files: ExportFile[]) {
+    if (!files.length) return
+    if (isNative()) return post({type: 'exportFiles', files})
+    for (const [i, f] of files.entries()) {
+      // browsers drop downloads started in the same instant: one at a time
+      if (i) await new Promise(r => setTimeout(r, 250))
+      if (f.text != null) download(f.text, f.name, f.mime)
+      else download(Uint8Array.from(atob(f.base64!), c => c.charCodeAt(0)), f.name, f.mime)
+    }
+    ed.status = files.length > 1 ? `${files.length} ファイルを書き出しました` : `${files[0].name} を書き出しました`
   }
-  function download(text: string, name: string, type: string) {
+  function download(data: string | Uint8Array, name: string, type: string) {
     const a = document.createElement('a')
-    a.href = URL.createObjectURL(new Blob([text], {type}))
+    a.href = URL.createObjectURL(new Blob([data as BlobPart], {type}))
     a.download = name
     a.click()
     setTimeout(() => URL.revokeObjectURL(a.href), 1000)
@@ -82,7 +88,7 @@ export function createHost(ed: Editor, commands: Record<string, () => void>) {
     command: ((name: string) => commands[name]?.()) as never,
     opened: ((path: string, text: string) => opened(path, text)) as never,
     saved: ((path: string) => { ed.markSaved(path); ed.status = `保存しました：${path}` }) as never,
-    exported: ((path: string) => { ed.status = `SVGを書き出しました：${path}` }) as never,
+    exported: ((path: string) => { ed.status = `書き出しました：${path}` }) as never,
     failed: ((message: string) => { ed.error = message }) as never,
     isDirty: (() => ed.dirty) as never,
     placed: ((name: string, kind: 'svg' | 'image', data: string) => placeHandler?.(name, kind, data)) as never,
@@ -104,5 +110,5 @@ export function createHost(ed: Editor, commands: Record<string, () => void>) {
     window.addEventListener('beforeunload', e => { if (ed.dirty) e.preventDefault() })
   }
   post({type: 'ready'})
-  return {open, save, exportSvg, opened, place}
+  return {open, save, saveFiles, opened, place}
 }
