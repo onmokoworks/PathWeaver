@@ -35,10 +35,19 @@ export const coreRestarts = () => restarts
 
 export class CoreError extends Error {}
 
+// Placed images can be megabytes: only export and save need their pixels, so
+// every other call sends the document without them (the core accepts that).
+const NEEDS_ASSETS = new Set(['svg', 'save'])
+function lean(op: string, args: Record<string, unknown>) {
+  const d = args.doc as {assets?: Record<string, string>} | undefined
+  if (NEEDS_ASSETS.has(op) || !d || typeof d !== 'object' || !d.assets || !Object.keys(d.assets).length) return args
+  return {...args, doc: {...d, assets: {}}}
+}
+
 export function call<T = unknown>(op: string, args: Record<string, unknown> = {}): T {
   if (!core) throw new Error('core not initialized')
   const c = core
-  const input = encoder.encode(JSON.stringify({op, ...args}))
+  const input = encoder.encode(JSON.stringify({op, ...lean(op, args)}))
   let packed: bigint
   try {
     const ptr = c.pw_alloc(input.length)

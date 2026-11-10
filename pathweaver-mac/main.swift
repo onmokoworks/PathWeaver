@@ -134,6 +134,24 @@ final class Host: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMes
                 }
                 self.sendLibrary()
             }
+        case "place":
+            // File → Place: SVG arrives as text, bitmaps as data URLs (formats
+            // WebKit can't show, like HEIC or TIFF, are converted to PNG).
+            let panel = NSOpenPanel()
+            panel.allowedContentTypes = [.svg, .png, .jpeg, .gif, .webP, .heic, .tiff, .bmp].compactMap { $0 }
+            panel.allowsMultipleSelection = true
+            panel.beginSheetModal(for: window) { r in
+                guard r == .OK else { return }
+                for url in panel.urls { self.sendPlaced(url) }
+            }
+        case "fonts":
+            let names = NSFontManager.shared.availableFontFamilies.filter { !$0.hasPrefix(".") }
+            js("window.pathweaver.fonts(\(json(names)))")
+        case "glyphs":
+            let id = m["id"] as? Int ?? 0
+            let rings = glyphOutlines(text: m["text"] as? String ?? "", family: m["font"] as? String ?? "",
+                                      size: m["size"] as? Double ?? 12, lineHeight: m["lineHeight"] as? Double ?? 1.2)
+            js("window.pathweaver.glyphs(\(id), \(json(rings)))")
         case "menu":
             canUndo = m["undo"] as? Bool ?? false
             canRedo = m["redo"] as? Bool ?? false
@@ -168,6 +186,107 @@ final class Host: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMes
             }
         default: break
         }
+    }
+
+    func sendPlaced(_ url: URL) {
+        let name = url.lastPathComponent
+        if url.pathExtension.lowercased() == "svg" {
+            guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+                js("window.pathweaver.failed(\(json("「\(name)」を読めませんでした")))"); return
+            }
+            js("window.pathweaver.placed(\(json(name)), 'svg', \(json(text)))")
+            return
+        }
+        guard let data = try? Data(contentsOf: url) else {
+            js("window.pathweaver.failed(\(json("「\(name)」を読めませんでした")))"); return
+        }
+        let ext = url.pathExtension.lowercased()
+        var mime = ["png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "gif": "image/gif", "webp": "image/webp"][ext]
+        var bytes = data
+        if mime == nil {
+            guard let rep = NSBitmapImageRep(data: data), let png = rep.representation(using: .png, properties: [:]) else {
+                js("window.pathweaver.failed(\(json("「\(name)」は画像として読めませんでした")))"); return
+            }
+            bytes = png
+            mime = "image/png"
+        }
+        js("window.pathweaver.placed(\(json(name)), 'image', \(json("data:\(mime!);base64,\(bytes.base64EncodedString())")))")
+    }
+
+    /// Glyph outlines laid out like CSS (see textOutline.ts): origin = top-left
+    /// of the first line box, line box = size × lineHeight, baseline placed by
+    /// half-leading from the primary font's ascent/descent. CoreText picks
+    /// fallback fonts (Japanese in a Latin font) per run. Rings come back
+    /// flattened as [x0, y0, x1, y1, …].
+    func glyphOutlines(text: String, family: String, size: Double, lineHeight: Double) -> [[Double]] {
+        let base = NSFontDescriptor(fontAttributes: [.family: family])
+        let font = NSFont(descriptor: base, size: size) ?? NSFont(name: family, size: size) ?? NSFont.systemFont(ofSize: size)
+        let ctFont = font as CTFont
+        let ascent = Double(CTFontGetAscent(ctFont)), descent = Double(CTFontGetDescent(ctFont))
+        let lineBox = size * lineHeight
+        var rings: [[Double]] = []
+        let tolerance = max(0.02, size * 0.004)
+        for (i, line) in text.components(separatedBy: "\n").enumerated() {
+            if line.isEmpty { continue }
+            let baseline = Double(i) * lineBox + (lineBox - (ascent + descent)) / 2 + ascent
+            let attr = NSAttributedString(string: line, attributes: [.font: font, NSAttributedString.Key(kCTLigatureAttributeName as String): 1])
+            let ctLine = CTLineCreateWithAttributedString(attr)
+            for run in (CTLineGetGlyphRuns(ctLine) as? [CTRun]) ?? [] {
+                let attrs = CTRunGetAttributes(run) as NSDictionary
+                let runFont = (attrs[kCTFontAttributeName] as! CTFont?) ?? ctFont
+                let n = CTRunGetGlyphCount(run)
+                var glyphs = [CGGlyph](repeating: 0, count: n)
+                var pos = [CGPoint](repeating: .zero, count: n)
+                CTRunGetGlyphs(run, CFRange(location: 0, length: n), &glyphs)
+                CTRunGetPositions(run, CFRange(location: 0, length: n), &pos)
+                for k in 0..<n {
+                    // Glyph space is y-up: flip into the page's y-down space.
+                    var m = CGAffineTransform(a: 1, b: 0, c: 0, d: -1, tx: pos[k].x, ty: CGFloat(baseline) - pos[k].y)
+                    guard let path = CTFontCreatePathForGlyph(runFont, glyphs[k], &m) else { continue }
+                    rings.append(contentsOf: flattenPath(path, tolerance: tolerance))
+                }
+            }
+        }
+        return rings
+    }
+    func flattenPath(_ path: CGPath, tolerance: Double) -> [[Double]] {
+        var rings: [[Double]] = []
+        var ring: [Double] = []
+        var last = CGPoint.zero, start = CGPoint.zero
+        func close() { if ring.count >= 6 { rings.append(ring) }; ring = [] }
+        func add(_ p: CGPoint) { ring.append(Double(p.x)); ring.append(Double(p.y)) }
+        func steps(_ len: CGFloat) -> Int { max(2, min(32, Int((Double(len) / tolerance).squareRoot() / 2) + 1)) }
+        path.applyWithBlock { el in
+            let e = el.pointee
+            switch e.type {
+            case .moveToPoint:
+                close(); start = e.points[0]; last = start; add(start)
+            case .addLineToPoint:
+                last = e.points[0]; add(last)
+            case .addQuadCurveToPoint:
+                let c = e.points[0], p = e.points[1]
+                let n = steps(hypot(c.x - last.x, c.y - last.y) + hypot(p.x - c.x, p.y - c.y))
+                for i in 1...n {
+                    let t = CGFloat(i) / CGFloat(n), u = 1 - t
+                    add(CGPoint(x: u * u * last.x + 2 * u * t * c.x + t * t * p.x, y: u * u * last.y + 2 * u * t * c.y + t * t * p.y))
+                }
+                last = p
+            case .addCurveToPoint:
+                let c1 = e.points[0], c2 = e.points[1], p = e.points[2]
+                let n = steps(hypot(c1.x - last.x, c1.y - last.y) + hypot(c2.x - c1.x, c2.y - c1.y) + hypot(p.x - c2.x, p.y - c2.y))
+                for i in 1...n {
+                    let t = CGFloat(i) / CGFloat(n), u = 1 - t
+                    let a = u * u * u, b = 3 * u * u * t, cc = 3 * u * t * t, d = t * t * t
+                    add(CGPoint(x: a * last.x + b * c1.x + cc * c2.x + d * p.x, y: a * last.y + b * c1.y + cc * c2.y + d * p.y))
+                }
+                last = p
+            case .closeSubpath:
+                close(); last = start
+            @unknown default: break
+            }
+        }
+        close()
+        return rings
     }
 
     /// Diagnostic run (PATHWEAVER_SELFTEST=/path/prefix): load the sample,
@@ -285,6 +404,10 @@ final class Host: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMes
         }
     }
     func windowDidResignKey(_ notification: Notification) { setPointerLock(false) }
+    func json(_ v: Any) -> String {
+        let d = try! JSONSerialization.data(withJSONObject: v)
+        return String(data: d, encoding: .utf8)!
+    }
     func json(_ s: String) -> String {
         let d = try! JSONSerialization.data(withJSONObject: [s])
         let a = String(data: d, encoding: .utf8)!
@@ -389,6 +512,7 @@ final class Host: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMes
             NSMenuItem(title: "閉じる", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w"),
             item("保存", "save", "s"), item("別名で保存…", "saveAs", "s", [.command, .shift]),
             .separator(),
+            item("配置…（SVG・画像）", "place", "p", [.command, .shift]),
             item("SVGを書き出す…", "export", "e"),
         ])
         add("編集", [
@@ -402,6 +526,9 @@ final class Host: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMes
             item("フォルダにまとめる", "group", "g"), item("フォルダを解除", "ungroup", "g", [.command, .shift]),
             .separator(),
             item("すべてを選択", "selectAll", "a"),
+        ])
+        add("書式", [
+            item("アウトラインを作成", "outline", "o", [.command, .shift]),
         ])
         add("表示", [
             item("グリッドを表示して吸着", "snapGrid", "'"), item("ガイドに吸着", "snapGuides", ";"),
@@ -426,6 +553,7 @@ final class Host: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMes
             // never steal keys from text fields; the menu lists them for discovery.
             item("選択（V）", "toolSelect"), item("ダイレクト選択（A）", "toolDirect"),
             item("ペン（P）", "toolPen"), item("アンカーポイント（⇧C）", "toolConvert"),
+            item("文字（T）", "toolText"),
         ])
         let windowMenu = NSMenu(title: "ウインドウ")
         windowMenu.addItem(NSMenuItem(title: "しまう", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m"))

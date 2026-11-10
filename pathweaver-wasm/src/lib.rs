@@ -97,6 +97,17 @@ fn render(s: &Stroke) -> Value {
     if s.guide {
         return json!({"layers": [], "hit": "", "center": centerline});
     }
+    // A placed image: drawn by the canvas from the document's asset (the core
+    // never sees the pixels here), picked by its rectangle.
+    if let Some(img) = &s.image {
+        let d = path_d(&[img.rect()]);
+        return json!({
+            "layers": [{"color": "#000000", "opacity": img.opacity, "d": d, "placed": {
+                "asset": img.asset, "w": img.width, "h": img.height, "matrix": img.matrix, "reference": img.reference,
+            }}],
+            "hit": d, "center": "",
+        });
+    }
     // Contours only: no triangulation and no union. Hit testing uses the
     // layers' own rings (non-zero winding), which covers the same area.
     match outline::contours_only(|| outline::paint_layers(s)) {
@@ -301,6 +312,25 @@ pub fn dispatch(op: &str, a: &Value) -> Result<Value, String> {
             let Some(g) = &s.appearance else { return Ok(json!([])) };
             let values = appearance::parameter_values(g, &original_layers(&s)?)?;
             json!(values.into_iter().map(|((node, key), v)| json!({"node": node, "key": key, "value": v})).collect::<Vec<_>>())
+        }
+        // Fallback text outlines (browsers without the Mac host): the text
+        // drawn by the page into a PNG, traced back into contours.
+        "traceText" => {
+            let png: String = field(a, "png")?;
+            let png = png.trim_start_matches("data:image/png;base64,");
+            let scale: f64 = field(a, "scale")?;
+            let img = pathweaver_core::raster::picture(png, 0., 0., 0.)?;
+            let w = img.width as f64;
+            let img = pathweaver_core::raster::picture(png, 0., 0., w * scale)?;
+            let layer = pathweaver_core::raster::trace(&img, 0.5, 0.25 * scale, 1, 0.5 * scale * scale)?;
+            json!(layer.contours)
+        }
+        // Rings from an imported shape, made into normalized contours under
+        // the shape's fill rule (SVG nonzero / evenodd).
+        "normalizeRings" => {
+            let rings: Vec<Vec<Point>> = field(a, "rings")?;
+            let even: bool = field(a, "evenodd").unwrap_or(false);
+            json!(outline::fill_rule_contours(&rings, even))
         }
         // Test hook: proves the host survives a panic inside the core.
         "debugPanic" => panic!("debugPanic requested"),

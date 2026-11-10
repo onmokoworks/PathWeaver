@@ -21,7 +21,9 @@ import {isFolded, layout, setFolded, toggleFolded, type PanelId} from './core/la
 import {settings} from './core/settings'
 import {createHost, isNative} from './host'
 import {call} from './core/wasm'
-import type {Document} from './core/types'
+import type {Document, Vec2} from './core/types'
+import {placeData, placeFiles, type PlaceTarget} from './core/place'
+import {relayout} from './core/textOutline'
 
 useAppConfigStore().appId = 'pathweaver'
 useInputColor(['#202124', '#ffffff', '#e66b5b', '#e8b655', '#70a774', '#5c88c5', '#9b7ac3'])
@@ -45,12 +47,14 @@ const tools: {id: Tool; icon: string; label: string; key: string}[] = [
   {id: 'direct', icon: 'pw:direct', label: 'ダイレクト選択（アンカー）', key: 'A'},
   {id: 'pen', icon: 'pw:pen', label: 'ペン', key: 'P'},
   {id: 'convert', icon: 'pw:anchor', label: 'アンカーポイント（角⇄スムーズ）', key: '⇧C'},
+  {id: 'text', icon: 'material-symbols:title', label: '文字', key: 'T'},
 ]
 const toolHint: Record<Tool, string> = {
   select: 'クリックで選択・ドラッグで移動。枠の角で拡大縮小、角の外側で回転（Shiftで比率固定／角度刻み、Optionで複製・中心基準）',
   direct: 'アンカー・ハンドルをドラッグ。線分をOption＋クリック／ダブルクリックでアンカー追加。太さはオレンジの端をドラッグ（Optionで片側）、⌘＋芯クリックで幅点追加、⌘＋端点ドラッグで切り口回転',
   pen: 'クリックで角、ドラッグで曲線。線分上でクリックでアンカー追加。Shift＋パスをクリックでその上から描き始め（次の点は法線方向）。太さはオレンジの端をドラッグ（Optionで片側）。Enter/Escで終了',
-  convert: 'アンカーをクリックで角に、ドラッグでスムーズに。ハンドルをドラッグで片側だけ動かす'
+  convert: 'アンカーをクリックで角に、ドラッグでスムーズに。ハンドルをドラッグで片側だけ動かす',
+  text: 'クリックした所に文字を打つ。文字をクリックで打ち直し。Esc／ほかをクリックで確定。フォントと大きさは右のパネル',
 }
 
 const typing = (t: EventTarget | null) =>
@@ -93,6 +97,30 @@ const commands: Record<string, () => void> = {
   toolDirect: () => canvas.setTool('direct'),
   toolPen: () => canvas.setTool('pen'),
   toolConvert: () => canvas.setTool('convert'),
+  toolText: () => canvas.setTool('text'),
+  place: () => { settle(); host.place((name, kind, data) => placeData(placeTarget(), name, kind, data), files => placeFiles(placeTarget(), files)) },
+  outline: () => outlineText(),
+}
+/** Where placed material goes: the given world point, else the middle of the view. */
+function placeTarget(at?: Vec2): PlaceTarget {
+  // Placed material arrives selected, ready to move (Illustrator's Place).
+  canvas.setTool('select')
+  const v = canvas.view
+  return {ed, at: at ?? canvas.toWorld({x: v.width / 2, y: v.height / 2}), viewSize: {w: v.width / v.zoom, h: v.height / v.zoom}}
+}
+/** Type → Create Outlines: the selected text becomes plain shapes. */
+function outlineText() {
+  const texts = ed.selected.map(id => ed.findStroke(id)).filter(s => s?.text)
+  if (!texts.length) { ed.status = 'アウトライン化する文字を選んでください'; return }
+  ed.edit(() => { for (const s of texts) { s!.text = null; s!.name = `${s!.name}（アウトライン）` } })
+  ed.status = `${texts.length}個の文字をアウトライン化しました`
+}
+function onDrop(e: DragEvent) {
+  const files = [...(e.dataTransfer?.files ?? [])]
+  if (!files.length) return
+  e.preventDefault()
+  const el = document.querySelector('[data-testid="canvas"]')!.getBoundingClientRect()
+  placeFiles(placeTarget(canvas.toWorld({x: e.clientX - el.left, y: e.clientY - el.top})), files)
 }
 const blank = JSON.parse(JSON.stringify(ed.doc))
 const exampleDoc = () => call<Document>('example')
@@ -129,6 +157,8 @@ function onKeyDown(e: KeyboardEvent) {
   if (k === ' ') { canvas.state.space = true; nodeEditor.value?.setSpace(true); e.preventDefault(); return }
   if (mod && k === 'z') { e.shiftKey ? ed.redo() : ed.undo(); e.preventDefault(); return }
   if (mod && k === 's') { (e.shiftKey ? commands.saveAs : commands.save)(); e.preventDefault(); return }
+  if (mod && e.shiftKey && k === 'p') { commands.place(); e.preventDefault(); return }
+  if (mod && e.shiftKey && k === 'o') { commands.outline(); e.preventDefault(); return }
   if (mod && k === 'o') { commands.open(); e.preventDefault(); return }
   if (mod && k === 'e') { commands.export(); e.preventDefault(); return }
   if (mod && e.key === ',') { settingsOpen.value = true; e.preventDefault(); return }
@@ -141,7 +171,13 @@ function onKeyDown(e: KeyboardEvent) {
     if (text) { navigator.clipboard?.writeText(text).catch(() => {}); e.preventDefault() }
     return
   }
-  if (e.metaKey && !e.shiftKey && k === 'v') { if (ed.paste()) e.preventDefault(); return }
+  // ⌘V: the browser's paste event comes first (it can carry an image copied
+  // elsewhere); only when none arrives are PathWeaver's own paths pasted.
+  if (e.metaKey && !e.shiftKey && k === 'v') {
+    pasteSeen = false
+    setTimeout(() => { if (!pasteSeen) ed.paste() }, 0)
+    return
+  }
   if (nodeEditor.value?.isPointerInside() && nodeEditor.value.key(e)) { e.preventDefault(); return }
   if (canvas.key(e)) e.preventDefault()
 }
@@ -152,8 +188,19 @@ function onClipboard(e: ClipboardEvent) {
   e.clipboardData?.setData('text/plain', text)
   e.preventDefault()
 }
+let pasteSeen = false
 function onPaste(e: ClipboardEvent) {
   if (typing(document.activeElement)) return
+  pasteSeen = true
+  // An image (or SVG file) on the clipboard is placed in the view.
+  const files = [...(e.clipboardData?.files ?? [])].filter(f => f.type.startsWith('image/'))
+  const svgText = e.clipboardData?.getData('image/svg+xml') || (/^\s*(<\?xml[^>]*>\s*)?<svg[\s>]/.test(e.clipboardData?.getData('text/plain') ?? '') ? e.clipboardData!.getData('text/plain') : '')
+  if (files.length || svgText) {
+    e.preventDefault()
+    if (svgText) placeData(placeTarget(), 'ペーストしたSVG', 'svg', svgText)
+    else placeFiles(placeTarget(), files)
+    return
+  }
   if (ed.paste(e.clipboardData?.getData('text/plain') || undefined) || ed.paste()) e.preventDefault()
 }
 function onKeyUp(e: KeyboardEvent) {
@@ -169,11 +216,11 @@ onMounted(() => {
   document.addEventListener('copy', onClipboard)
   document.addEventListener('cut', onClipboard)
   document.addEventListener('paste', onPaste)
-  window.addEventListener('blur', () => { canvas.cancelDrag(); canvas.state.space = false; canvas.state.meta = false; canvas.state.alt = false; if (!typing(document.activeElement)) ed.commit() })
+  window.addEventListener('blur', () => { canvas.cancelDrag(); canvas.state.space = false; canvas.state.meta = false; canvas.state.alt = false; if (!typing(document.activeElement) && !canvas.state.textEdit) ed.commit() })
   // Tweeq's color pad/slider gestures end without a confirm event. Releasing
   // the pointer outside a text field ends the gesture: one drag = one undo.
   window.addEventListener('pointerup', () => queueMicrotask(() => {
-    if (!typing(document.activeElement) && !canvas.state.drag) ed.commit()
+    if (!typing(document.activeElement) && !canvas.state.drag && !canvas.state.textEdit) ed.commit()
   }), true)
   requestAnimationFrame(() => canvas.fit())
 })
@@ -240,7 +287,11 @@ const sideTab = ref<string>((() => { try { return localStorage.getItem('pw.sideT
 function setSideTab(id: string) { sideTab.value = id; try { localStorage.setItem('pw.sideTab', id) } catch { /* preference only */ } }
 
 // Test hook: lets end-to-end tests read the document without poking internals.
-;(window as unknown as {__pw: unknown}).__pw = {ed, canvas, call}
+;(window as unknown as {__pw: unknown}).__pw = {
+  ed, canvas, call,
+  // test hook: lay out the active text again and finish its gesture
+  relayoutActive: async () => { const s = ed.active; if (s) await relayout(ed, s); ed.commit() },
+}
 </script>
 
 <template>
@@ -271,7 +322,7 @@ function setSideTab(id: string) { sideTab.value = id; try { localStorage.setItem
           <AreaSplit name="pw-right" direction="horizontal" fixed="second" :titles="['キャンバス', 'レイヤー・プロパティ']" :min="200" :max="maxRight" :hide="!layersDocked && !propsDocked ? 'second' : null">
             <template #first>
               <AreaSplit name="pw-nodes" direction="vertical" fixed="second" :titles="['キャンバス', 'ノード']" :max="maxNodes" :hide="!nodesDocked ? 'second' : null">
-                <template #first><div class="area" data-area="canvas"><ArtCanvas :ed="ed" :canvas="canvas" v-slot="{bounds}" @command="n => commands[n]?.()"><ToolPalette :tools="tools" :active="ed.tool" :bounds="bounds" @select="t => canvas.setTool(t)" /></ArtCanvas></div></template>
+                <template #first><div class="area" data-area="canvas" @dragover.prevent @drop="onDrop"><ArtCanvas :ed="ed" :canvas="canvas" v-slot="{bounds}" @command="n => commands[n]?.()"><ToolPalette :tools="tools" :active="ed.tool" :bounds="bounds" @select="t => canvas.setTool(t)" /></ArtCanvas></div></template>
                 <template #second><div class="area" data-area="nodes"><NodeEditor v-if="nodesDocked" ref="nodeEditor" :ed="ed" /></div></template>
               </AreaSplit>
             </template>

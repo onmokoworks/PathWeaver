@@ -310,7 +310,8 @@ function dropAt(y: number, moving: DataRow): Drop | null {
           <span class="thumb">
             <svg v-if="thumb(row.stroke)" :viewBox="thumb(row.stroke)!.viewBox" preserveAspectRatio="xMidYMid meet">
               <template v-for="(l, i) in thumb(row.stroke)!.layers" :key="i">
-                <image v-if="l.image" :href="l.image.href" :x="l.image.x" :y="l.image.y" :width="l.image.w" :height="l.image.h" :opacity="l.opacity" preserveAspectRatio="none" />
+                <image v-if="l.placed" :href="ed.doc.assets?.[l.placed.asset]" :width="l.placed.w" :height="l.placed.h" :opacity="l.opacity" :transform="`matrix(${l.placed.matrix.join(' ')})`" preserveAspectRatio="none" />
+                <image v-else-if="l.image" :href="l.image.href" :x="l.image.x" :y="l.image.y" :width="l.image.w" :height="l.image.h" :opacity="l.opacity" preserveAspectRatio="none" />
                 <path v-else :d="l.d" :fill="l.color" :fill-opacity="l.opacity" />
               </template>
             </svg>
@@ -320,6 +321,8 @@ function dropAt(y: number, moving: DataRow): Drop | null {
             @click.stop @keydown.enter.stop="finishRename(true)" @keydown.escape.stop="finishRename(false)" @blur="finishRename(true)"
           >
           <span v-else class="name" :title="row.stroke.name">{{ row.stroke.name }}</span>
+          <span v-if="row.stroke.text" class="kind" title="文字（打ち直せます）"><Icon icon="material-symbols:title" /></span>
+          <span v-if="row.stroke.image?.reference" class="kind ref" data-reference title="下絵：書き出されず、キャンバスでは選ばれません">下絵</span>
           <button
             v-if="row.stroke.appearance" type="button" class="badge" :class="{open: openLooks.has(row.stroke.id)}" :data-look-toggle="row.stroke.id"
             :aria-label="openLooks.has(row.stroke.id) ? '外観をたたむ' : '外観を表示'" title="このパスの外観（ノード）を一覧に出す"
@@ -378,4 +381,6 @@ li.effect.selected {background: var(--tq-color-accent-soft)}
 .dot {width: 7px; height: 7px; border-radius: 1px; flex: none}
 .none {color: var(--tq-color-text-mute); padding-left: 10px}
 .drop-line {position: absolute; left: 6px; right: 6px; height: 2px; background: var(--tq-color-accent); pointer-events: none}
+.kind {display: grid; place-items: center; flex: none; color: var(--tq-color-text-mute); font-size: 12px}
+.kind.ref {font-size: 9px; padding: 0 4px; border-radius: 3px; border: 1px solid var(--tq-color-border)}
 </style>

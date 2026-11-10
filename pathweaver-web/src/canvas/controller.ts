@@ -7,6 +7,7 @@
 //        segment adds an anchor; Option-drag a handle breaks the pair.
 import {reactive, watch} from 'vue'
 import {call} from '../core/wasm'
+import {baselineTop, DEFAULT_FONT} from '../core/textOutline'
 import {settings, wheelZoom, type Paper} from '../core/settings'
 import type {Editor} from '../core/editor'
 import type {Anchor, CornerWidget, Document, Frame, PathNode, SnapGuide, Stroke, Vec2, WidthHandle} from '../core/types'
@@ -68,6 +69,9 @@ export function createCanvas(ed: Editor) {
     pathFrame: null as {origin: Vec2; tangent: Vec2; node: number} | null,
     // Where the pen would land right now (snapped), shown while hovering.
     snapAt: null as Vec2 | null,
+    // Text being typed on the canvas (the overlay editor); `created` = made by
+    // this edit, so an empty result removes it without an undo step.
+    textEdit: null as {stroke: number; created: boolean} | null,
   })
   let frames: Frame[] = []
   let framesKey = ''  // what `frames` was captured for while hovering
@@ -90,6 +94,8 @@ export function createCanvas(ed: Editor) {
   const toWorld = (p: Vec2): Vec2 => ({x: (p.x - view.panX) / view.zoom, y: (p.y - view.panY) / view.zoom})
   const toScreen = (p: Vec2): Vec2 => ({x: p.x * view.zoom + view.panX, y: p.y * view.zoom + view.panY})
   const tol = (px = 7) => px / view.zoom
+  /** A 下絵 (tracing reference) stays put: only the layer list selects it. */
+  const pickable = (s: Stroke) => ed.shown(s) && !s.image?.reference
 
   const editable = () => ed.doc.strokes.filter(s => ed.shown(s) && !s.contours && !s.guide)
   const pathGuides = () => ed.doc.strokes.filter(s => ed.shown(s) && s.guide && s.nodes.length > 1)
@@ -132,7 +138,7 @@ export function createCanvas(ed: Editor) {
   }
   function pathAt(p: Vec2): number | null {
     for (const s of [...ed.doc.strokes].reverse()) {
-      if (!ed.shown(s)) continue
+      if (!pickable(s)) continue
       const r = ed.renders.get(s.id)
       if (r && inside(p, rings(r))) return s.id
       if (s.nodes.some(n => dist(n.p, p) < tol(6))) return s.id
@@ -292,9 +298,9 @@ export function createCanvas(ed: Editor) {
   }
 
   // ---------- helpers ----------
+  /** Back to the paths as they were when the drag began (`base` = strokes JSON). */
   function restoreBase(base: string) {
-    const d = JSON.parse(base) as Document
-    ed.doc.strokes = d.strokes
+    ed.doc.strokes = JSON.parse(base) as Stroke[]
   }
   function transformSelected(m: Matrix) {
     const r = call<{doc: Document}>('edit', {doc: ed.doc, kind: 'transform', ids: ed.selected, matrix: m})
@@ -333,15 +339,68 @@ export function createCanvas(ed: Editor) {
       return
     }
 
+    if (state.textEdit) finishText()
     switch (ed.tool) {
+      case 'text': return textDown(p)
       case 'pen': return penDown(e, p)
       case 'direct': return directDown(e, p, double)
       case 'convert': return convertDown(e, p)
-      default: return selectDown(e, p)
+      default: return selectDown(e, p, double)
     }
   }
 
-  function selectDown(e: PointerEvent, p: Vec2) {
+  // ---------- text ----------
+  /** Click with the text tool: edit the text under the pointer, or start a new one there. */
+  function textDown(p: Vec2) {
+    const hit = pathAt(p)
+    if (hit !== null && stroke(hit)?.text) return editText(hit)
+    const d = ed.doc
+    const size = 48, lh = 1.2
+    const color = ed.drawStyle.fill ?? ed.drawStyle.edge ?? [32, 33, 36]
+    ed.begin()
+    const id = ed.nextId(d)
+    // The click is the first line's baseline, near its left end (as in Illustrator).
+    const top = p.y - baselineTop(DEFAULT_FONT, size, lh)
+    d.strokes.push({
+      id, name: 'テキスト', visible: true, closed: true, nodes: [], widths: [],
+      start_width: {left: 0.5, right: 0.5, linked: true, angle: 0}, end_width: {left: 0.5, right: 0.5, linked: true, angle: 0},
+      start_angle: 90, end_angle: 90, fill: [...color] as Stroke['fill'], edge: null, edge_width: 1, frame_angle: 0,
+      corners: [], join: 'Miter', miter_limit: 10, contours: [], appearance: null,
+      text: {text: '', font: DEFAULT_FONT, size, line_height: lh, matrix: [1, 0, 0, 1, p.x, top]},
+    })
+    ed.selected = [id]
+    ed.anchors = []
+    ed.changed()
+    state.textEdit = {stroke: id, created: true}
+  }
+  function editText(id: number) {
+    finishPen()
+    ed.selected = [id]
+    ed.anchors = []
+    ed.begin()
+    state.textEdit = {stroke: id, created: false}
+  }
+  /** Leave the text editor: one undo step; an empty text is removed. */
+  function finishText() {
+    const t = state.textEdit
+    if (!t) return
+    state.textEdit = null
+    const s = stroke(t.stroke)
+    if (s?.text && !s.text.text.trim()) {
+      if (t.created) { ed.cancel(); ed.selected = []; return }
+      ed.doc.strokes = ed.doc.strokes.filter(v => v.id !== s.id)
+      ed.selected = []
+      ed.changed()
+    }
+    ed.commit()
+  }
+
+  function selectDown(e: PointerEvent, p: Vec2, double = false) {
+    // Double-click text: type into it (Illustrator switches to the type tool).
+    if (double && !e.shiftKey) {
+      const hit = pathAt(p)
+      if (hit !== null && stroke(hit)?.text) { editText(hit); return }
+    }
     const box = ed.selected.length ? selectionBounds() : null
     if (box) {
       const hs = boxHandles(box)
@@ -349,7 +408,7 @@ export function createCanvas(ed: Editor) {
         if (dist(hs[i], p) < tol(6)) {
           const opposite = hs[(i + 4) % 8]
           ed.begin()
-          state.drag = {kind: 'scale', base: JSON.stringify(ed.doc), box, corner: hs[i], fixed: opposite}
+          state.drag = {kind: 'scale', base: JSON.stringify(ed.doc.strokes), box, corner: hs[i], fixed: opposite}
           return
         }
       }
@@ -359,7 +418,7 @@ export function createCanvas(ed: Editor) {
         if (d >= tol(6) && d < tol(20) && !inBox(box, p)) {
           const center = {x: (box.x0 + box.x1) / 2, y: (box.y0 + box.y1) / 2}
           ed.begin()
-          state.drag = {kind: 'rotate', base: JSON.stringify(ed.doc), center, startAngle: Math.atan2(p.y - center.y, p.x - center.x)}
+          state.drag = {kind: 'rotate', base: JSON.stringify(ed.doc.strokes), center, startAngle: Math.atan2(p.y - center.y, p.x - center.x)}
           return
         }
       }
@@ -372,7 +431,7 @@ export function createCanvas(ed: Editor) {
       if (e.altKey) ed.duplicateSelection()
       const origin = nearestSelectedAnchor(p) ?? p
       captureFrames(null, () => false)
-      state.drag = {kind: 'move', start: p, origin, base: JSON.stringify(ed.doc), moved: false, duplicate: e.altKey}
+      state.drag = {kind: 'move', start: p, origin, base: JSON.stringify(ed.doc.strokes), moved: false, duplicate: e.altKey}
       return
     }
     const g = guideAt(p)
@@ -836,6 +895,7 @@ export function createCanvas(ed: Editor) {
       hoverSnap(p, e.ctrlKey)
       return
     }
+    if (ed.tool === 'text') { h.cursor = 'text'; return }
     if (ed.tool === 'direct' || ed.tool === 'convert') {
       if (ed.tool === 'direct' && ed.selected.some(id => { const s = stroke(id); return s && !s.contours && cornerWidgets(s).some(w => dist(w.p, p) < tol(6)) })) {
         h.cursor = 'pointer'
@@ -880,7 +940,7 @@ export function createCanvas(ed: Editor) {
         } else {
           for (const s of ed.doc.strokes) {
             const r = ed.renders.get(s.id)
-            if (!ed.shown(s) || !r) continue
+            if (!pickable(s) || !r) continue
             if (rectHitsRings(b, rings(r)) && !ed.selected.includes(s.id)) ed.selected = [...ed.selected, s.id]
           }
         }
@@ -960,6 +1020,7 @@ export function createCanvas(ed: Editor) {
     const k = e.key.toLowerCase()
     const mod = e.metaKey || e.ctrlKey
     if (k === 'escape') {
+      if (state.textEdit) { finishText(); return true }
       if (state.drag) { cancelDrag(); return true }
       if (state.widthTarget) { state.widthTarget = null; return true }
       if (state.penPath !== null) { finishPen(); return true }
@@ -968,7 +1029,7 @@ export function createCanvas(ed: Editor) {
     }
     if (k === 'enter' && state.penPath !== null) { finishPen(); return true }
     if (mod) {
-      if (k === 'a') { ed.selected = ed.doc.strokes.filter(s => ed.shown(s)).map(s => s.id); ed.anchors = []; return true }
+      if (k === 'a') { ed.selected = ed.doc.strokes.filter(pickable).map(s => s.id); ed.anchors = []; return true }
       if (k === '0') { fit(); return true }
       if (k === '1') { zoomAt({x: view.width / 2, y: view.height / 2}, 1 / view.zoom); return true }
       if (k === '=' || k === '+') { zoomAt({x: view.width / 2, y: view.height / 2}, 1.25); return true }
@@ -977,7 +1038,7 @@ export function createCanvas(ed: Editor) {
       return false
     }
     if (e.altKey) return false
-    const tools: Record<string, typeof ed.tool> = {v: 'select', a: 'direct', p: 'pen'}
+    const tools: Record<string, typeof ed.tool> = {v: 'select', a: 'direct', p: 'pen', t: 'text'}
     if (k === 'c' && e.shiftKey) { setTool('convert'); return true }
     if (tools[k] && !e.shiftKey) { setTool(tools[k]); return true }
     if (k === 'f' || k === 'home') { fit(); return true }
@@ -1005,6 +1066,7 @@ export function createCanvas(ed: Editor) {
   }
   function setTool(t: typeof ed.tool) {
     if (t !== 'pen') finishPen()
+    if (state.textEdit) finishText()
     ed.tool = t
     state.widthTarget = null
   }
@@ -1012,6 +1074,7 @@ export function createCanvas(ed: Editor) {
   return reactive({
     view, state, toWorld, toScreen, down, move, up, wheel, zoomAt, fit, key, setTool, cancelDrag, setPaper,
     selectionBounds, boxHandles, widthHandles, widthGrips, finishPen, activePathFrame, cornerWidgets, widthVisible, setShowWidth, pathAt,
+    editText, finishText,
   })
 }
 export type Canvas = ReturnType<typeof createCanvas>

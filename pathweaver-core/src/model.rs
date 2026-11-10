@@ -96,8 +96,60 @@ pub struct Corner {
     pub kind: CornerKind,
 }
 
+/// Live text: the characters and their font stay editable. The shape is the
+/// glyph outlines laid out by the host (CoreText on the Mac) and stored in
+/// `Stroke::contours`, already placed by `matrix` — so fill, outline and the
+/// appearance graph work on text like on any closed shape.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Text {
+    pub text: String,
+    pub font: String,
+    /// Font size in document units.
+    pub size: f64,
+    #[serde(default = "default_line_height")]
+    pub line_height: f64,
+    /// Local text space (origin = top-left of the first line box) → world.
+    pub matrix: [f64; 6],
+}
+fn default_line_height() -> f64 {
+    1.2
+}
+
+/// A placed bitmap. The pixels live once in `Document::assets[asset]`; the
+/// stroke keeps only the reference and where it sits. `contours` holds the
+/// placed rectangle (for picking, bounds and snapping).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Placed {
+    pub asset: String,
+    /// Pixel size; local space is 0..width × 0..height.
+    pub width: f64,
+    pub height: f64,
+    pub matrix: [f64; 6],
+    #[serde(default = "default_one")]
+    pub opacity: f64,
+    /// 下絵: a tracing reference — not exported, not picked on the canvas.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reference: bool,
+}
+fn default_one() -> f64 {
+    1.
+}
+impl Placed {
+    pub fn rect(&self) -> Vec<Point> {
+        let m = kurbo::Affine::new(self.matrix);
+        [(0., 0.), (self.width, 0.), (self.width, self.height), (0., self.height)]
+            .into_iter()
+            .map(|(x, y)| m * Point::new(x, y))
+            .collect()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Stroke {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<Text>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<Placed>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub appearance: Option<super::appearance::Graph>,
     /// A guide made from this path (Illustrator's Make Guides): drawn as a thin
@@ -150,6 +202,12 @@ impl Stroke {
     pub fn transformed(&self, matrix: kurbo::Affine, scale_widths: bool) -> Self {
         let vector = |v: Vec2| matrix * v.to_point() - matrix * Point::ZERO;
         let mut result = self.clone();
+        if let Some(t) = &mut result.text {
+            t.matrix = (matrix * kurbo::Affine::new(t.matrix)).as_coeffs();
+        }
+        if let Some(i) = &mut result.image {
+            i.matrix = (matrix * kurbo::Affine::new(i.matrix)).as_coeffs();
+        }
         if let Some(contours) = &mut result.contours {
             for p in contours.iter_mut().flatten() {
                 *p = matrix * *p;
@@ -208,6 +266,8 @@ impl Stroke {
     }
     pub fn new(id: u64, name: String) -> Self {
         Self {
+            text: None,
+            image: None,
             appearance: None,
             guide: false,
             folder: None,
@@ -501,6 +561,10 @@ pub struct Document {
     pub appearance_presets: Vec<super::appearance_assets::Preset>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub folders: Vec<Folder>,
+    /// Placed images by key (data URLs). The web side leaves this out of most
+    /// core calls, so a big picture is not copied on every edit.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub assets: std::collections::BTreeMap<String, String>,
     pub strokes: Vec<Stroke>,
 }
 fn default_angle_step() -> f64 {
@@ -521,6 +585,7 @@ impl Default for Document {
             angle_step: default_angle_step(),
             appearance_presets: vec![],
             folders: vec![],
+            assets: Default::default(),
             strokes: vec![],
         }
     }
@@ -695,6 +760,35 @@ impl Document {
                 {
                     return Err("閉じた輪郭が不正です".into());
                 }
+            }
+            let bad_matrix = |m: &[f64; 6]| m.iter().any(|v| !v.is_finite() || v.abs() > 1e7);
+            if let Some(t) = &s.text {
+                if t.text.chars().count() > 10000
+                    || t.font.chars().count() > 200
+                    || !t.size.is_finite()
+                    || !(0.1..=10000.0).contains(&t.size)
+                    || !t.line_height.is_finite()
+                    || !(0.1..=10.0).contains(&t.line_height)
+                    || bad_matrix(&t.matrix)
+                {
+                    return Err("テキストが不正です".into());
+                }
+            }
+            if let Some(i) = &s.image {
+                if i.asset.is_empty()
+                    || i.asset.len() > 64
+                    || !(i.width.is_finite() && i.height.is_finite() && i.width > 0. && i.height > 0.)
+                    || !(0.0..=1.0).contains(&i.opacity)
+                    || bad_matrix(&i.matrix)
+                {
+                    return Err("配置画像が不正です".into());
+                }
+                if !self.assets.is_empty() && !self.assets.contains_key(&i.asset) {
+                    return Err("配置画像のデータがありません".into());
+                }
+            }
+            if self.assets.values().any(|v| !v.starts_with("data:image/")) {
+                return Err("画像データが不正です".into());
             }
             if !s.frame_angle.is_finite() {
                 return Err("変形枠の角度が不正です".into());

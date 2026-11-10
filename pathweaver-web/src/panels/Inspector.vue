@@ -10,6 +10,8 @@ import InputString from '../../vendor/tweeq/src/InputString/InputString.vue'
 import InputRadio from '../../vendor/tweeq/src/InputRadio/InputRadio.vue'
 import InputButton from '../../vendor/tweeq/src/InputButton/InputButton.vue'
 import InputDropdown from '../../vendor/tweeq/src/InputDropdown/InputDropdown.vue'
+import InputCheckbox from '../../vendor/tweeq/src/InputCheckbox/InputCheckbox.vue'
+import {fontFamilies, relayout} from '../core/textOutline'
 import PaintField from './PaintField.vue'
 import {vTooltip} from '../../vendor/tweeq/src/Tooltip'
 import type {Editor} from '../core/editor'
@@ -56,6 +58,52 @@ function setLineWidth(v: number) {
 const join = computed(() => same(s => s.join) ?? '')  // '' = mixed
 function setJoin(v: Join) { ed.edit(() => { for (const s of strokes.value) s.join = v }) }
 
+// ---- text (live: characters and font stay editable) ----
+const texts = computed(() => strokes.value.filter(s => s.text))
+const text = computed(() => texts.value.at(-1)?.text ?? null)
+const fonts = ref<string[]>([])
+fontFamilies().then(v => { fonts.value = v })
+const fontOptions = computed(() => {
+  const f = text.value?.font
+  return f && !fonts.value.includes(f) ? [f, ...fonts.value] : fonts.value
+})
+async function setText(patch: {font?: string; size?: number; line_height?: number}, once = false) {
+  ed.begin()
+  for (const s of texts.value) Object.assign(s.text!, patch)
+  ed.changed()
+  const done = Promise.all(texts.value.map(s => relayout(ed, s)))
+  if (once) { await done; ed.commit() }
+}
+function editTextOnCanvas() {
+  const s = texts.value.at(-1)
+  if (!s) return
+  props.canvas.setTool('select')
+  props.canvas.editText(s.id)
+}
+function outlineTexts() {
+  const list = texts.value
+  ed.edit(() => { for (const s of list) { s.text = null; s.name = `${s.name}（アウトライン）` } })
+}
+
+// ---- placed images ----
+const images = computed(() => strokes.value.filter(s => s.image))
+const onlyImages = computed(() => strokes.value.length > 0 && images.value.length === strokes.value.length)
+const image = computed(() => images.value.at(-1)?.image ?? null)
+function setImage(patch: {opacity?: number; reference?: boolean}) {
+  ed.begin()
+  for (const s of images.value) {
+    Object.assign(s.image!, patch)
+    if (patch.reference === false) delete s.image!.reference
+  }
+  ed.changed()
+}
+function setReference(v: boolean) {
+  setImage({reference: v})
+  ed.commit()
+  // A 下絵 is not picked on the canvas: let go of it there.
+  if (v) { ed.selected = []; ed.status = '下絵にしました（書き出されず、キャンバスでは選択されません。レイヤーから選び直せます）' }
+}
+
 /** The path button always deletes paths (Delete key deletes points when points are selected). */
 function deletePaths() { ed.anchors = []; ed.deleteSelection() }
 
@@ -86,7 +134,7 @@ const bounds = computed(() => {
 function beginTransform() {
   ed.begin()
   const b = bounds.value
-  if (b) base = {doc: JSON.stringify(ed.doc), b}
+  if (b) base = {doc: JSON.stringify(ed.doc.strokes), b}
 }
 function setBounds(key: 'x' | 'y' | 'w' | 'h', v: number) {
   if (!base) beginTransform()
@@ -99,7 +147,7 @@ function setBounds(key: 'x' | 'y' | 'w' | 'h', v: number) {
   if (key === 'w') sx = Math.max(v, 0.01) / w
   if (key === 'h') sy = Math.max(v, 0.01) / h
   const m = [sx, 0, 0, sy, b.x0 - sx * b.x0 + tx, b.y0 - sy * b.y0 + ty]
-  const d = JSON.parse(base.doc) as Document
+  const d = {...ed.doc, strokes: JSON.parse(base.doc)} as Document
   const r = call<{doc: Document}>('edit', {doc: d, kind: 'transform', ids: ed.selected, matrix: m})
   ed.doc.strokes = r.doc.strokes
   ed.changed()
@@ -296,6 +344,7 @@ function setCap(end: 'start' | 'end', angle: number | null) {
         <Parameter label="名前" :hint="strokes.length > 1 ? '編集中のパス（最後に選択）の名前' : undefined">
           <InputString data-field="name" :model-value="active.name" @focus="begin" @update:model-value="v => { ed.begin(); active!.name = v; ed.changed() }" @confirm="commit" @blur="commit" />
         </Parameter>
+        <template v-if="!onlyImages">
         <Parameter label="塗り"><PaintField label="塗り" :value="fill ?? null" :mixed="fill === undefined" @begin="begin" @change="v => setPaint('fill', v)" @commit="commit" /></Parameter>
         <Parameter label="線"><PaintField label="線" :value="edge ?? null" :mixed="edge === undefined" @begin="begin" @change="v => setPaint('edge', v)" @commit="commit" /></Parameter>
         <Parameter label="線幅" :hint="strokes.length > 1 ? `選択中の${strokes.length}本すべてを、それぞれの幅点の比率を保ったまま同じ最大幅にします（表示は編集中のパス）` : '幅点の比率を保ったまま、いちばん太い所の幅を変えます'">
@@ -307,6 +356,7 @@ function setCap(end: 'start' | 'end', angle: number | null) {
         <Parameter v-if="openPaths.length" label="線端" hint="開いたパスの始点・終点の形">
           <InputRadio data-field="caps" :model-value="capStyle" :options="['Butt', 'Round', 'Square']" :labels="['平ら', '丸', '四角']" @update:model-value="v => setCaps(v as Cap)" />
         </Parameter>
+        </template>
         <template v-if="capInfo">
           <Parameter v-for="end in (['start', 'end'] as const)" :key="end" :label="end === 'start' ? '始点の切り口' : '終点の切り口'" hint="⌘を押しながら端点をドラッグして回転（Shiftで刻み）。−で芯に直角へ戻す">
             <div class="cap">
@@ -315,6 +365,31 @@ function setCap(end: 'start' | 'end', angle: number | null) {
             </div>
           </Parameter>
         </template>
+      </ParameterGrid>
+      <ParameterGrid v-if="text" data-testid="text-props">
+        <ParameterHeading>文字</ParameterHeading>
+        <Parameter label="フォント">
+          <InputDropdown data-field="font" :model-value="text.font" :options="fontOptions" @update:model-value="v => setText({font: v as string}, true)" />
+        </Parameter>
+        <Parameter label="サイズ">
+          <InputNumber data-field="font-size" :model-value="r2(text.size)" :min="1" :max="2000" :bar="false" suffix=" pt" @focus="begin" @update:model-value="v => setText({size: v})" @confirm="commit" @blur="commit" />
+        </Parameter>
+        <Parameter label="行送り" hint="文字の大きさに対する行の高さ">
+          <InputNumber data-field="line-height" :model-value="r2(text.line_height)" :min="0.5" :max="5" :step="0.05" :bar="false" @focus="begin" @update:model-value="v => setText({line_height: v})" @confirm="commit" @blur="commit" />
+        </Parameter>
+      </ParameterGrid>
+      <div v-if="text" class="buttons">
+        <InputButton subtle icon="material-symbols:edit-outline" label="文字を打ち直す" tooltip="キャンバスで文字をダブルクリックしても同じ" @click="editTextOnCanvas" />
+        <InputButton subtle icon="material-symbols:format-shapes-outline" label="アウトライン化" tooltip="⇧⌘O：文字をただの形にする（打ち直せなくなる）" data-testid="outline-text" @click="outlineTexts" />
+      </div>
+      <ParameterGrid v-if="image" data-testid="image-props">
+        <ParameterHeading>配置画像</ParameterHeading>
+        <Parameter label="不透明度">
+          <InputNumber data-field="image-opacity" :model-value="Math.round(image.opacity * 100)" :min="0" :max="100" suffix="%" @focus="begin" @update:model-value="v => setImage({opacity: v / 100})" @confirm="commit" @blur="commit" />
+        </Parameter>
+        <Parameter label="下絵" hint="なぞるための画像にする：書き出されず、キャンバスではクリックしても選ばれない（レイヤーから選ぶ）">
+          <InputCheckbox data-field="reference" :model-value="!!image.reference" label="下絵にする" @update:model-value="setReference" />
+        </Parameter>
       </ParameterGrid>
       <ParameterGrid v-if="strokes.length >= 2">
         <Parameter label="パスファインダー" hint="選んだパスの見えている輪郭どうしを合成します（効果は焼き込み）。前後は重なり順">
@@ -334,7 +409,7 @@ function setCap(end: 'start' | 'end', angle: number | null) {
         <Parameter label="H"><InputNumber :model-value="r2(bounds.y1 - bounds.y0)" :min="0.01" :bar="false" @focus="beginTransform" @update:model-value="v => setBounds('h', v)" @confirm="endTransform" @blur="endTransform" /></Parameter>
       </ParameterGrid>
       <div class="buttons">
-        <InputButton subtle class="wide" icon="material-symbols:account-tree-outline" :label="active.appearance ? '外観ノードを編集' : '外観ノードを開く'" @click="emit('openNodes')" />
+        <InputButton v-if="!onlyImages" subtle class="wide" icon="material-symbols:account-tree-outline" :label="active.appearance ? '外観ノードを編集' : '外観ノードを開く'" @click="emit('openNodes')" />
         <InputButton subtle icon="material-symbols:content-copy-outline" label="複製" tooltip="⌘D" @click="ed.duplicateSelection()" />
         <InputButton subtle icon="material-symbols:delete-outline" :label="strokes.length > 1 ? `パスを削除（${strokes.length}本）` : 'パスを削除'" @click="deletePaths" />
       </div>

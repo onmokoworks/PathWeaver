@@ -572,6 +572,21 @@ pub fn boolean_contours(
         .collect()
 }
 
+/// Rings under a fill rule (an imported shape's nonzero / evenodd), as the
+/// normalized contours a filled shape stores.
+pub fn fill_rule_contours(rings: &[Vec<Point>], even_odd: bool) -> Vec<Vec<Point>> {
+    use i_overlay::{core::{fill_rule::FillRule, overlay_rule::OverlayRule}, float::single::SingleFloatOverlay};
+    let rings: Vec<Vec<[f64; 2]>> = rings.iter().filter(|r| r.len() > 2).map(|r| r.iter().map(|p| [p.x, p.y]).collect()).collect();
+    let rule = if even_odd { FillRule::EvenOdd } else { FillRule::NonZero };
+    rings
+        .overlay(&Vec::<Vec<[f64; 2]>>::new(), OverlayRule::Subject, rule)
+        .into_iter()
+        .flatten()
+        .map(|c| c.into_iter().map(|p| Point::new(p[0], p[1])).collect::<Vec<_>>())
+        .filter(|c| c.len() > 2)
+        .collect()
+}
+
 /// Like `boolean_contours`, but keeps each separate region (outer ring + its
 /// holes) apart.
 pub fn boolean_shapes(
@@ -822,6 +837,26 @@ pub fn svg(doc: &Document) -> Result<String, String> {
     let mut min = Point::new(f64::INFINITY, f64::INFINITY);
     let mut max = Point::new(f64::NEG_INFINITY, f64::NEG_INFINITY);
     for s in doc.strokes.iter().filter(|s| doc.shown(s) && !s.guide) {
+        if let Some(img) = &s.image {
+            // Placed bitmap: kept as one <image> with its placement; a 下絵
+            // (tracing reference) is never exported.
+            let Some(href) = doc.assets.get(&img.asset) else { continue };
+            if img.reference || img.opacity <= 0. {
+                continue;
+            }
+            for p in img.rect() {
+                min.x = min.x.min(p.x);
+                min.y = min.y.min(p.y);
+                max.x = max.x.max(p.x);
+                max.y = max.y.max(p.y);
+            }
+            let m = img.matrix;
+            paths.push_str(&format!(
+                "  <image width=\"{:.4}\" height=\"{:.4}\" opacity=\"{:.6}\" preserveAspectRatio=\"none\" transform=\"matrix({:.6} {:.6} {:.6} {:.6} {:.4} {:.4})\" href=\"{}\"/>\n",
+                img.width, img.height, img.opacity, m[0], m[1], m[2], m[3], m[4], m[5], href
+            ));
+            continue;
+        }
         let rendered = paint(s)?;
         for layer in &rendered.layers {
             if layer.opacity <= 0. { continue; }

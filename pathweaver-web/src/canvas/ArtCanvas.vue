@@ -9,6 +9,7 @@ import {add, sub, scale} from './geometry'
 import InputButtonToggle from '../../vendor/tweeq/src/InputButtonToggle/InputButtonToggle.vue'
 import {vTooltip} from '../../vendor/tweeq/src/Tooltip'
 import CanvasMenu, {type MenuItem} from './CanvasMenu.vue'
+import TextEditor from './TextEditor.vue'
 
 type Flag = 'snap_guides' | 'snap_grid' | 'snap_tangent' | 'snap_normal'
 const snapFlags: [Flag, string, string][] = [
@@ -278,7 +279,11 @@ const cursor = computed(() => {
       <g :transform="worldTransform">
         <g v-for="s in visible" :key="s.id" :data-stroke="s.id">
           <template v-for="(l, i) in ed.renders.get(s.id)?.layers ?? []" :key="i">
-            <image v-if="l.image" :href="l.image.href" :x="l.image.x" :y="l.image.y" :width="l.image.w" :height="l.image.h" :opacity="l.opacity" preserveAspectRatio="none" class="raster" />
+            <image
+              v-if="l.placed" :href="ed.doc.assets?.[l.placed.asset]" :width="l.placed.w" :height="l.placed.h" :opacity="l.opacity"
+              :transform="`matrix(${l.placed.matrix.join(' ')})`" preserveAspectRatio="none" class="placed" :class="{reference: l.placed.reference}" :data-placed="s.id"
+            />
+            <image v-else-if="l.image" :href="l.image.href" :x="l.image.x" :y="l.image.y" :width="l.image.w" :height="l.image.h" :opacity="l.opacity" preserveAspectRatio="none" class="raster" />
             <path v-else :d="l.d" :fill="l.color" :fill-opacity="l.opacity" fill-rule="nonzero" />
           </template>
         </g>
@@ -377,6 +382,7 @@ const cursor = computed(() => {
         <rect x="0" y="0" :width="RULER" :height="RULER" class="corner" />
       </g>
     </svg>
+    <TextEditor v-if="cv.state.textEdit" :key="cv.state.textEdit.stroke" :ed="ed" :canvas="cv" :id="cv.state.textEdit.stroke" />
     <slot :bounds="{width: view.width, height: view.height}" />
     <div class="snap-bar" data-testid="snap-bar" @pointerdown.stop @wheel.stop>
       <span class="snap-title" aria-hidden="true" title="吸着"><Icon icon="mdi:magnet" /></span>
@@ -408,6 +414,9 @@ const cursor = computed(() => {
 }
 .layer {position: absolute; inset: 0; display: block}
 .paper {fill: var(--pw-paper)}
+/* Pictures never take the pointer (WebKit would start a native image drag);
+   picking is done by the controller's own hit test. */
+.layer image {pointer-events: none; -webkit-user-drag: none}
 .paper-checker .paper {fill: url(#checker)}
 /* Overlay colours follow the artwork background, not the UI theme. */
 .paper-gray {--pw-paper: #8a8c90; --pw-grid: rgba(0,0,0,.12)}

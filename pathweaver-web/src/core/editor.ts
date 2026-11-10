@@ -8,11 +8,14 @@ import type {Anchor, Cap, Document, Folder, Graph, Join, Render, RGB, Stroke, Ve
 
 export interface DrawStyle {fill: RGB | null; edge: RGB | null; width: number; join: Join; cap: Cap}
 
-export type Tool = 'select' | 'direct' | 'pen' | 'convert'
+export type Tool = 'select' | 'direct' | 'pen' | 'convert' | 'text'
 
 interface Snapshot {doc: string; selected: number[]; anchors: Anchor[]; nodes: number[]}
 
 const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v))
+/** The document as text for undo / dirty checks: placed images by key only
+ *  (their pixels never change once added, and they are megabytes). */
+const docText = (d: Document) => JSON.stringify(d, (k, v) => (k === 'assets' && v && typeof v === 'object' ? Object.keys(v).sort() : v))
 
 export function createEditor() {
   const doc = shallowRef<Document>(call<Document>('newDocument'))
@@ -24,7 +27,7 @@ export function createEditor() {
   const error = ref('')
   const filePath = ref<string | null>(null)
   const fileName = ref('名称未設定')
-  const savedDoc = ref(JSON.stringify(doc.value))
+  const savedDoc = ref(docText(doc.value))
   const revision = ref(0)                     // bumps on every doc change
   const generation = ref(0)                   // bumps when the document is replaced (new/open)
 
@@ -34,13 +37,19 @@ export function createEditor() {
   let pending: Snapshot | null = null
 
   const snapshot = (): Snapshot => ({
-    doc: JSON.stringify(doc.value),
+    doc: docText(doc.value),
     selected: [...selected.value],
     anchors: clone(anchors.value),
     nodes: [...selectedNodes.value],
   })
   function restore(s: Snapshot) {
-    doc.value = JSON.parse(s.doc)
+    const assets = doc.value.assets
+    const next = JSON.parse(s.doc) as Document & {assets?: unknown}
+    // Snapshots list asset keys only; the pixels stay in the live store.
+    const keys = Array.isArray(next.assets) ? next.assets as string[] : []
+    next.assets = Object.fromEntries(keys.filter(k => assets?.[k]).map(k => [k, assets![k]]))
+    if (!keys.length) delete next.assets
+    doc.value = next
     selected.value = s.selected.filter(id => doc.value.strokes.some(st => st.id === id))
     anchors.value = s.anchors.filter(a => findStroke(a.stroke)?.nodes.some(n => n.id === a.node))
     selectedNodes.value = s.nodes
@@ -77,7 +86,7 @@ export function createEditor() {
     if (!pending) return
     const before = pending
     pending = null
-    if (before.doc === JSON.stringify(doc.value)) return
+    if (before.doc === docText(doc.value)) return
     undoStack.push(before)
     if (undoStack.length > 300) undoStack.shift()
     redoStack.length = 0
@@ -111,6 +120,7 @@ export function createEditor() {
       const r = call<{doc: Document; result: T}>('edit', {doc: doc.value, kind, ...args})
       const outer = inGesture()
       begin()
+      if (doc.value.assets) r.doc.assets = doc.value.assets // the core got them stripped
       doc.value = r.doc
       changed()
       if (!outer) commit()
@@ -153,7 +163,7 @@ export function createEditor() {
     selectedNodes.value = []
     filePath.value = path
     fileName.value = name ?? (path ? path.split('/').pop()! : '名称未設定')
-    savedDoc.value = JSON.stringify(next)
+    savedDoc.value = docText(next)
     error.value = ''
     status.value = ''
     generation.value++
@@ -161,10 +171,10 @@ export function createEditor() {
   }
   const dirty = computed(() => {
     void revision.value
-    return JSON.stringify(doc.value) !== savedDoc.value
+    return docText(doc.value) !== savedDoc.value
   })
   function markSaved(path: string | null) {
-    savedDoc.value = JSON.stringify(doc.value)
+    savedDoc.value = docText(doc.value)
     if (path) {
       filePath.value = path
       fileName.value = path.split('/').pop()!
@@ -452,6 +462,7 @@ export function createEditor() {
     }
     for (const corner of c.corners) corner.node = remap.get(corner.node) ?? corner.node
     if (c.contours) c.contours = c.contours.map(r => r.map(p => ({x: p.x + dx, y: p.y + dy})))
+    for (const placed of [c.text, c.image]) if (placed) { placed.matrix[4] += dx; placed.matrix[5] += dy }
     return c
   }
   function duplicateSelection() {
@@ -507,7 +518,10 @@ export function createEditor() {
     const strokes = doc.value.strokes.filter(s => ids.has(s.id))
     if (!strokes.length) return ''
     pasteCount = 0
-    const text = JSON.stringify({kind: CLIP_KIND, strokes})
+    // Placed images travel with their pixels (pasting into another document).
+    const keys = strokes.map(s => s.image?.asset).filter((k): k is string => !!k)
+    const assets = Object.fromEntries(keys.filter(k => doc.value.assets?.[k]).map(k => [k, doc.value.assets![k]]))
+    const text = JSON.stringify(keys.length ? {kind: CLIP_KIND, strokes, assets} : {kind: CLIP_KIND, strokes})
     try { localStorage.setItem('pw.clipboard', text) } catch { /* memory only */ }
     clip.value = text
     status.value = `${strokes.length}本のパスをコピーしました`
@@ -527,7 +541,7 @@ export function createEditor() {
   function paste(text?: string): boolean {
     let src = text ?? clip.value
     if (!src) { try { src = localStorage.getItem('pw.clipboard') ?? '' } catch { src = '' } }
-    let data: {kind?: string; strokes?: Stroke[]}
+    let data: {kind?: string; strokes?: Stroke[]; assets?: Record<string, string>}
     try { data = JSON.parse(src) } catch { return false }
     if (data?.kind !== CLIP_KIND || !Array.isArray(data.strokes) || !data.strokes.length) return false
     pasteCount++
@@ -535,6 +549,9 @@ export function createEditor() {
     edit(d => {
       const folders = new Set((d.folders ?? []).map(f => f.id))
       const ids: number[] = []
+      for (const [k, v] of Object.entries(data.assets ?? {})) {
+        if (typeof v === 'string' && v.startsWith('data:image/') && !d.assets?.[k]) (d.assets ??= {})[k] = v
+      }
       for (const s of data.strokes!) {
         const c = copyStroke(d, s, off, off, s.name)
         if (c.folder != null && !folders.has(c.folder)) c.folder = null

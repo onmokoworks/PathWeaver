@@ -15,8 +15,16 @@ export interface Width {left: number; right: number; linked: boolean; angle: num
 export interface WidthKey {id: number; segment: number; t: number; width: Width; interpolated?: boolean}
 export type Join = 'Miter' | 'Round' | 'Bevel'
 
+/** Live text: characters + font stay editable; contours = laid-out glyphs (placed by matrix). */
+export interface TextSpec {text: string; font: string; size: number; line_height: number; matrix: Matrix}
+/** A placed bitmap; the pixels are `Document.assets[asset]`. */
+export interface Placed {asset: string; width: number; height: number; matrix: Matrix; opacity: number; reference?: boolean}
+export type Matrix = [number, number, number, number, number, number]
+
 export interface Stroke {
   id: number
+  text?: TextSpec | null
+  image?: Placed | null
   name: string
   visible: boolean
   closed: boolean
@@ -96,12 +104,19 @@ export interface Document {
   angle_step: number
   appearance_presets: Preset[]
   folders?: Folder[]
+  /** Placed images by key (data URLs). Left out of most core calls. */
+  assets?: Record<string, string>
   strokes: Stroke[]
 }
 export interface Folder {id: number; name: string; visible: boolean; open: boolean; parent?: number | null}
 
 export interface Anchor {stroke: number; node: number}
-export interface RenderLayer {color: string; opacity: number; d: string; image?: {href: string; x: number; y: number; w: number; h: number}}
+export interface RenderLayer {
+  color: string; opacity: number; d: string
+  image?: {href: string; x: number; y: number; w: number; h: number}
+  /** A placed image: the canvas draws `Document.assets[asset]` with `matrix`. */
+  placed?: {asset: string; w: number; h: number; matrix: Matrix; reference: boolean}
+}
 export interface Render {layers: RenderLayer[]; hit: string; center: string; error?: string; stale?: boolean}
 export interface WidthHandle {
   target: 'start' | 'end' | number
