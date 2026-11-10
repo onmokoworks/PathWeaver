@@ -555,6 +555,7 @@ final class Host: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMes
             // never steal keys from text fields; the menu lists them for discovery.
             item("選択（V）", "toolSelect"), item("ダイレクト選択（A）", "toolDirect"),
             item("ペン（P）", "toolPen"), item("アンカーポイント（⇧C）", "toolConvert"),
+            item("図形（M 長方形・L 楕円・\\ 直線）", "toolShape"),
             item("文字（T）", "toolText"),
         ])
         let windowMenu = NSMenu(title: "ウインドウ")

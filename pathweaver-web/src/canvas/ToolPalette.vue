@@ -5,14 +5,30 @@
 import {computed, onBeforeUnmount, onMounted, reactive, ref, watch} from 'vue'
 import InputButtonToggle from '../../vendor/tweeq/src/InputButtonToggle/InputButtonToggle.vue'
 import {vTooltip} from '../../vendor/tweeq/src/Tooltip'
+import {Icon} from '../../vendor/tweeq/src/Icon'
 import type {Tool} from '../core/editor'
 
 const props = defineProps<{
   tools: {id: Tool; icon: string; label: string; key: string}[]
   active: Tool
   bounds: {width: number; height: number}
+  /** Shape tool group (Illustrator's flyout): every kind, and the current one. */
+  shapes?: {kind: string; label: string; icon: string; key?: string}[]
+  shapeKind?: string
 }>()
-const emit = defineEmits<{select: [tool: Tool]}>()
+const emit = defineEmits<{select: [tool: Tool]; shape: [kind: string]}>()
+
+// The shape button holds all shapes: click it again (or right-click) for the list.
+const flyout = ref(false)
+function onTool(id: Tool) {
+  if (id === 'shape' && props.active === 'shape') { flyout.value = !flyout.value; return }
+  flyout.value = false
+  emit('select', id)
+}
+function pickShape(kind: string) { flyout.value = false; emit('shape', kind) }
+const onDocDown = (e: PointerEvent) => { if (flyout.value && !root.value?.contains(e.target as Node)) flyout.value = false }
+onMounted(() => document.addEventListener('pointerdown', onDocDown, true))
+onBeforeUnmount(() => document.removeEventListener('pointerdown', onDocDown, true))
 
 const KEY = 'pw.toolPalette'
 const load = () => {
@@ -84,11 +100,21 @@ watch(() => pos.horizontal, () => requestAnimationFrame(() => Object.assign(pos,
         <circle v-for="i in 6" :key="i" :cx="1.5 + ((i - 1) % 3) * 4.5" :cy="i <= 3 ? 1.2 : 4.8" r="1.1" />
       </svg>
     </div>
-    <InputButtonToggle
-      v-for="t in tools" :key="t.id" v-tooltip="{content: `${t.label}（${t.key}）`, placement: pos.horizontal ? 'bottom' : 'right'}"
-      :model-value="active === t.id" :icon="t.icon" :aria-label="t.label" :data-tool="t.id"
-      @update:model-value="emit('select', t.id)"
-    />
+    <div v-for="t in tools" :key="t.id" class="slot" :class="{group: t.id === 'shape'}">
+      <InputButtonToggle
+        v-tooltip="{content: t.id === 'shape' ? `${t.label}（${t.key}）：もう一度押すと図形の一覧` : `${t.label}（${t.key}）`, placement: pos.horizontal ? 'bottom' : 'right'}"
+        :model-value="active === t.id" :icon="t.icon" :aria-label="t.label" :data-tool="t.id"
+        @update:model-value="onTool(t.id)" @contextmenu.prevent="t.id === 'shape' && (flyout = true)"
+      />
+      <div v-if="t.id === 'shape' && flyout" class="flyout" :class="{below: pos.horizontal}" role="menu" data-testid="shape-flyout">
+        <button
+          v-for="sh in shapes ?? []" :key="sh.kind" type="button" role="menuitemradio" :aria-checked="sh.kind === shapeKind"
+          :class="{on: sh.kind === shapeKind}" :data-shape="sh.kind" @click="pickShape(sh.kind)"
+        >
+          <Icon :icon="sh.icon" /><span>{{ sh.label }}</span><kbd v-if="sh.key">{{ sh.key }}</kbd>
+        </button>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -113,5 +139,19 @@ watch(() => pos.horizontal, () => requestAnimationFrame(() => Object.assign(pos,
 .grip:active {cursor: grabbing}
 .grip svg {width: 6px; height: 12px; fill: currentColor}
 .horizontal .grip svg {width: 12px; height: 6px}
+.slot {position: relative}
+/* a group button: small corner mark, like Illustrator's tool groups */
+.slot.group::after {content: ''; position: absolute; right: 2px; bottom: 2px; border: 3px solid transparent; border-right-color: currentColor; border-bottom-color: currentColor; opacity: .5; pointer-events: none}
+.flyout {
+  position: absolute; left: calc(100% + 8px); top: -4px; z-index: 10; display: flex; flex-direction: column; min-width: 150px; padding: 4px;
+  background: var(--tq-color-background); border: 1px solid var(--tq-color-border); border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, .18);
+}
+.flyout.below {left: -4px; top: calc(100% + 8px)}
+.flyout button {display: flex; align-items: center; gap: 8px; height: 26px; padding: 0 8px; border: 0; border-radius: 3px; background: transparent; color: var(--tq-color-text); font: inherit; font-size: 12px; text-align: left; cursor: pointer}
+.flyout button:hover {background: var(--tq-color-input-hover)}
+.flyout button.on {background: var(--tq-color-accent); color: var(--tq-color-on-accent)}
+.flyout button span {flex: 1}
+.flyout kbd {font: inherit; font-size: 10px; opacity: .6}
 .tool-palette :deep(.TqInputButtonToggle) {width: 28px; height: 28px; min-width: 28px; font-size: 16px; justify-content: center; border-radius: 4px}
 </style>

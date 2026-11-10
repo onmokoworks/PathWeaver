@@ -10,6 +10,7 @@ import InputButtonToggle from '../../vendor/tweeq/src/InputButtonToggle/InputBut
 import {vTooltip} from '../../vendor/tweeq/src/Tooltip'
 import CanvasMenu, {type MenuItem} from './CanvasMenu.vue'
 import TextEditor from './TextEditor.vue'
+import ShapeAdjust from './ShapeAdjust.vue'
 
 type Flag = 'snap_guides' | 'snap_grid' | 'snap_tangent' | 'snap_normal'
 const snapFlags: [Flag, string, string][] = [
@@ -382,6 +383,7 @@ const cursor = computed(() => {
         <rect x="0" y="0" :width="RULER" :height="RULER" class="corner" />
       </g>
     </svg>
+    <ShapeAdjust v-if="cv.shapeAdjustable()" :ed="ed" :canvas="cv" />
     <TextEditor v-if="cv.state.textEdit" :key="cv.state.textEdit.stroke" :ed="ed" :canvas="cv" :id="cv.state.textEdit.stroke" />
     <slot :bounds="{width: view.width, height: view.height}" />
     <div class="snap-bar" data-testid="snap-bar" @pointerdown.stop @wheel.stop>

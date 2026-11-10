@@ -8,6 +8,7 @@
 import {reactive, watch} from 'vue'
 import {call} from '../core/wasm'
 import {baselineTop, DEFAULT_FONT} from '../core/textOutline'
+import {buildShape, defaults, fromDrag, shapeInfo, type ShapeKind, type ShapeParams} from '../core/shapes'
 import {settings, wheelZoom, type Paper} from '../core/settings'
 import type {Editor} from '../core/editor'
 import type {Anchor, CornerWidget, Document, Frame, PathNode, SnapGuide, Stroke, Vec2, WidthHandle} from '../core/types'
@@ -32,6 +33,7 @@ type Drag =
   | {kind: 'cap'; stroke: number; end: 'start' | 'end'; anchor: Vec2}
   | {kind: 'corner'; stroke: number; node: number}
   | {kind: 'guide'; index: number}
+  | {kind: 'shape'; start: Vec2; stroke: number; moved: boolean; params: ShapeParams}
 
 export interface Hover {
   cursor: string
@@ -47,6 +49,11 @@ function distToSegment(p: Vec2, a: Vec2, b: Vec2) {
   return dist(p, add(a, scale(v, t)))
 }
 const akey = (a: Anchor) => `${a.stroke}:${a.node}`
+
+function loadShapeKind(): ShapeKind {
+  try { const v = localStorage.getItem('pw.shape') as ShapeKind | null; if (v && shapeInfo(v)) return v } catch { /* default */ }
+  return 'rect'
+}
 
 export function createCanvas(ed: Editor) {
   const view = reactive<View>({panX: 200, panY: 120, zoom: 1, width: 800, height: 600})
@@ -72,6 +79,10 @@ export function createCanvas(ed: Editor) {
     // Text being typed on the canvas (the overlay editor); `created` = made by
     // this edit, so an empty result removes it without an undo step.
     textEdit: null as {stroke: number; created: boolean} | null,
+    // Shape tool: the kind drawn next, and the shape just made (its
+    // parameters stay adjustable until the document changes otherwise).
+    shapeKind: loadShapeKind(),
+    lastShape: null as {stroke: number; params: ShapeParams; revision: number} | null,
   })
   let frames: Frame[] = []
   let framesKey = ''  // what `frames` was captured for while hovering
@@ -342,11 +353,86 @@ export function createCanvas(ed: Editor) {
     if (state.textEdit) finishText()
     switch (ed.tool) {
       case 'text': return textDown(p)
+      case 'shape': return shapeDown(e, p)
       case 'pen': return penDown(e, p)
       case 'direct': return directDown(e, p, double)
       case 'convert': return convertDown(e, p)
       default: return selectDown(e, p, double)
     }
+  }
+
+  // ---------- shapes ----------
+  /** Write a shape's anchors into its path (ids are fresh; live corners re-applied). */
+  function applyShape(s: Stroke, params: ShapeParams) {
+    const b = buildShape(params)
+    s.nodes = b.nodes.map(n => ({...n, id: ed.nextId()}))
+    s.closed = b.closed
+    s.widths = []
+    s.corners = []
+    if (b.corners > 0 && s.nodes.length > 2) {
+      try {
+        const mini = {...ed.doc, strokes: [s], folders: [], assets: {}}
+        const r = call<{doc: Document}>('edit', {doc: mini, kind: 'setCorner', stroke: s.id, nodes: s.nodes.map(n => n.id), radius: b.corners, cornerKind: 'Circular'})
+        s.corners = r.doc.strokes[0].corners
+      } catch { /* too small for a corner: stays sharp */ }
+    }
+  }
+  function shapeDown(e: PointerEvent, raw: Vec2) {
+    const kind = state.shapeKind
+    captureFrames(null, () => false)
+    const p = snap(raw, e.ctrlKey)
+    ed.begin()
+    const s = ed.newPath(p)
+    const count = ed.doc.strokes.filter(v => v.name.startsWith(shapeInfo(kind).label)).length
+    s.name = `${shapeInfo(kind).label} ${count}`
+    const params = {...(state.lastShape?.params.kind === kind ? state.lastShape.params : defaults(kind)), kind}
+    ed.anchors = []
+    state.drag = {kind: 'shape', start: p, stroke: s.id, moved: false, params}
+  }
+  function shapeMove(d: Extract<Drag, {kind: 'shape'}>, e: PointerEvent, raw: Vec2) {
+    if (!d.moved && dist(raw, d.start) < tol(3)) return
+    d.moved = true
+    const b = snap(raw, e.ctrlKey)
+    d.params = fromDrag(d.params.kind, d.params, d.start, b, e.shiftKey, e.altKey, ed.doc.angle_step || 15)
+    const s = stroke(d.stroke)
+    if (s) { applyShape(s, d.params); ed.changed() }
+  }
+  function shapeUp(d: Extract<Drag, {kind: 'shape'}>) {
+    const s = stroke(d.stroke)
+    if (!s) return ed.commit()
+    if (!d.moved) {
+      // A click makes a default-size shape there (Illustrator asks for the
+      // size in a dialog; here the adjust panel takes it afterwards).
+      const k = d.params.kind
+      const radial = k === 'polygon' || k === 'star' || k === 'spiral'
+      d.params = radial
+        ? {...d.params, x: d.start.x, y: d.start.y, radius: d.params.radius || 50, radius2: d.params.radius2 || 25}
+        : {...d.params, x: d.start.x, y: d.start.y, w: Math.abs(d.params.w) || 100, h: k === 'line' ? 0 : Math.abs(d.params.h) || 100}
+      applyShape(s, d.params)
+      ed.changed()
+    }
+    const tiny = d.moved && s.nodes.every(n => dist(n.p, s.nodes[0].p) < 1e-6)
+    if (tiny) { ed.cancel(); return }
+    ed.commit()
+    ed.selected = [s.id]
+    state.lastShape = {stroke: s.id, params: d.params, revision: ed.revision}
+  }
+  /** Adjust Last Operation: rebuild the shape just made, still one undo step. */
+  function adjustShape(patch: Partial<ShapeParams>) {
+    const last = state.lastShape
+    const s = last && stroke(last.stroke)
+    if (!last || !s || ed.revision !== last.revision) return
+    last.params = {...last.params, ...patch}
+    applyShape(s, last.params)
+    ed.changed()
+    last.revision = ed.revision
+  }
+  /** The adjust panel shows while nothing else changed the document. */
+  const shapeAdjustable = () => !!state.lastShape && state.lastShape.revision === ed.revision && !!stroke(state.lastShape.stroke)
+  function setShapeKind(k: ShapeKind) {
+    state.shapeKind = k
+    try { localStorage.setItem('pw.shape', k) } catch { /* preference only */ }
+    setTool('shape')
   }
 
   // ---------- text ----------
@@ -715,6 +801,7 @@ export function createCanvas(ed: Editor) {
         ed.changed()
         return
       }
+      case 'shape': return shapeMove(d, e, raw)
       case 'move': {
         if (!d.moved && dist(raw, d.start) < tol(2)) return
         d.moved = true
@@ -896,6 +983,7 @@ export function createCanvas(ed: Editor) {
       return
     }
     if (ed.tool === 'text') { h.cursor = 'text'; return }
+    if (ed.tool === 'shape') { h.cursor = 'crosshair'; hoverSnap(p, e.ctrlKey); return }
     if (ed.tool === 'direct' || ed.tool === 'convert') {
       if (ed.tool === 'direct' && ed.selected.some(id => { const s = stroke(id); return s && !s.contours && cornerWidgets(s).some(w => dist(w.p, p) < tol(6)) })) {
         h.cursor = 'pointer'
@@ -960,6 +1048,7 @@ export function createCanvas(ed: Editor) {
         ed.commit()
         return
       }
+      case 'shape': return shapeUp(d)
       case 'convert': {
         if (!d.moved) ed.coreEdit('anchorKind', {anchors: [d.at], anchorKind: 'corner'})
         ed.commit()
@@ -1028,6 +1117,16 @@ export function createCanvas(ed: Editor) {
       return true
     }
     if (k === 'enter' && state.penPath !== null) { finishPen(); return true }
+    // While drawing a polygon / star / spiral: ↑↓ change the count.
+    if (state.drag?.kind === 'shape' && (k === 'arrowup' || k === 'arrowdown')) {
+      const d = state.drag
+      if (['polygon', 'star', 'spiral'].includes(d.params.kind)) {
+        d.params = {...d.params, sides: Math.max(d.params.kind === 'polygon' ? 3 : 2, d.params.sides + (k === 'arrowup' ? 1 : -1))}
+        const s = stroke(d.stroke)
+        if (s) { applyShape(s, d.params); ed.changed() }
+      }
+      return true
+    }
     if (mod) {
       if (k === 'a') { ed.selected = ed.doc.strokes.filter(pickable).map(s => s.id); ed.anchors = []; return true }
       if (k === '0') { fit(); return true }
@@ -1040,6 +1139,8 @@ export function createCanvas(ed: Editor) {
     if (e.altKey) return false
     const tools: Record<string, typeof ed.tool> = {v: 'select', a: 'direct', p: 'pen', t: 'text'}
     if (k === 'c' && e.shiftKey) { setTool('convert'); return true }
+    const shapeKeys: Record<string, ShapeKind> = {m: 'rect', l: 'ellipse', '\\': 'line'}
+    if (shapeKeys[k] && !e.shiftKey) { setShapeKind(shapeKeys[k]); return true }
     if (tools[k] && !e.shiftKey) { setTool(tools[k]); return true }
     if (k === 'f' || k === 'home') { fit(); return true }
     if (k === 'delete' || k === 'backspace') {
@@ -1074,7 +1175,7 @@ export function createCanvas(ed: Editor) {
   return reactive({
     view, state, toWorld, toScreen, down, move, up, wheel, zoomAt, fit, key, setTool, cancelDrag, setPaper,
     selectionBounds, boxHandles, widthHandles, widthGrips, finishPen, activePathFrame, cornerWidgets, widthVisible, setShowWidth, pathAt,
-    editText, finishText,
+    editText, finishText, adjustShape, shapeAdjustable, setShapeKind,
   })
 }
 export type Canvas = ReturnType<typeof createCanvas>

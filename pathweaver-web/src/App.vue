@@ -23,6 +23,7 @@ import {createHost, isNative} from './host'
 import {call} from './core/wasm'
 import type {Document, Vec2} from './core/types'
 import {placeData, placeFiles, type PlaceTarget} from './core/place'
+import {SHAPES, shapeInfo, type ShapeKind} from './core/shapes'
 import {DEFAULT_FONT, outlineText, relayout} from './core/textOutline'
 
 useAppConfigStore().appId = 'pathweaver'
@@ -42,18 +43,26 @@ const ed = createEditor()
 const canvas = createCanvas(ed)
 const nodeEditor = ref<InstanceType<typeof NodeEditor>>()
 
-const tools: {id: Tool; icon: string; label: string; key: string}[] = [
+const toolList: {id: Tool; icon: string; label: string; key: string}[] = [
   {id: 'select', icon: 'pw:select', label: '選択', key: 'V'},
   {id: 'direct', icon: 'pw:direct', label: 'ダイレクト選択（アンカー）', key: 'A'},
   {id: 'pen', icon: 'pw:pen', label: 'ペン', key: 'P'},
   {id: 'convert', icon: 'pw:anchor', label: 'アンカーポイント（角⇄スムーズ）', key: '⇧C'},
   {id: 'text', icon: 'material-symbols:title', label: '文字', key: 'T'},
 ]
+// The shape button shows the shape it will draw (Illustrator's tool group).
+const tools = computed(() => {
+  const sh = shapeInfo(canvas.state.shapeKind)
+  const list = [...toolList]
+  list.splice(3, 0, {id: 'shape', icon: sh.icon, label: sh.label, key: sh.key ?? 'M・L・\\'})
+  return list
+})
 const toolHint: Record<Tool, string> = {
   select: 'クリックで選択・ドラッグで移動。枠の角で拡大縮小、角の外側で回転（Shiftで比率固定／角度刻み、Optionで複製・中心基準）',
   direct: 'アンカー・ハンドルをドラッグ。線分をOption＋クリック／ダブルクリックでアンカー追加。太さはオレンジの端をドラッグ（Optionで片側）、⌘＋芯クリックで幅点追加、⌘＋端点ドラッグで切り口回転',
   pen: 'クリックで角、ドラッグで曲線。線分上でクリックでアンカー追加。Shift＋パスをクリックでその上から描き始め（次の点は法線方向）。太さはオレンジの端をドラッグ（Optionで片側）。Enter/Escで終了',
   convert: 'アンカーをクリックで角に、ドラッグでスムーズに。ハンドルをドラッグで片側だけ動かす',
+  shape: 'ドラッグで描く（Shiftで縦横同じ・角度刻み、Optionで中心から）。多角形・スターはドラッグ中に↑↓で辺の数。クリックで標準の大きさ。作った直後は左下で寸法や数を変えられる',
   text: 'クリックした所に文字を打つ。文字をクリックで打ち直し。Esc／ほかをクリックで確定。フォントと大きさは右のパネル',
 }
 
@@ -98,6 +107,7 @@ const commands: Record<string, () => void> = {
   toolPen: () => canvas.setTool('pen'),
   toolConvert: () => canvas.setTool('convert'),
   toolText: () => canvas.setTool('text'),
+  toolShape: () => canvas.setTool('shape'),
   place: () => { settle(); host.place((name, kind, data) => placeData(placeTarget(), name, kind, data), files => placeFiles(placeTarget(), files)) },
   outline: () => createOutlines(),
 }
@@ -325,7 +335,7 @@ function setSideTab(id: string) { sideTab.value = id; try { localStorage.setItem
           <AreaSplit name="pw-right" direction="horizontal" fixed="second" :titles="['キャンバス', 'レイヤー・プロパティ']" :min="200" :max="maxRight" :hide="!layersDocked && !propsDocked ? 'second' : null">
             <template #first>
               <AreaSplit name="pw-nodes" direction="vertical" fixed="second" :titles="['キャンバス', 'ノード']" :max="maxNodes" :hide="!nodesDocked ? 'second' : null">
-                <template #first><div class="area" data-area="canvas" @dragover.prevent @drop="onDrop"><ArtCanvas :ed="ed" :canvas="canvas" v-slot="{bounds}" @command="n => commands[n]?.()"><ToolPalette :tools="tools" :active="ed.tool" :bounds="bounds" @select="t => canvas.setTool(t)" /></ArtCanvas></div></template>
+                <template #first><div class="area" data-area="canvas" @dragover.prevent @drop="onDrop"><ArtCanvas :ed="ed" :canvas="canvas" v-slot="{bounds}" @command="n => commands[n]?.()"><ToolPalette :tools="tools" :active="ed.tool" :bounds="bounds" :shapes="SHAPES" :shape-kind="canvas.state.shapeKind" @select="t => canvas.setTool(t)" @shape="k => canvas.setShapeKind(k as ShapeKind)" /></ArtCanvas></div></template>
                 <template #second><div class="area" data-area="nodes"><NodeEditor v-if="nodesDocked" ref="nodeEditor" :ed="ed" /></div></template>
               </AreaSplit>
             </template>

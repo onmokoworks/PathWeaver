@@ -8,7 +8,7 @@ import type {Anchor, Cap, Document, Folder, Graph, Join, Render, RGB, Stroke, Ve
 
 export interface DrawStyle {fill: RGB | null; edge: RGB | null; width: number; join: Join; cap: Cap}
 
-export type Tool = 'select' | 'direct' | 'pen' | 'convert' | 'text'
+export type Tool = 'select' | 'direct' | 'pen' | 'convert' | 'text' | 'shape'
 
 interface Snapshot {doc: string; selected: number[]; anchors: Anchor[]; nodes: number[]}
 
