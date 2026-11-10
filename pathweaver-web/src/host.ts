@@ -7,6 +7,7 @@ import type {Document} from './core/types'
 import {installNativePointerLock} from './nativePointerLock'
 import {initLibrary} from './core/library'
 import {initTextHost} from './core/textOutline'
+import {exportAssets} from './core/knockout'
 
 interface NativeMessage {type: string; [k: string]: unknown}
 declare global {
@@ -62,9 +63,9 @@ export function createHost(ed: Editor, commands: Record<string, () => void>) {
     download(text, ed.fileName.endsWith('.pathweaver') ? ed.fileName : `${ed.fileName}.pathweaver`, 'application/json')
     ed.markSaved(null)
   }
-  function exportSvg() {
+  async function exportSvg() {
     let text: string
-    try { text = call<string>('svg', {doc: ed.doc}) } catch (e) { ed.error = String(e instanceof Error ? e.message : e); return }
+    try { text = call<string>('svg', {doc: {...ed.doc, assets: await exportAssets(ed.doc)}}) } catch (e) { ed.error = String(e instanceof Error ? e.message : e); return }
     const name = ed.fileName.replace(/\.pathweaver$/, '') + '.svg'
     if (isNative()) return post({type: 'export', text, name})
     download(text, name, 'image/svg+xml')

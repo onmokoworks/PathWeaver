@@ -840,7 +840,9 @@ pub fn svg(doc: &Document) -> Result<String, String> {
         if let Some(img) = &s.image {
             // Placed bitmap: kept as one <image> with its placement; a 下絵
             // (tracing reference) is never exported.
-            let Some(href) = doc.assets.get(&img.asset) else { continue };
+            // 抜き: the caller hands in the keyed copy next to the original.
+            let keyed = img.knockout.and_then(|k| doc.assets.get(&crate::model::knockout_asset(&img.asset, k)));
+            let Some(href) = keyed.or_else(|| doc.assets.get(&img.asset)) else { continue };
             if img.reference || img.opacity <= 0. {
                 continue;
             }

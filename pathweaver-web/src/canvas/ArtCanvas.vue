@@ -11,6 +11,7 @@ import {vTooltip} from '../../vendor/tweeq/src/Tooltip'
 import CanvasMenu, {type MenuItem} from './CanvasMenu.vue'
 import TextEditor from './TextEditor.vue'
 import ShapeAdjust from './ShapeAdjust.vue'
+import {placedHref} from '../core/knockout'
 
 type Flag = 'snap_guides' | 'snap_grid' | 'snap_tangent' | 'snap_normal'
 const snapFlags: [Flag, string, string][] = [
@@ -283,7 +284,7 @@ const cursor = computed(() => {
         <g v-for="s in visible" :key="s.id" :data-stroke="s.id">
           <template v-for="(l, i) in ed.renders.get(s.id)?.layers ?? []" :key="i">
             <image
-              v-if="l.placed" :href="ed.doc.assets?.[l.placed.asset]" :width="l.placed.w" :height="l.placed.h" :opacity="l.opacity"
+              v-if="l.placed" :href="placedHref(ed.doc.assets, l.placed.asset, l.placed.knockout)" :width="l.placed.w" :height="l.placed.h" :opacity="l.opacity"
               :transform="`matrix(${l.placed.matrix.join(' ')})`" preserveAspectRatio="none" class="placed" :class="{reference: l.placed.reference}" :data-placed="s.id"
             />
             <image v-else-if="l.image" :href="l.image.href" :x="l.image.x" :y="l.image.y" :width="l.image.w" :height="l.image.h" :opacity="l.opacity" preserveAspectRatio="none" class="raster" />

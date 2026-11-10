@@ -130,6 +130,29 @@ pub struct Placed {
     /// 下絵: a tracing reference — not exported, not picked on the canvas.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reference: bool,
+    /// 抜き: black (Unmult — brightness becomes coverage) or white (paper
+    /// becomes clear, ink stays) keyed out. The pixels in `assets` stay as
+    /// they were; the web side derives the keyed copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knockout: Option<Knockout>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Knockout {
+    Black,
+    White,
+}
+impl Knockout {
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Black => "black",
+            Self::White => "white",
+        }
+    }
+}
+/// Key of the keyed copy of `asset` handed in for export (`asset#black`).
+pub fn knockout_asset(asset: &str, k: Knockout) -> String {
+    format!("{}#{}", asset, k.key())
 }
 fn default_one() -> f64 {
     1.

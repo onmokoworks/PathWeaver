@@ -1,7 +1,7 @@
 //! Placed images and live text: placement follows transforms, export keeps
 //! images (but never a tracing reference), imported rings honour fill rules.
 use kurbo::{Affine, Point};
-use pathweaver_core::model::{Document, Placed, Stroke, Text};
+use pathweaver_core::model::{Document, Knockout, Placed, Stroke, Text};
 use pathweaver_core::outline;
 
 fn image_doc(reference: bool) -> Document {
@@ -9,7 +9,7 @@ fn image_doc(reference: bool) -> Document {
     let mut s = Stroke::new(d.id(), "photo.png".into());
     s.edge = None;
     s.fill = None;
-    let img = Placed { asset: "a1".into(), width: 40., height: 20., matrix: [1., 0., 0., 1., 10., 10.], opacity: 0.5, reference };
+    let img = Placed { asset: "a1".into(), width: 40., height: 20., matrix: [1., 0., 0., 1., 10., 10.], opacity: 0.5, reference, knockout: None };
     s.contours = Some(vec![img.rect()]);
     s.image = Some(img);
     d.strokes.push(s);
@@ -41,6 +41,23 @@ fn svg_keeps_images_but_not_references() {
     assert!(svg.contains("opacity=\"0.500000\""));
     let r = image_doc(true);
     assert!(!outline::svg(&r).unwrap().contains("<image"));
+}
+
+#[test]
+fn svg_uses_the_keyed_copy_when_knocked_out() {
+    let mut d = image_doc(false);
+    d.strokes[0].image.as_mut().unwrap().knockout = Some(Knockout::Black);
+    // without the keyed copy the original is exported
+    assert!(outline::svg(&d).unwrap().contains("base64,AAAA"));
+    d.assets.insert("a1#black".into(), "data:image/png;base64,KEYED".into());
+    let svg = outline::svg(&d).unwrap();
+    assert!(svg.contains("base64,KEYED") && !svg.contains("base64,AAAA"));
+    // the field round-trips as a lowercase word and is left out when unset
+    let json = serde_json::to_string(&d.strokes[0]).unwrap();
+    assert!(json.contains("\"knockout\":\"black\""));
+    let back: Stroke = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.image.unwrap().knockout, Some(Knockout::Black));
+    assert!(!serde_json::to_string(&image_doc(false).strokes[0]).unwrap().contains("knockout"));
 }
 
 #[test]

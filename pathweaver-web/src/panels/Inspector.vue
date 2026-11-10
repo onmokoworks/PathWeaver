@@ -20,7 +20,7 @@ import {vTooltip} from '../../vendor/tweeq/src/Tooltip'
 import type {Editor} from '../core/editor'
 import type {Canvas} from '../canvas/controller'
 import {call} from '../core/wasm'
-import type {Cap, CornerWidget, Document, Join, RGB, Stroke} from '../core/types'
+import type {Cap, CornerWidget, Document, Join, Knockout, RGB, Stroke} from '../core/types'
 
 const props = defineProps<{ed: Editor; canvas: Canvas}>()
 const emit = defineEmits<{openNodes: []}>()
@@ -100,13 +100,19 @@ const canBlend = computed(() => strokes.value.length === 2 && !blend.value)
 const images = computed(() => strokes.value.filter(s => s.image))
 const onlyImages = computed(() => strokes.value.length > 0 && images.value.length === strokes.value.length)
 const image = computed(() => images.value.at(-1)?.image ?? null)
-function setImage(patch: {opacity?: number; reference?: boolean}) {
+function setImage(patch: {opacity?: number; reference?: boolean; knockout?: Knockout | null}) {
   ed.begin()
   for (const s of images.value) {
     Object.assign(s.image!, patch)
     if (patch.reference === false) delete s.image!.reference
+    if (patch.knockout === null) delete s.image!.knockout
   }
   ed.changed()
+}
+const knockout = computed(() => image.value?.knockout ?? 'none')
+function setKnockout(v: Knockout | 'none') {
+  setImage({knockout: v === 'none' ? null : v})
+  ed.commit()
 }
 function setReference(v: boolean) {
   setImage({reference: v})
@@ -401,6 +407,9 @@ function setCap(end: 'start' | 'end', angle: number | null) {
         <ParameterHeading>配置画像</ParameterHeading>
         <Parameter label="不透明度">
           <InputNumber data-field="image-opacity" :model-value="Math.round(image.opacity * 100)" :min="0" :max="100" suffix="%" @focus="begin" @update:model-value="v => setImage({opacity: v / 100})" @confirm="commit" @blur="commit" />
+        </Parameter>
+        <Parameter label="抜き" hint="黒：暗いところほど透ける（光や炎の素材を黒背景ごと重ねる・Unmult）／白：白い紙が透けて線だけ残る（スキャンした線画）。元の画素はそのまま">
+          <InputRadio data-field="knockout" :model-value="knockout" :options="['none', 'black', 'white']" :labels="['なし', '黒', '白']" @update:model-value="v => setKnockout(v as Knockout | 'none')" />
         </Parameter>
         <Parameter label="下絵" hint="なぞるための画像にする：書き出されず、キャンバスではクリックしても選ばれない（レイヤーから選ぶ）">
           <InputCheckbox data-field="reference" :model-value="!!image.reference" label="下絵にする" @update:model-value="setReference" />

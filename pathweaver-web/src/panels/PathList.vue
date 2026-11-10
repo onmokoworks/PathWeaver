@@ -11,6 +11,7 @@ import PanelPin from './PanelPin.vue'
 import {layout, setFolded} from '../core/layout'
 import {categoryOf, nodeInfo} from '../nodes/catalog'
 import {lookOf} from '../core/looks'
+import {placedHref} from '../core/knockout'
 
 const props = defineProps<{ed: Editor}>()
 const ed = props.ed
@@ -311,7 +312,7 @@ function dropAt(y: number, moving: DataRow): Drop | null {
           <span class="thumb">
             <svg v-if="thumb(row.stroke)" :viewBox="thumb(row.stroke)!.viewBox" preserveAspectRatio="xMidYMid meet">
               <template v-for="(l, i) in thumb(row.stroke)!.layers" :key="i">
-                <image v-if="l.placed" :href="ed.doc.assets?.[l.placed.asset]" :width="l.placed.w" :height="l.placed.h" :opacity="l.opacity" :transform="`matrix(${l.placed.matrix.join(' ')})`" preserveAspectRatio="none" />
+                <image v-if="l.placed" :href="placedHref(ed.doc.assets, l.placed.asset, l.placed.knockout)" :width="l.placed.w" :height="l.placed.h" :opacity="l.opacity" :transform="`matrix(${l.placed.matrix.join(' ')})`" preserveAspectRatio="none" />
                 <image v-else-if="l.image" :href="l.image.href" :x="l.image.x" :y="l.image.y" :width="l.image.w" :height="l.image.h" :opacity="l.opacity" preserveAspectRatio="none" />
                 <path v-else :d="l.d" :fill="l.color" :fill-opacity="l.opacity" />
               </template>

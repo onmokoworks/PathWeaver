@@ -103,7 +103,7 @@ fn render(s: &Stroke) -> Value {
         let d = path_d(&[img.rect()]);
         return json!({
             "layers": [{"color": "#000000", "opacity": img.opacity, "d": d, "placed": {
-                "asset": img.asset, "w": img.width, "h": img.height, "matrix": img.matrix, "reference": img.reference,
+                "asset": img.asset, "w": img.width, "h": img.height, "matrix": img.matrix, "reference": img.reference, "knockout": img.knockout,
             }}],
             "hit": d, "center": "",
         });

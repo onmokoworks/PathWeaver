@@ -212,3 +212,59 @@ test('paste an image from the clipboard places it', async ({page}) => {
   expect((await strokes(page))[0].image.width).toBe(20)
   expect(errors).toEqual([])
 })
+
+test('抜き: black or white keyed out on the canvas and in the export, original kept, one undo each', async ({page}) => {
+  const errors = await boot(page)
+  // left half black, right half white
+  const url = await page.evaluate(() => {
+    const c = document.createElement('canvas')
+    c.width = 40; c.height = 20
+    const g = c.getContext('2d')!
+    g.fillStyle = '#000'; g.fillRect(0, 0, 20, 20)
+    g.fillStyle = '#fff'; g.fillRect(20, 0, 20, 20)
+    return c.toDataURL('image/png')
+  })
+  await placeFiles(page, [{name: 'bw.png', mimeType: 'image/png', buffer: Buffer.from(url.split(',')[1], 'base64')}])
+  await expect.poll(async () => (await strokes(page)).length).toBe(1)
+  let [s] = await strokes(page)
+  const original = (await doc(page)).assets[s.image.asset]
+  const img = page.locator(`[data-placed="${s.id}"]`)
+  await expect(img).toHaveAttribute('href', original)
+  // alpha of the drawn picture at the black half and the white half
+  const alphas = () => img.evaluate(async el => {
+    const im = new Image()
+    im.src = el.getAttribute('href')!
+    await im.decode()
+    const c = document.createElement('canvas')
+    c.width = im.naturalWidth; c.height = im.naturalHeight
+    const g = c.getContext('2d')!
+    g.drawImage(im, 0, 0)
+    return [g.getImageData(5, 10, 1, 1).data[3], g.getImageData(35, 10, 1, 1).data[3]]
+  })
+
+  const radio = (label: string) => page.locator('[data-field=knockout]').getByText(label, {exact: true}).first().click()
+  await radio('黒')
+  ;[s] = await strokes(page)
+  expect(s.image.knockout).toBe('black')
+  await expect(img).not.toHaveAttribute('href', original)
+  expect(await alphas()).toEqual([0, 255])
+  // the document still holds the untouched pixels
+  expect((await doc(page)).assets[s.image.asset]).toBe(original)
+  const svg = await page.evaluate(async () => {
+    const pw = (window as any).__pw
+    return pw.call('svg', {doc: {...pw.ed.doc, assets: await pw.exportAssets(pw.ed.doc)}})
+  })
+  expect(svg).toContain('<image')
+  expect(svg).not.toContain(original)
+
+  await radio('白')
+  await expect.poll(alphas).toEqual([255, 0])
+  await radio('なし')
+  ;[s] = await strokes(page)
+  expect(s.image.knockout).toBeUndefined()
+  await expect(img).toHaveAttribute('href', original)
+  // each switch is one undo step
+  await page.keyboard.press('Meta+z')
+  expect((await strokes(page))[0].image.knockout).toBe('white')
+  expect(errors).toEqual([])
+})

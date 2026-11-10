@@ -18,7 +18,9 @@ export type Join = 'Miter' | 'Round' | 'Bevel'
 /** Live text: characters + font stay editable; contours = laid-out glyphs (placed by matrix). */
 export interface TextSpec {text: string; font: string; size: number; line_height: number; matrix: Matrix}
 /** A placed bitmap; the pixels are `Document.assets[asset]`. */
-export interface Placed {asset: string; width: number; height: number; matrix: Matrix; opacity: number; reference?: boolean}
+/** 抜き: black keyed out (Unmult) or white paper keyed out. */
+export type Knockout = 'black' | 'white'
+export interface Placed {asset: string; width: number; height: number; matrix: Matrix; opacity: number; reference?: boolean; knockout?: Knockout | null}
 export type Matrix = [number, number, number, number, number, number]
 
 /** Live blend: `steps` generated paths between sources a and b. */
@@ -121,7 +123,7 @@ export interface RenderLayer {
   color: string; opacity: number; d: string
   image?: {href: string; x: number; y: number; w: number; h: number}
   /** A placed image: the canvas draws `Document.assets[asset]` with `matrix`. */
-  placed?: {asset: string; w: number; h: number; matrix: Matrix; reference: boolean}
+  placed?: {asset: string; w: number; h: number; matrix: Matrix; reference: boolean; knockout?: Knockout | null}
 }
 export interface Render {layers: RenderLayer[]; hit: string; center: string; error?: string; stale?: boolean}
 export interface WidthHandle {

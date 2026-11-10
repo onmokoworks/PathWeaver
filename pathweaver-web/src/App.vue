@@ -25,6 +25,7 @@ import type {Document, Vec2} from './core/types'
 import {placeData, placeFiles, type PlaceTarget} from './core/place'
 import {SHAPES, shapeInfo, type ShapeKind} from './core/shapes'
 import {DEFAULT_FONT, outlineText, relayout} from './core/textOutline'
+import {exportAssets} from './core/knockout'
 
 useAppConfigStore().appId = 'pathweaver'
 useInputColor(['#202124', '#ffffff', '#e66b5b', '#e8b655', '#70a774', '#5c88c5', '#9b7ac3'])
@@ -306,7 +307,7 @@ function setSideTab(id: string) { sideTab.value = id; try { localStorage.setItem
 
 // Test hook: lets end-to-end tests read the document without poking internals.
 ;(window as unknown as {__pw: unknown}).__pw = {
-  ed, canvas, call,
+  ed, canvas, call, exportAssets,
   // test hook: lay out the active text again and finish its gesture
   textProbe: async (t: string) => {
     try { (window as unknown as {__pwTextProbe: unknown}).__pwTextProbe = (await outlineText({text: t, font: DEFAULT_FONT, size: 48, line_height: 1.2})).length } catch (e) { (window as unknown as {__pwTextProbe: unknown}).__pwTextProbe = String(e) }
