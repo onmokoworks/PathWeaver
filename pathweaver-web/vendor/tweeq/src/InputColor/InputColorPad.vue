@@ -275,9 +275,25 @@ const defaultButtonStyle = computed(() => {
 	}
 })
 
+// PathWeaver: an input near the window edge (a right-hand panel) would put
+// most of the pad and wheel off screen. The pointer is locked while tweaking
+// and the preview is drawn at `origin`, so the whole overlay can shift into
+// view together. Kept up to date while dragging: at the edge the pad then
+// stands still and the preview moves across it, like a fixed colour picker.
+const inView = computed<[number, number]>(() => {
+	if (!tweaking.value) return [0, 0]
+	const w = tweakWidth, m = 8
+	const [ox, oy] = origin.value
+	const padX = ox - local.value.s * w, padY = oy - (1 - local.value.v) * w
+	const x0 = Math.min(ox - w / 2, padX), x1 = Math.max(ox + w / 2, padX + w)
+	const y0 = Math.min(oy - w / 2, padY), y1 = Math.max(oy + w / 2, padY + w)
+	const fit = (a: number, b: number, size: number) => (a < m ? m - a : b > size - m ? Math.max(size - m - b, m - a) : 0)
+	return [fit(x0, x1, window.innerWidth), fit(y0, y1, window.innerHeight)]
+})
 const overlayStyle = computed(() => {
 	return {
 		transformOrigin: `${origin.value[0]}px ${origin.value[1]}px`,
+		translate: `${inView.value[0]}px ${inView.value[1]}px`,
 	}
 })
 

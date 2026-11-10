@@ -6,6 +6,9 @@ import ParameterGrid from '../../vendor/tweeq/src/ParameterGrid/ParameterGrid.vu
 import Parameter from '../../vendor/tweeq/src/ParameterGrid/Parameter.vue'
 import ParameterHeading from '../../vendor/tweeq/src/ParameterGrid/ParameterHeading.vue'
 import InputNumber from '../../vendor/tweeq/src/InputNumber/InputNumber.vue'
+import InputAngle from '../../vendor/tweeq/src/InputAngle/InputAngle.vue'
+import InputPosition from '../../vendor/tweeq/src/InputPosition/InputPosition.vue'
+import InputSize from '../../vendor/tweeq/src/InputSize/InputSize.vue'
 import InputString from '../../vendor/tweeq/src/InputString/InputString.vue'
 import InputRadio from '../../vendor/tweeq/src/InputRadio/InputRadio.vue'
 import InputButton from '../../vendor/tweeq/src/InputButton/InputButton.vue'
@@ -144,18 +147,21 @@ function beginTransform() {
   const b = bounds.value
   if (b) base = {doc: JSON.stringify(ed.doc.strokes), b}
 }
-function setBounds(key: 'x' | 'y' | 'w' | 'h', v: number) {
+/** Position (X, Y) and size (W, H) as pairs: Tweeq's 2D drag pad / linked size. */
+function setPosition(v: [number, number]) {
+  if (!base) beginTransform()
+  if (!base) return
+  transformBase([1, 0, 0, 1, v[0] - base.b.x0, v[1] - base.b.y0])
+}
+function setSize(v: [number, number]) {
   if (!base) beginTransform()
   if (!base) return
   const b = base.b
-  const w = Math.max(b.x1 - b.x0, 1e-9), h = Math.max(b.y1 - b.y0, 1e-9)
-  let sx = 1, sy = 1, tx = 0, ty = 0
-  if (key === 'x') tx = v - b.x0
-  if (key === 'y') ty = v - b.y0
-  if (key === 'w') sx = Math.max(v, 0.01) / w
-  if (key === 'h') sy = Math.max(v, 0.01) / h
-  const m = [sx, 0, 0, sy, b.x0 - sx * b.x0 + tx, b.y0 - sy * b.y0 + ty]
-  const d = {...ed.doc, strokes: JSON.parse(base.doc)} as Document
+  const sx = Math.max(v[0], 0.01) / Math.max(b.x1 - b.x0, 1e-9), sy = Math.max(v[1], 0.01) / Math.max(b.y1 - b.y0, 1e-9)
+  transformBase([sx, 0, 0, sy, b.x0 - sx * b.x0, b.y0 - sy * b.y0])
+}
+function transformBase(m: number[]) {
+  const d = {...ed.doc, strokes: JSON.parse(base!.doc)} as Document
   const r = call<{doc: Document}>('edit', {doc: d, kind: 'transform', ids: ed.selected, matrix: m})
   ed.doc.strokes = r.doc.strokes
   ed.changed()
@@ -169,13 +175,13 @@ const anchorNodes = computed(() => {
 })
 const lastAnchor = computed(() => anchorNodes.value[anchorNodes.value.length - 1])
 let anchorBase: {x: number; y: number}[] | null = null
-function setAnchor(axis: 'x' | 'y', v: number) {
+function setAnchorXY(v: [number, number]) {
   const last = lastAnchor.value
   if (!last) return
   if (!anchorBase) { ed.begin(); anchorBase = anchorNodes.value.map(({n}) => ({...n!.p})) }
   const ref = anchorBase[anchorBase.length - 1]
-  const delta = v - ref[axis]
-  anchorNodes.value.forEach(({n}, i) => { n!.p = {...anchorBase![i], [axis]: anchorBase![i][axis] + delta} })
+  const dx = v[0] - ref.x, dy = v[1] - ref.y
+  anchorNodes.value.forEach(({n}, i) => { n!.p = {x: anchorBase![i].x + dx, y: anchorBase![i].y + dy} })
   ed.changed()
 }
 function endAnchor() { anchorBase = null; ed.commit() }
@@ -296,8 +302,9 @@ function setCap(end: 'start' | 'end', angle: number | null) {
     <template v-if="ed.anchors.length && lastAnchor">
       <ParameterGrid>
         <ParameterHeading>アンカー（{{ ed.anchors.length }}点）</ParameterHeading>
-        <Parameter label="X"><InputNumber :model-value="r2(lastAnchor.n!.p.x)" :bar="false" @focus="begin" @update:model-value="v => setAnchor('x', v)" @confirm="endAnchor" @blur="endAnchor" /></Parameter>
-        <Parameter label="Y"><InputNumber :model-value="r2(lastAnchor.n!.p.y)" :bar="false" @focus="begin" @update:model-value="v => setAnchor('y', v)" @confirm="endAnchor" @blur="endAnchor" /></Parameter>
+        <Parameter label="位置" hint="左の点の格子をドラッグすると縦横に一度に動かせます">
+          <InputPosition data-field="anchor-position" :model-value="[r2(lastAnchor.n!.p.x), r2(lastAnchor.n!.p.y)]" @focus="begin" @update:model-value="v => setAnchorXY(v as [number, number])" @confirm="endAnchor" @blur="endAnchor" />
+        </Parameter>
         <Parameter label="種類">
           <InputRadio
             :model-value="anchorKind" :options="['corner', 'smooth', 'independent']" :labels="['角', 'スムーズ', '独立']"
@@ -338,7 +345,7 @@ function setCap(end: 'start' | 'end', angle: number | null) {
         </Parameter>
         <Parameter label="左だけ" hint="Option＋左の端をドラッグと同じ"><InputNumber :model-value="r2(widthPoint.h.left)" :min="0" :max="1000" :bar="false" @focus="begin" @update:model-value="v => setWidth({left: v})" @confirm="commit" @blur="commit" /></Parameter>
         <Parameter label="右だけ" hint="Option＋右の端をドラッグと同じ"><InputNumber :model-value="r2(widthPoint.h.right)" :min="0" :max="1000" :bar="false" @focus="begin" @update:model-value="v => setWidth({right: v})" @confirm="commit" @blur="commit" /></Parameter>
-        <Parameter label="方向" hint="幅を測る向きを芯の法線から傾けます"><InputNumber :model-value="r2(widthPoint.h.angle)" :min="-89" :max="89" suffix="°" :bar="false" @focus="begin" @update:model-value="v => setWidth({angle: v})" @confirm="commit" @blur="commit" /></Parameter>
+        <Parameter label="方向" hint="幅を測る向きを芯の法線から傾けます。つまみを回すか数字をドラッグ"><InputAngle data-field="width-angle" :model-value="r2(widthPoint.h.angle)" :min="-89" :max="89" @focus="begin" @update:model-value="v => setWidth({angle: v})" @confirm="commit" @blur="commit" /></Parameter>
       </ParameterGrid>
       <div v-if="typeof widthPoint.target === 'number'" class="buttons">
         <InputButton subtle icon="material-symbols:delete-outline" label="幅点を削除" tooltip="Delete" @click="deleteWidthPoint" />
@@ -368,7 +375,7 @@ function setCap(end: 'start' | 'end', angle: number | null) {
         <template v-if="capInfo">
           <Parameter v-for="end in (['start', 'end'] as const)" :key="end" :label="end === 'start' ? '始点の切り口' : '終点の切り口'" hint="⌘を押しながら端点をドラッグして回転（Shiftで刻み）。−で芯に直角へ戻す">
             <div class="cap">
-              <InputNumber :model-value="r2(end === 'start' ? capInfo.start : capInfo.end)" :min="0" :max="180" suffix="°" :bar="false" @focus="begin" @update:model-value="v => setCap(end, v)" @confirm="commit" @blur="commit" />
+              <InputAngle :data-field="`cap-${end}`" :model-value="r2(end === 'start' ? capInfo.start : capInfo.end)" :min="0" :max="180" @focus="begin" @update:model-value="v => setCap(end, v)" @confirm="commit" @blur="commit" />
               <InputButton v-if="end === 'start' ? capInfo.startLocked : capInfo.endLocked" narrow subtle icon="material-symbols:remove" tooltip="芯に直角へ戻す" aria-label="芯に直角へ戻す" @click="() => { setCap(end, null); commit() }" />
             </div>
           </Parameter>
@@ -424,10 +431,12 @@ function setCap(end: 'start' | 'end', angle: number | null) {
       </ParameterGrid>
       <ParameterGrid v-if="bounds">
         <ParameterHeading>位置とサイズ</ParameterHeading>
-        <Parameter label="X"><InputNumber data-field="x" :model-value="r2(bounds.x0)" :bar="false" @focus="beginTransform" @update:model-value="v => setBounds('x', v)" @confirm="endTransform" @blur="endTransform" /></Parameter>
-        <Parameter label="Y"><InputNumber :model-value="r2(bounds.y0)" :bar="false" @focus="beginTransform" @update:model-value="v => setBounds('y', v)" @confirm="endTransform" @blur="endTransform" /></Parameter>
-        <Parameter label="W"><InputNumber :model-value="r2(bounds.x1 - bounds.x0)" :min="0.01" :bar="false" @focus="beginTransform" @update:model-value="v => setBounds('w', v)" @confirm="endTransform" @blur="endTransform" /></Parameter>
-        <Parameter label="H"><InputNumber :model-value="r2(bounds.y1 - bounds.y0)" :min="0.01" :bar="false" @focus="beginTransform" @update:model-value="v => setBounds('h', v)" @confirm="endTransform" @blur="endTransform" /></Parameter>
+        <Parameter label="位置" hint="左上の位置。左の点の格子をドラッグすると縦横に一度に動かせます">
+          <InputPosition data-field="position" :model-value="[r2(bounds.x0), r2(bounds.y0)]" @focus="beginTransform" @update:model-value="v => setPosition(v as [number, number])" @confirm="endTransform" @blur="endTransform" />
+        </Parameter>
+        <Parameter label="サイズ" hint="鎖のマークで縦横比の固定を切り替えます">
+          <InputSize data-field="size" :model-value="[r2(bounds.x1 - bounds.x0), r2(bounds.y1 - bounds.y0)]" @focus="beginTransform" @update:model-value="v => setSize(v as [number, number])" @confirm="endTransform" @blur="endTransform" />
+        </Parameter>
       </ParameterGrid>
       <div class="buttons">
         <InputButton v-if="!onlyImages" subtle class="wide" icon="material-symbols:account-tree-outline" :label="active.appearance ? '外観ノードを編集' : '外観ノードを開く'" @click="emit('openNodes')" />

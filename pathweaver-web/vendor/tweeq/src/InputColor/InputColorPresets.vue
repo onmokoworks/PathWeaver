@@ -42,5 +42,7 @@ button
 	width var(--tq-input-height)
 	height var(--tq-input-height)
 	border-radius var(--tq-radius-input)
+	// PathWeaver: a swatch the colour of the background (white) stays visible.
+	box-shadow inset 0 0 0 1px var(--tq-color-border)
 </style>
 ./useInputColor

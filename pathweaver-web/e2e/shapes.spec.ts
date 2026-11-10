@@ -17,12 +17,15 @@ test('shape tools: M draws a rectangle, the adjust panel rebuilds it in the same
   // Adjust Last Operation: width and corners
   const panel = page.getByTestId('shape-adjust')
   await expect(panel).toBeVisible()
-  await panel.locator('[data-adjust=w] input').fill('300')
-  await panel.locator('[data-adjust=w] input').press('Enter')
+  // size is W and H together, ratio linked by default (Tweeq's InputSize)
+  const w = panel.locator('[data-adjust=size] input').first()
+  await w.fill('300')
+  await w.press('Enter')
   await panel.locator('[data-adjust=corner] input').fill('20')
   await panel.locator('[data-adjust=corner] input').press('Enter')
   ;[s] = await strokes(page)
   expect(Math.max(...s.nodes.map((n: any) => n.p.x))).toBeCloseTo(350)
+  expect(Math.max(...s.nodes.map((n: any) => n.p.y))).toBeCloseTo(200)   // 100 → 150 with the ratio
   expect(s.corners).toHaveLength(4)
   expect(s.corners[0].radius).toBeCloseTo(20)
   expect((await state(page)).undo).toBe(1)          // still the one step

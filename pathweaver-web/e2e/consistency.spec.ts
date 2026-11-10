@@ -64,7 +64,7 @@ test('UX-12 file commands work from inside a text field and confirm it first; Ta
   expect(JSON.parse(text).strokes[0].name).toBe('新しい名前')
   expect((await doc(page)).strokes[0].name).toBe('新しい名前')
   // Tab: X → Y in the position fields
-  const x = page.locator('[data-field="x"] input')
+  const x = page.locator('[data-field="position"] input').first()
   await x.focus()
   const before = await page.evaluate(() => document.activeElement?.outerHTML)
   await page.keyboard.press('Tab')

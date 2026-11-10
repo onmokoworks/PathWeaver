@@ -60,7 +60,7 @@ function recordValueOnEdit() {
 		<Icon
 			class="chain"
 			:class="{active: keepRatio}"
-			:icon="keepRatio ? 'radix-icons:link-1' : 'radix-icons:link-none-1'"
+			:icon="keepRatio ? 'mdi:link-variant' : 'mdi:link-variant-off'"
 			@click="keepRatio = !keepRatio"
 		/>
 	</div>

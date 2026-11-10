@@ -137,7 +137,7 @@ function decompose(value?: number | vec2): vec2 | undefined {
 
 <template>
 	<button ref="$button" class="TqInputTranslate">
-		<Icon class="grid-icon" icon="mingcute:dot-grid-fill" />
+		<Icon class="grid-icon" icon="mdi:dots-grid" />
 		<Transition>
 			<div v-if="tweaking" class="overlay">
 				<div class="overlay-grid" :style="overlayStyles">

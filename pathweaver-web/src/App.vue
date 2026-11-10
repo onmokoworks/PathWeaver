@@ -154,6 +154,10 @@ function onKeyDown(e: KeyboardEvent) {
     }
     return
   }
+  // A Tweeq drag in progress (colour swatch, number, 2D pad, dial) owns the
+  // keys: H/S/V/R/G/B/A pick the channel, Shift snaps. None of them may also
+  // switch tools or nudge paths.
+  if (document.pointerLockElement || document.querySelector('.TqTweakOverlay')) return
   // A Tweeq popover (color picker, dropdown) owns the keyboard while open.
   // (A tooltip is a popover too, but it never takes the keyboard.)
   const owner = [...document.querySelectorAll('.Popover:popover-open, [popover]:popover-open')].some(p => !p.querySelector('.TqTooltipContent'))

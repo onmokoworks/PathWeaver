@@ -2,6 +2,7 @@
 // One node. Every value is edited in place with the real Tweeq inputs.
 import {computed} from 'vue'
 import InputNumber from '../../vendor/tweeq/src/InputNumber/InputNumber.vue'
+import InputAngle from '../../vendor/tweeq/src/InputAngle/InputAngle.vue'
 import InputColor from '../../vendor/tweeq/src/InputColor/InputColor.vue'
 import InputCheckbox from '../../vendor/tweeq/src/InputCheckbox/InputCheckbox.vue'
 import CycleSelect from './CycleSelect.vue'
@@ -84,10 +85,19 @@ function fmt(v: number | undefined) {
         <span class="label">{{ p.label }}</span>
         <span class="linked-value" :title="'接続元で調整'">↗ {{ fmt(effective.get(`${node.id}:${p.key}`)) }}</span>
       </template>
+      <template v-else-if="p.key === 'Angle' || p.key === 'Rotation'">
+        <span class="label">{{ p.label }}</span>
+        <InputAngle
+          class="num" :model-value="p.value" :min="p.min" :max="p.max" :aria-label="p.label" :data-param="p.key"
+          @focus="emit('begin')" @update:model-value="v => emit('param', p.key, v)"
+          @confirm="emit('commit')" @blur="emit('commit')"
+        />
+      </template>
+      <!-- A bounded value shows Tweeq's bar: how far along its range it is. -->
       <InputNumber
         v-else class="num" :model-value="p.value" :min="p.min" :max="p.max"
         :step="isInt(p.key) ? 1 : undefined" :precision="precision(p.min, p.max)"
-        :prefix="p.label + ' '" :bar="false" :aria-label="p.label"
+        :prefix="p.label + ' '" :aria-label="p.label"
         :data-param="p.key"
         @focus="emit('begin')" @update:model-value="v => emit('param', p.key, v)"
         @confirm="emit('commit')" @blur="emit('commit')"
