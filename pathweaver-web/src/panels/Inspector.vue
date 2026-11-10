@@ -16,6 +16,8 @@ import InputDropdown from '../../vendor/tweeq/src/InputDropdown/InputDropdown.vu
 import InputCheckbox from '../../vendor/tweeq/src/InputCheckbox/InputCheckbox.vue'
 import {fontFamilies, relayout} from '../core/textOutline'
 import PaintField from './PaintField.vue'
+import PivotPicker from './PivotPicker.vue'
+import {pivotIn} from '../canvas/controller'
 import {vTooltip} from '../../vendor/tweeq/src/Tooltip'
 import type {Editor} from '../core/editor'
 import type {Canvas} from '../canvas/controller'
@@ -142,30 +144,44 @@ function runPathfinder(op: string) {
   if (ids) { ed.selected = ids; ed.anchors = [] }
 }
 
-// ---- transform via bounds (X, Y, W, H) ----
-let base: {doc: string; b: {x0: number; y0: number; x1: number; y1: number}} | null = null
+// ---- transform via bounds (X, Y, W, H, rotation) around the reference point ----
+let base: {doc: string; b: {x0: number; y0: number; x1: number; y1: number}; at: {x: number; y: number}} | null = null
 const bounds = computed(() => {
   void ed.revision
   return props.canvas.selectionBounds()
 })
+const pivot = computed(() => props.canvas.state.pivot)
+/** The reference point on the page: what X/Y show and what size and rotation keep still. */
+const at = computed(() => bounds.value ? pivotIn(bounds.value, pivot.value) : null)
 function beginTransform() {
   ed.begin()
   const b = bounds.value
-  if (b) base = {doc: JSON.stringify(ed.doc.strokes), b}
+  if (b) base = {doc: JSON.stringify(ed.doc.strokes), b, at: pivotIn(b, pivot.value)}
 }
 /** Position (X, Y) and size (W, H) as pairs: Tweeq's 2D drag pad / linked size. */
 function setPosition(v: [number, number]) {
   if (!base) beginTransform()
   if (!base) return
-  transformBase([1, 0, 0, 1, v[0] - base.b.x0, v[1] - base.b.y0])
+  transformBase([1, 0, 0, 1, v[0] - base.at.x, v[1] - base.at.y])
 }
 function setSize(v: [number, number]) {
   if (!base) beginTransform()
   if (!base) return
-  const b = base.b
+  const b = base.b, c = base.at
   const sx = Math.max(v[0], 0.01) / Math.max(b.x1 - b.x0, 1e-9), sy = Math.max(v[1], 0.01) / Math.max(b.y1 - b.y0, 1e-9)
-  transformBase([sx, 0, 0, sy, b.x0 - sx * b.x0, b.y0 - sy * b.y0])
+  transformBase([sx, 0, 0, sy, c.x - sx * c.x, c.y - sy * c.y])
 }
+// Rotation is applied, not stored: the dial turns the selection while it is
+// held and reads 0 again afterwards (a path has no lasting angle).
+const turn = ref(0)
+function setTurn(deg: number) {
+  if (!base) beginTransform()
+  if (!base) return
+  turn.value = deg
+  const a = (deg * Math.PI) / 180, cos = Math.cos(a), sin = Math.sin(a), c = base.at
+  transformBase([cos, sin, -sin, cos, c.x - cos * c.x + sin * c.y, c.y - sin * c.x - cos * c.y])
+}
+function endTurn() { turn.value = 0; endTransform() }
 function transformBase(m: number[]) {
   const d = {...ed.doc, strokes: JSON.parse(base!.doc)} as Document
   const r = call<{doc: Document}>('edit', {doc: d, kind: 'transform', ids: ed.selected, matrix: m})
@@ -438,13 +454,19 @@ function setCap(end: 'start' | 'end', angle: number | null) {
           </div>
         </Parameter>
       </ParameterGrid>
-      <ParameterGrid v-if="bounds">
-        <ParameterHeading>位置とサイズ</ParameterHeading>
-        <Parameter label="位置" hint="左上の位置。左の点の格子をドラッグすると縦横に一度に動かせます">
-          <InputPosition data-field="position" :model-value="[r2(bounds.x0), r2(bounds.y0)]" @focus="beginTransform" @update:model-value="v => setPosition(v as [number, number])" @confirm="endTransform" @blur="endTransform" />
+      <ParameterGrid v-if="bounds && at">
+        <ParameterHeading>
+          位置とサイズ
+          <template #right><PivotPicker v-tooltip="'基準点：位置はこの点の座標、サイズと回転はこの点を動かさずに変わる。キャンバスの十字をドラッグしても動かせる（パスや角のハンドルと重なっているときは⌘を押しながら。ダブルクリックで中心）'" :model-value="pivot" @update:model-value="canvas.setPivot" /></template>
+        </ParameterHeading>
+        <Parameter label="位置" hint="基準点の位置。左の点の格子をドラッグすると縦横に一度に動かせます">
+          <InputPosition data-field="position" :model-value="[r2(at.x), r2(at.y)]" @focus="beginTransform" @update:model-value="v => setPosition(v as [number, number])" @confirm="endTransform" @blur="endTransform" />
         </Parameter>
         <Parameter label="サイズ" hint="鎖のマークで縦横比の固定を切り替えます">
           <InputSize data-field="size" :model-value="[r2(bounds.x1 - bounds.x0), r2(bounds.y1 - bounds.y0)]" @focus="beginTransform" @update:model-value="v => setSize(v as [number, number])" @confirm="endTransform" @blur="endTransform" />
+        </Parameter>
+        <Parameter label="回転" hint="基準点を中心に回す（回し終わると0に戻る）">
+          <InputAngle data-field="rotate" :model-value="turn" @focus="beginTransform" @update:model-value="setTurn" @confirm="endTurn" @blur="endTurn" />
         </Parameter>
       </ParameterGrid>
       <div class="buttons">

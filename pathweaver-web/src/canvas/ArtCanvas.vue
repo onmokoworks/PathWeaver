@@ -4,7 +4,7 @@ import {Icon} from '../../vendor/tweeq/src/Icon'
 import {computed, onBeforeUnmount, onMounted, ref} from 'vue'
 import type {Editor} from '../core/editor'
 import type {Stroke, Vec2} from '../core/types'
-import {RULER, type Canvas} from './controller'
+import {RULER, pivotIn, type Canvas} from './controller'
 import {add, sub, scale} from './geometry'
 import InputButtonToggle from '../../vendor/tweeq/src/InputButtonToggle/InputButtonToggle.vue'
 import {vTooltip} from '../../vendor/tweeq/src/Tooltip'
@@ -138,7 +138,7 @@ const box = computed(() => {
   const b = cv.selectionBounds()
   if (!b) return null
   const a = S({x: b.x0, y: b.y0}), c = S({x: b.x1, y: b.y1})
-  return {x: a.x, y: a.y, w: c.x - a.x, h: c.y - a.y, handles: cv.boxHandles(b).map(S)}
+  return {x: a.x, y: a.y, w: c.x - a.x, h: c.y - a.y, handles: cv.boxHandles(b).map(S), pivot: S(pivotIn(b, cv.state.pivot))}
 })
 
 const marquee = computed(() => {
@@ -360,6 +360,10 @@ const cursor = computed(() => {
       <g v-if="box" class="bbox">
         <rect :x="box.x" :y="box.y" :width="box.w" :height="box.h" />
         <rect v-for="(h, i) in box.handles" :key="i" :x="h.x - 3.5" :y="h.y - 3.5" width="7" height="7" class="bbox-handle" />
+        <!-- reference point: rotation and Option-scale turn around it -->
+        <g class="pivot" data-testid="pivot" :transform="`translate(${box.pivot.x} ${box.pivot.y})`">
+          <circle r="5" /><line x1="-8" x2="8" y1="0" y2="0" /><line x1="0" x2="0" y1="-8" y2="8" />
+        </g>
       </g>
 
       <g v-for="l in pathFrameLines" :key="l.label" class="path-frame">
@@ -466,6 +470,8 @@ const cursor = computed(() => {
 .width-handle text {font-size: 10px; font-weight: 600; fill: var(--pw-width); paint-order: stroke; stroke: var(--pw-paper); stroke-width: 3px; pointer-events: none}
 .bbox rect {fill: none; stroke: var(--tq-color-accent); stroke-width: 1}
 .bbox .bbox-handle {fill: var(--pw-paper)}
+.bbox .pivot circle {fill: none; stroke: var(--tq-color-accent); stroke-width: 1}
+.bbox .pivot line {stroke: var(--tq-color-accent); stroke-width: 1}
 .marquee {fill: color-mix(in srgb, var(--tq-color-accent) 10%, transparent); stroke: var(--tq-color-accent); stroke-dasharray: 3 2}
 .snap line {stroke: var(--pw-snap); stroke-width: 1}
 .path-frame line {stroke: var(--pw-snap); stroke-width: 1; stroke-dasharray: 5 4; opacity: .7}

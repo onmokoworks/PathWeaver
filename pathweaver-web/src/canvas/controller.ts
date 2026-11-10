@@ -24,6 +24,7 @@ type Drag =
   | {kind: 'move'; start: Vec2; origin: Vec2; base: string; moved: boolean; duplicate: boolean}
   | {kind: 'scale'; base: string; box: Bounds; corner: Vec2; fixed: Vec2}
   | {kind: 'rotate'; base: string; center: Vec2; startAngle: number}
+  | {kind: 'pivot'; box: Bounds}
   | {kind: 'anchors'; start: Vec2; origin: Vec2; base: Map<string, Vec2>; moved: boolean}
   | {kind: 'handle'; at: Anchor; side: 'in' | 'out'}
   | {kind: 'pen'; at: Anchor; start: Vec2; moved: boolean; mode: 'new' | 'out' | 'close'}
@@ -49,6 +50,16 @@ function distToSegment(p: Vec2, a: Vec2, b: Vec2) {
   return dist(p, add(a, scale(v, t)))
 }
 const akey = (a: Anchor) => `${a.stroke}:${a.node}`
+
+/** The reference point (基準点): where it sits in the selection's box, 0–1 on each axis. */
+export interface Pivot {u: number; v: number}
+function loadPivot(): Pivot {
+  try { const v = JSON.parse(localStorage.getItem('pw.pivot') ?? 'null'); if (Number.isFinite(v?.u) && Number.isFinite(v?.v)) return {u: v.u, v: v.v} } catch { /* default */ }
+  return {u: 0.5, v: 0.5}
+}
+/** The nine points of the locator (corners, edge middles, centre). */
+export const PIVOT_POINTS: Pivot[] = [0, 0.5, 1].flatMap(v => [0, 0.5, 1].map(u => ({u, v})))
+export const pivotIn = (b: Bounds, q: Pivot): Vec2 => ({x: b.x0 + q.u * (b.x1 - b.x0), y: b.y0 + q.v * (b.y1 - b.y0)})
 
 function loadShapeKind(): ShapeKind {
   try { const v = localStorage.getItem('pw.shape') as ShapeKind | null; if (v && shapeInfo(v)) return v } catch { /* default */ }
@@ -83,7 +94,12 @@ export function createCanvas(ed: Editor) {
     // parameters stay adjustable until the document changes otherwise).
     shapeKind: loadShapeKind(),
     lastShape: null as {strokes: number[]; params: ShapeParams; revision: number} | null,
+    // Reference point for position, size and rotation (a view setting: one
+    // for every selection, like Blender's pivot point). Not undoable.
+    pivot: loadPivot(),
   })
+  watch(() => [state.pivot.u, state.pivot.v], () => { try { localStorage.setItem('pw.pivot', JSON.stringify(state.pivot)) } catch { /* preference only */ } })
+  function setPivot(q: Pivot) { state.pivot = {u: q.u, v: q.v} }
   let frames: Frame[] = []
   let framesKey = ''  // what `frames` was captured for while hovering
   let lastClick = {t: 0, p: ZERO}
@@ -532,6 +548,15 @@ export function createCanvas(ed: Editor) {
     const box = ed.selected.length ? selectionBounds() : null
     if (box) {
       const hs = boxHandles(box)
+      // The reference point: drag it (it snaps to the nine points); double-click: back to the centre.
+      // A handle or a path under it wins (grabbing a shape by its middle still moves it);
+      // with ⌘ the point is taken anyway.
+      const onPivot = dist(pivotIn(box, state.pivot), p) < tol(7)
+      const grabPivot = () => {
+        if (double) { setPivot({u: 0.5, v: 0.5}); return }
+        state.drag = {kind: 'pivot', box}
+      }
+      if (onPivot && e.metaKey) return grabPivot()
       for (let i = 0; i < hs.length; i++) {
         if (dist(hs[i], p) < tol(6)) {
           const opposite = hs[(i + 4) % 8]
@@ -540,11 +565,12 @@ export function createCanvas(ed: Editor) {
           return
         }
       }
-      // Just outside a corner: rotate.
+      if (onPivot && pathAt(p) === null) return grabPivot()
+      // Just outside a corner: rotate around the reference point.
       for (const i of [0, 2, 4, 6]) {
         const d = dist(hs[i], p)
         if (d >= tol(6) && d < tol(20) && !inBox(box, p)) {
-          const center = {x: (box.x0 + box.x1) / 2, y: (box.y0 + box.y1) / 2}
+          const center = pivotIn(box, state.pivot)
           ed.begin()
           state.drag = {kind: 'rotate', base: JSON.stringify(ed.doc.strokes), center, startAngle: Math.atan2(p.y - center.y, p.x - center.x)}
           return
@@ -877,10 +903,18 @@ export function createCanvas(ed: Editor) {
         if (e.shiftKey && Math.abs(fx) > 1e-9 && Math.abs(fy) > 1e-9) { const k = Math.max(Math.abs(sx), Math.abs(sy)); sx = Math.sign(sx || 1) * k; sy = Math.sign(sy || 1) * k }
         if (Math.abs(sx) < 1e-3) sx = 1e-3
         if (Math.abs(sy) < 1e-3) sy = 1e-3
-        const c = e.altKey ? {x: (d.box.x0 + d.box.x1) / 2, y: (d.box.y0 + d.box.y1) / 2} : d.fixed
+        // Option: from the reference point (the centre unless moved)
+        const c = e.altKey ? pivotIn(d.box, state.pivot) : d.fixed
         restoreBase(d.base)
         transformSelected([sx, 0, 0, sy, c.x - sx * c.x, c.y - sy * c.y])
         ed.changed()
+        return
+      }
+      case 'pivot': {
+        const b = d.box, w = b.x1 - b.x0, h = b.y1 - b.y0
+        // near one of the nine points: onto it; else anywhere (also outside the box)
+        const near = PIVOT_POINTS.find(q => dist(pivotIn(b, q), raw) < tol(8))
+        setPivot(near ?? {u: w > 1e-9 ? (raw.x - b.x0) / w : 0.5, v: h > 1e-9 ? (raw.y - b.y0) / h : 0.5})
         return
       }
       case 'rotate': {
@@ -1051,7 +1085,10 @@ export function createCanvas(ed: Editor) {
     if (box) {
       const hs = boxHandles(box)
       const i = hs.findIndex(q => dist(q, p) < tol(6))
+      const onPivot = dist(pivotIn(box, state.pivot), p) < tol(7)
+      if (onPivot && e.metaKey) { h.cursor = 'crosshair'; return }
       if (i >= 0) { h.cursor = ['nwse-resize', 'ns-resize', 'nesw-resize', 'ew-resize'][i % 4]; return }
+      if (onPivot && pathAt(p) === null) { h.cursor = 'crosshair'; return }
       if ([0, 2, 4, 6].some(i => dist(hs[i], p) < tol(20)) && !inBox(box, p)) { h.cursor = 'var(--rotate)'; return }
     }
     if (pathAt(p) !== null) { h.cursor = 'move'; return }
@@ -1065,6 +1102,7 @@ export function createCanvas(ed: Editor) {
     if (!d) return
     switch (d.kind) {
       case 'pan': return
+      case 'pivot': return
       case 'marquee': {
         const b: Bounds = {x0: Math.min(d.start.x, d.current.x), y0: Math.min(d.start.y, d.current.y), x1: Math.max(d.start.x, d.current.x), y1: Math.max(d.start.y, d.current.y)}
         if (b.x1 - b.x0 < tol(2) && b.y1 - b.y0 < tol(2)) return
@@ -1223,7 +1261,7 @@ export function createCanvas(ed: Editor) {
   return reactive({
     view, state, toWorld, toScreen, down, move, up, wheel, zoomAt, fit, key, setTool, cancelDrag, setPaper,
     selectionBounds, boxHandles, widthHandles, widthGrips, finishPen, activePathFrame, cornerWidgets, widthVisible, setShowWidth, pathAt,
-    editText, finishText, adjustShape, shapeAdjustable, setShapeKind,
+    editText, finishText, adjustShape, shapeAdjustable, setShapeKind, setPivot,
   })
 }
 export type Canvas = ReturnType<typeof createCanvas>
