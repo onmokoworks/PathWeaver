@@ -66,20 +66,30 @@ export function createEditor() {
     triggerRef(doc)
   }
   // A shared appearance (Blender's linked data-block) is one thing used by
-  // several paths: an edit to the active path's copy goes to every user.
+  // several paths: an edit to any user's copy goes to every user. The copy
+  // that changed since the last sync is the source — not simply the active
+  // path, or an edit made elsewhere (the layer list's eye on another path)
+  // would be overwritten by the active path's older copy.
   // Embedded pictures are compared by a short signature, not megabytes.
-  let sharedSeen = ''
+  const sharedSeen = new Map<number, string>()
   const sig = (g: Graph) => JSON.stringify(g, (k, v) => (k === 'png' && typeof v === 'string' ? `${v.length}:${v.slice(-48)}` : v))
   function syncShared() {
-    const s = active.value
-    const g = s?.appearance
-    if (!s || !g || g.shared == null) return
-    const users = doc.value.strokes.filter(o => o !== s && o.appearance?.shared === g.shared)
-    if (!users.length) return
-    const now = `${g.shared}|${sig(g)}`
-    if (now === sharedSeen) return
-    sharedSeen = now
-    for (const o of users) o.appearance = JSON.parse(JSON.stringify(g)) as Graph
+    const groups = new Map<number, Stroke[]>()
+    for (const o of doc.value.strokes) {
+      const id = o.appearance?.shared
+      if (id != null) (groups.get(id) ?? groups.set(id, []).get(id)!).push(o)
+    }
+    for (const id of [...sharedSeen.keys()]) if (!groups.has(id)) sharedSeen.delete(id)
+    for (const [id, users] of groups) {
+      const sigs = users.map(o => sig(o.appearance!))
+      if (sigs.every(v => v === sigs[0])) { sharedSeen.set(id, sigs[0]); continue }
+      const seen = sharedSeen.get(id)
+      const changed = users.filter((_, i) => sigs[i] !== seen)
+      const source = changed.find(o => o === active.value) ?? changed[0] ?? users[0]
+      const g = source.appearance!
+      for (const o of users) if (o !== source) o.appearance = JSON.parse(JSON.stringify(g)) as Graph
+      sharedSeen.set(id, sig(g))
+    }
   }
 
   /** Start a gesture. Nested begins are ignored; the outermost gesture wins. */
@@ -171,6 +181,7 @@ export function createEditor() {
     error.value = ''
     status.value = ''
     generation.value++
+    viewer.value = null
     changed()
   }
   const dirty = computed(() => {
@@ -366,10 +377,23 @@ export function createEditor() {
       return {layers: [], hit: '', center: '', error: String(e)}
     }
   }
-  function render(s: Stroke): Render {
+  // Node viewer (Ctrl+Shift+click a node): the canvas shows that node's result
+  // for one path. A view only — the document (its links, saves, exports,
+  // undo, other users of a shared look) never changes.
+  const viewer = ref<{stroke: number; node: number} | null>(null)
+  function viewed(s: Stroke): Stroke {
+    const v = viewer.value
+    const g = s.appearance
+    if (!v || v.stroke !== s.id || !g?.enabled || !g.nodes.some(n => n.id === v.node)) return s
+    try {
+      return {...s, appearance: call<Graph>('graphConnect', {graph: g, from: v.node, to: g.output, port: 0})}
+    } catch { return s }
+  }
+  function render(s0: Stroke): Render {
+    const s = viewed(s0)
     // 外観を表示しない (view setting): the plain look, nothing sent to the worker
     const looks = settings.showLooks
-    const key = (looks ? '' : 'plain:') + JSON.stringify(s)
+    const key = (looks ? '' : 'plain:') + (s !== s0 ? `view:${viewer.value!.node}:` : '') + JSON.stringify(s)
     const hit = renderCache.get(s.id)
     if (hit && hit.key === key) return hit.render
     let r: Render
@@ -392,6 +416,23 @@ export function createEditor() {
       r = syncRender(s)
     }
     renderCache.set(s.id, {key, render: r})
+    return r
+  }
+  // The path's own geometry (its outline with line widths, no appearance
+  // effects): what position, size, the reference point and the selection box
+  // measure. It does not depend on view settings (外観 off, the node viewer)
+  // or on when the worker finishes. Effects are counted only by exports of
+  // the selection / whole drawing, which the core measures itself.
+  const geometryCache = new Map<number, {key: string; render: Render}>()
+  function geometryRender(s: Stroke): Render | undefined {
+    if (!s.appearance?.enabled) return renders.value.get(s.id)
+    const plain = {...s, appearance: null}
+    const key = JSON.stringify(plain)
+    const hit = geometryCache.get(s.id)
+    if (hit && hit.key === key) return hit.render
+    const r = syncRender(plain)
+    geometryCache.set(s.id, {key, render: r})
+    if (geometryCache.size > 2000) geometryCache.clear()
     return r
   }
   const renders = computed(() => {
@@ -630,7 +671,7 @@ export function createEditor() {
   })
 
   return reactive({
-    doc, selected, anchors, selectedNodes, tool, status, error, filePath, fileName, revision, generation, drawStyle,
+    doc, selected, anchors, selectedNodes, tool, status, error, filePath, fileName, revision, generation, drawStyle, viewer, geometryRender,
     history, dirty, active, renders, renderPending,
     begin, commit, cancel, inGesture, edit, coreEdit, changed, undo, redo, load, markSaved,
     findStroke, nextId, shown, folderTree, inFolder, folderOf, groupSelection, ungroup, moveInList, regroup, selectPath, selectAnchor, clearSelection, isAnchorSelected,

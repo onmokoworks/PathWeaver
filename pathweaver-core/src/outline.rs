@@ -832,13 +832,13 @@ pub fn width_location(s: &Stroke, target: WidthTarget) -> Option<(Point, Vec2)> 
 }
 
 pub fn svg(doc: &Document) -> Result<String, String> {
-    svg_frame(doc, None, None)
+    svg_frame(doc, None, None, 16.)
 }
 
-/// SVG of the drawing seen through `frame` (an artboard or the selection's
-/// box: x, y, w, h; `None` = everything with a small margin), at its size in
+/// SVG of the drawing seen through `frame` (an artboard: x, y, w, h; `None` =
+/// everything painted, effects included, plus `margin`), at its size in
 /// units, optionally over a solid `background`.
-pub fn svg_frame(doc: &Document, frame: Option<[f64; 4]>, background: Option<[u8; 3]>) -> Result<String, String> {
+pub fn svg_frame(doc: &Document, frame: Option<[f64; 4]>, background: Option<[u8; 3]>, margin: f64) -> Result<String, String> {
     // Export the normalized contours shared with the canvas and expansion.
     let mut paths = String::new();
     let mut min = Point::new(f64::INFINITY, f64::INFINITY);
@@ -906,7 +906,8 @@ pub fn svg_frame(doc: &Document, frame: Option<[f64; 4]>, background: Option<[u8
         min = Point::ZERO;
         max = Point::new(100., 100.);
     }
-    let [x, y, w, h] = frame.unwrap_or([min.x - 16., min.y - 16., max.x - min.x + 32., max.y - min.y + 32.]);
+    let m = margin.max(0.);
+    let [x, y, w, h] = frame.unwrap_or([min.x - m, min.y - m, max.x - min.x + 2. * m, max.y - min.y + 2. * m]);
     if !(w > 0. && h > 0.) {
         return Err("書き出す範囲が空です".into());
     }

@@ -662,7 +662,7 @@ test('appearances are data-blocks: path 2 picks path 1\'s, edits sync, the user 
   expect(errors).toEqual([])
 })
 
-test('N-01 Ctrl+Shift+click a node makes it the final output; again puts the old link back', async ({page}) => {
+test('N-01 Ctrl+Shift+click a node shows its result on the canvas only: the file, export and undo keep the real output', async ({page}) => {
   const errors = await setup(page)
   await page.evaluate(() => {
     const {ed, call} = (window as any).__pw
@@ -679,25 +679,64 @@ test('N-01 Ctrl+Shift+click a node makes it the final output; again puts the old
   })
   const g0 = await graph(page)
   const rough = g0.nodes.find((n: any) => n.kind === 'Rough'), glow = g0.nodes.find((n: any) => n.kind === 'Glow')
-  const output = g0.nodes.find((n: any) => n.kind === 'Output')
-  const before = output.inputs[0]
   const outSrc = async () => (await graph(page)).nodes.find((n: any) => n.kind === 'Output').inputs[0]
   const click = (id: number) => page.locator(`[data-node="${id}"] .head`).click({modifiers: ['Control', 'Shift'], position: {x: 40, y: 8}})
-  expect(before).toBe(glow.id)
+  const layers = () => page.evaluate(() => { const {ed} = (window as any).__pw; const r = ed.renders.get(ed.doc.strokes[0].id); return r.stale ? null : JSON.stringify(r.layers) })
+  const svg = () => page.evaluate(() => (window as any).__pw.call('svg', {doc: (window as any).__pw.ed.doc}))
+  await expect.poll(layers, {timeout: 15000}).not.toBeNull()
+  const final = await layers()
+  const exported = await svg()
+  const undo = (await state(page)).undo
+  const saved = JSON.stringify(await doc(page))
+
   await click(rough.id)
-  expect(await outSrc()).toBe(rough.id)
-  await expect(page.getByTestId('status')).toContainText('最終出力')
-  // again on the viewed node: the original link (光彩) comes back
+  await expect(page.getByTestId('viewer-badge')).toContainText('ラフ')
+  await expect(page.locator(`[data-node="${rough.id}"]`)).toHaveAttribute('data-viewed', '')
+  // the canvas shows the rough (no glow) …
+  await expect.poll(layers, {timeout: 15000}).not.toBe(final)
+  // … while the document, its export and the undo history stay as they were
+  expect(await outSrc()).toBe(glow.id)
+  expect(JSON.stringify(await doc(page))).toBe(saved)
+  expect(await svg()).toBe(exported)
+  expect((await state(page)).undo).toBe(undo)
+  // again on the viewed node: the real output is shown again
   await click(rough.id)
-  expect(await outSrc()).toBe(before)
-  // one undo per click
-  await page.keyboard.press('Meta+z')
-  expect(await outSrc()).toBe(rough.id)
-  // a number node cannot be the output
+  await expect(page.getByTestId('viewer-badge')).toHaveCount(0)
+  await expect.poll(layers, {timeout: 15000}).toBe(final)
+  // the badge's × ends it too
+  await click(rough.id)
+  await page.getByTestId('viewer-badge').click()
+  await expect(page.getByTestId('viewer-badge')).toHaveCount(0)
+  // a number node cannot be viewed
   await page.evaluate(() => { const {ed, call} = (window as any).__pw; ed.edit(() => { ed.doc.strokes[0].appearance.nodes.push(call('nodeNew', {kind: 'Value', id: 12, position: [150, 520]})) }) })
   await click(12)
-  expect(await outSrc()).toBe(rough.id)
-  await expect(page.getByTestId('status')).toContainText('最終出力にできません')
+  await expect(page.getByTestId('status')).toContainText('キャンバスに表示できません')
+  expect(errors).toEqual([])
+})
+
+test('a shared look: an edit to a path that is not the active one reaches every user (not undone by the active copy)', async ({page}) => {
+  const errors = await setup(page)
+  await pen(page, [{p: {x: 0, y: 200}}, {p: {x: 300, y: 200}}])
+  const r = await page.evaluate(() => {
+    const {ed, call} = (window as any).__pw
+    ed.edit((d: any) => {
+      const [a, b] = d.strokes
+      let g = a.appearance
+      g.nodes.push(call('nodeNew', {kind: 'Rough', id: 10, position: [150, 220]}))
+      g = call('graphConnect', {graph: g, from: 1, to: 10, port: 0})
+      g = call('graphConnect', {graph: g, from: 10, to: 2, port: 0})
+      g.shared = 900
+      a.appearance = g
+      b.appearance = JSON.parse(JSON.stringify(g))
+    })
+    ed.selected = [ed.doc.strokes[0].id]
+    // the layer list's eye on the OTHER path: bypass its rough
+    ed.edit((d: any) => { d.strokes[1].appearance.nodes.find((n: any) => n.id === 10).bypass = true })
+    // then touch the active path
+    ed.edit((d: any) => { d.strokes[0].nodes[0].p.x += 1 })
+    return ed.doc.strokes.map((s: any) => s.appearance.nodes.find((n: any) => n.id === 10).bypass)
+  })
+  expect(r).toEqual([true, true])
   expect(errors).toEqual([])
 })
 
@@ -789,8 +828,13 @@ test('外観 toggle on the canvas: every appearance off at once for the view onl
   const svg = () => page.evaluate(() => (window as any).__pw.call('svg', {doc: (window as any).__pw.ed.doc}))
   const exported = await svg()
 
+  await page.evaluate(() => { const {ed} = (window as any).__pw; ed.selected = [ed.doc.strokes[0].id] })
+  const box = () => page.evaluate(() => JSON.stringify((window as any).__pw.canvas.selectionBounds()))
+  const measured = await box()
   await page.getByTestId('looks-toggle').click()
   await expect(page.getByTestId('looks-toggle')).toHaveAttribute('aria-pressed', 'false')
+  // position and size measure the path, not what the view shows
+  expect(await box()).toBe(measured)
   await expect.poll(shape).not.toBe(rough)
   expect((await shape())!.length).toBeLessThan(rough!.length)
   expect(await page.evaluate(() => (window as any).__pw.ed.renderPending)).toBe(0)

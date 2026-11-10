@@ -41,21 +41,14 @@ const targets = computed(() => {
 })
 const TARGET_LABEL: Record<ExportTarget, string> = {artboards: 'アートボード', selection: '選択', all: '絵全体'}
 
-function drawingBounds() {
-  const keep = ed.selected
-  ed.selected = ed.doc.strokes.filter(s => !s.guide && !s.image?.reference).map(s => s.id)
-  const b = props.canvas.selectionBounds()
-  ed.selected = keep
-  return b
-}
 const options = computed<ExportOptions>(() => ({
   target: opts.target, artboards: picked.value, selection: [...ed.selected],
-  bounds: opts.target === 'selection' ? props.canvas.selectionBounds() : opts.target === 'all' ? drawingBounds() : null,
   format: opts.format, scale: opts.scale,
   background: opts.background === 'white' || opts.format === 'jpeg' ? [255, 255, 255] : null,
   base: ed.fileName.replace(/\.pathweaver$/, '') || '名称未設定',
 }))
-const list = computed(() => frames({...ed.doc}, options.value))
+// measured once per choice (the core paints the selection / drawing to measure it)
+const list = computed(() => { try { return frames(ed.doc, options.value) } catch { return [] } })
 const summary = computed(() => {
   if (!list.value.length) return '書き出すものがありません'
   const f = list.value[0].frame

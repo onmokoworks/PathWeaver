@@ -87,10 +87,10 @@ fn even_odd_rings_keep_their_hole() {
 fn svg_frames_an_artboard_at_its_size() {
     use pathweaver_core::model::Artboard;
     let mut d = image_doc(false);
-    let svg = outline::svg_frame(&d, Some([0., 0., 200., 100.]), Some([255, 255, 255])).unwrap();
+    let svg = outline::svg_frame(&d, Some([0., 0., 200., 100.]), Some([255, 255, 255]), 0.).unwrap();
     assert!(svg.contains("width=\"200.0000\" height=\"100.0000\" viewBox=\"0.0000 0.0000 200.0000 100.0000\""));
     assert!(svg.contains("fill=\"#ffffff\""));
-    assert!(outline::svg_frame(&d, Some([0., 0., 0., 10.]), None).is_err());
+    assert!(outline::svg_frame(&d, Some([0., 0., 0., 10.]), None, 0.).is_err());
     // artboards round-trip and are validated
     let id = d.id();
     d.artboards.push(Artboard { id, name: "A4".into(), x: 0., y: 0., w: 595., h: 842. });

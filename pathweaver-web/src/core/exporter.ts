@@ -13,8 +13,6 @@ export interface ExportOptions {
   artboards: number[]
   /** Paths in the selection (target = selection). */
   selection: number[]
-  /** Box of the selection / drawing (document units) when not an artboard. */
-  bounds: {x0: number; y0: number; x1: number; y1: number} | null
   format: ExportFormat
   scale: number
   /** null: transparent (JPEG has no transparency: white). */
@@ -31,23 +29,33 @@ const EXT: Record<ExportFormat, string> = {svg: 'svg', png: 'png', jpeg: 'jpg'}
 const MIME: Record<ExportFormat, string> = {svg: 'image/svg+xml', png: 'image/png', jpeg: 'image/jpeg'}
 const safe = (s: string) => s.replace(/[\\/:*?"<>|]/g, '_').trim() || 'アートボード'
 
-/** The frames to export: [name suffix, x, y, w, h]. */
-export function frames(d: Document, o: ExportOptions): {name: string; frame: [number, number, number, number]}[] {
+type Frame = [number, number, number, number]
+/** The document as exported: only the selected paths for target = selection. */
+const scoped = (d: Document, o: ExportOptions): Document =>
+  o.target === 'selection' ? {...d, strokes: d.strokes.filter(s => o.selection.includes(s.id))} : d
+/** Selection / whole drawing: the core measures what is painted, effects
+ *  included (a glow is not cut), plus a margin for the whole drawing. */
+const MARGIN: Record<ExportTarget, number> = {artboards: 0, selection: 0, all: 16}
+function paintedFrame(d: Document, o: ExportOptions): Frame | null {
+  if (!scoped(d, o).strokes.length) return null
+  const svg = call<string>('svg', {doc: {...scoped(d, o), assets: {}}, margin: MARGIN[o.target]})
+  const vb = svg.match(/viewBox="([^"]+)"/)?.[1].split(/\s+/).map(Number)
+  return vb && vb.length === 4 ? vb as Frame : null
+}
+
+/** The frames to export: name and x, y, w, h. */
+export function frames(d: Document, o: ExportOptions): {name: string; frame: Frame}[] {
   if (o.target === 'artboards') {
     const list = (d.artboards ?? []).filter(a => o.artboards.includes(a.id))
     const single = list.length === 1
     return list.map(a => ({name: single && d.artboards!.length === 1 ? o.base : `${o.base}-${safe(a.name)}`, frame: [a.x, a.y, a.w, a.h]}))
   }
-  const b = o.bounds
-  if (!b) return []
-  // the drawing: a small margin so strokes are not cut at the edge
-  const m = o.target === 'all' ? 16 : 0
-  return [{name: o.base, frame: [b.x0 - m, b.y0 - m, b.x1 - b.x0 + 2 * m, b.y1 - b.y0 + 2 * m]}]
+  const f = paintedFrame(d, o)
+  return f ? [{name: o.base, frame: f}] : []
 }
 
 export async function exportFiles(d: Document, o: ExportOptions): Promise<ExportFile[]> {
-  const doc = {...d, assets: await exportAssets(d)}
-  if (o.target === 'selection') doc.strokes = d.strokes.filter(s => o.selection.includes(s.id))
+  const doc = {...scoped(d, o), assets: await exportAssets(d)}
   const bg = o.format === 'jpeg' ? (o.background ?? [255, 255, 255]) : o.background
   const out: ExportFile[] = []
   for (const f of frames(d, o)) {

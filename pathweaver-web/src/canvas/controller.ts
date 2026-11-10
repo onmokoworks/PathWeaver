@@ -233,7 +233,7 @@ export function createCanvas(ed: Editor) {
     let b: Bounds | null = null
     for (const id of ed.selected) {
       const s = stroke(id)
-      const r = ed.renders.get(id)
+      const r = s && ed.geometryRender(s)
       if (!s || !r) continue
       const sb = renderBounds(r, s)
       if (!sb) continue

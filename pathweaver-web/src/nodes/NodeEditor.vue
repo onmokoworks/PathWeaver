@@ -232,31 +232,27 @@ function onSet(n: GraphNode, patch: (n: GraphNode) => void) {
 function onCommit() { ed.commit() }
 function toggleBypass(n: GraphNode) { mutate(() => { n.bypass = !n.bypass }) }
 
-// Ctrl+Shift+click: show this node's result as the final output (Node
-// Wrangler's viewer). The link it replaced is remembered: Ctrl+Shift+click the
-// same node (or 出力) again to put it back. One undo step either way.
-const viewerPrev = new Map<number, number | null>() // path id → Output's previous source
+// Ctrl+Shift+click: show this node's result on the canvas (Node Wrangler's
+// viewer). Only the view changes: the Output's real link, the saved file, the
+// export and the other paths sharing this look stay as they are. The same
+// node again (or 出力, or ×) ends it.
+const viewing = computed(() => {
+  const v = ed.viewer, s = stroke.value
+  return v && s && v.stroke === s.id && graph.value?.nodes.some(n => n.id === v.node) ? v.node : null
+})
 function viewNode(id: number) {
   const g = graph.value, s = stroke.value
   const n = node(id)
   if (!g || !s || !n) return
-  const out = node(g.output)!
-  const back = (n.kind === 'Output' || out.inputs[0] === id) && viewerPrev.has(s.id)
-  if (back) {
-    const prev = viewerPrev.get(s.id)!
-    viewerPrev.delete(s.id)
-    ed.edit(() => { out.inputs[0] = prev; call('graphValidate', {graph: g}) })
-    ed.status = '最終出力を元のつなぎに戻しました'
-    return
-  }
-  if (n.kind === 'Output' || out.inputs[0] === id) return
-  if (!hasOutput(n.kind) || outputsNumber(n.kind)) { ed.status = `「${nodeInfo(n).label}」は形を出さないので、最終出力にできません`; return }
-  const prev = out.inputs[0] ?? null
-  ed.edit(() => replaceGraph(call<Graph>('graphConnect', {graph: g, from: id, to: g.output, port: 0})))
-  if (!ed.error) {
-    if (!viewerPrev.has(s.id)) viewerPrev.set(s.id, prev)
-    ed.status = `「${nodeInfo(n).label}」を最終出力にしました（もう一度 Ctrl＋Shift＋クリックで戻す）`
-  }
+  if (n.kind === 'Output' || viewing.value === id) { endView(); return }
+  if (!hasOutput(n.kind) || outputsNumber(n.kind)) { ed.status = `「${nodeInfo(n).label}」は形を出さないので、キャンバスに表示できません`; return }
+  ed.viewer = {stroke: s.id, node: id}
+  ed.status = `「${nodeInfo(n).label}」の結果をキャンバスに表示中（表示だけ。保存・書き出しは最終出力のまま）`
+}
+function endView() {
+  if (!ed.viewer) return
+  ed.viewer = null
+  ed.status = '最終出力の表示に戻しました'
 }
 
 // ---- pointer ----
@@ -948,7 +944,7 @@ void kindInfo
           <rect v-if="box" :x="box.x" :y="box.y" :width="box.w" :height="box.h" class="box" />
         </svg>
         <NodeCard
-          v-for="n in graph.nodes" :key="n.id" :node="n"
+          v-for="n in graph.nodes" :key="n.id" :node="n" :class="{'viewed-node': viewing === n.id}" :data-viewed="viewing === n.id ? '' : undefined"
           :selected="ed.selectedNodes.includes(n.id) || lazyTarget === n.id" :active="activeNode === n.id"
           :rev="ed.revision" :is-output="graph.output === n.id" :effective="effective" :connected-output="outputLinked.has(n.id)"
           @param="(k, v) => onParam(n, k, v)" @set="p => onSet(n, p)"
@@ -966,6 +962,9 @@ void kindInfo
         <span class="sep" />
         <InputCheckbox v-tooltip="'外観ノードを使う（オフで元の見た目）'" :model-value="graph.enabled" aria-label="外観ノードを使う" @update:model-value="v => mutate(g => { g.enabled = v })" />
         <span class="target" :title="`編集中のパス：${stroke.name}`">{{ stroke.name }}</span>
+        <button v-if="viewing !== null" type="button" class="viewing" data-testid="viewer-badge" :title="'Ctrl＋Shift＋クリックで表示中のノード。クリックで最終出力の表示に戻す'" @click="endView">
+          表示中：{{ nodeInfo(node(viewing)!).label }} ×
+        </button>
         <span class="sep" />
         <button type="button" class="zoom" title="100%に戻す" @click="resetZoom">{{ zoomLabel }}</button>
       </template>
@@ -980,6 +979,11 @@ void kindInfo
 </template>
 
 <style scoped>
+.viewed-node {outline: 1px dashed var(--tq-color-accent); outline-offset: 3px}
+.viewing {
+  height: 22px; padding: 0 8px; border: 0; border-radius: 3px; font: inherit; font-size: 11px; cursor: pointer;
+  color: var(--tq-color-accent); background: color-mix(in srgb, var(--tq-color-accent) 12%, transparent);
+}
 .node-editor::after {
   content: ''; position: absolute; left: 0; right: 0; top: 0; height: 1px; pointer-events: none; z-index: 30;
   background: var(--tq-color-accent); opacity: 0; transition: opacity .12s;
