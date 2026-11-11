@@ -396,7 +396,7 @@ function setSideTab(id: string) { sideTab.value = id; try { localStorage.setItem
 
       <footer class="status" :class="{error: !!ed.error}" role="status" data-testid="status">{{ message }}</footer>
     </div>
-  <SettingsDialog v-if="settingsOpen" @close="settingsOpen = false" />
+  <SettingsDialog v-if="settingsOpen" :ed="ed" @close="settingsOpen = false" />
   <ExportDialog v-if="exportOpen" :ed="ed" :canvas="canvas" @close="exportOpen = false" @files="host.saveFiles" />
   <TooltipRoot />
 </template>

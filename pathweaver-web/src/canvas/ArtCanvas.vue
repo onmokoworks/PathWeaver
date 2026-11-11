@@ -12,6 +12,7 @@ import CanvasMenu, {type MenuItem} from './CanvasMenu.vue'
 import TextEditor from './TextEditor.vue'
 import ShapeAdjust from './ShapeAdjust.vue'
 import {placedHref} from '../core/knockout'
+import {display, fromUnit, niceStep, toUnit, UNIT_LABEL, UNITS} from '../core/units'
 
 type Flag = 'snap_guides' | 'snap_grid' | 'snap_tangent' | 'snap_normal'
 const snapFlags: [Flag, string, string][] = [
@@ -243,25 +244,28 @@ const snapLine = computed(() => {
 })
 
 // ---- rulers & grid ----
-function niceStep(px: number) {
-  const raw = px / view.zoom
-  const p = Math.pow(10, Math.floor(Math.log10(raw)))
-  for (const m of [1, 2, 5, 10]) if (m * p >= raw) return m * p
-  return 10 * p
-}
+// Ticks at a 1-2-5 step of the unit in use, labelled in that unit (lengths stay pt).
 const ticks = computed(() => {
-  const step = niceStep(70)
+  const u = display.unit
+  const stepU = niceStep(70 / view.zoom, u)
+  const step = fromUnit(stepU, u)
+  const label = (v: number) => fmt(Math.round(toUnit(v, u) / stepU) * stepU)
   const xs: {pos: number; label: string}[] = []
   const ys: {pos: number; label: string}[] = []
   const x0 = Math.floor(cv.toWorld({x: RULER, y: 0}).x / step) * step
-  for (let x = x0; S({x, y: 0}).x < view.width; x += step) xs.push({pos: S({x, y: 0}).x, label: fmt(x)})
+  for (let i = 0, x = x0; S({x, y: 0}).x < view.width; x = x0 + ++i * step) xs.push({pos: S({x, y: 0}).x, label: label(x)})
   const y0 = Math.floor(cv.toWorld({x: 0, y: RULER}).y / step) * step
-  for (let y = y0; S({x: 0, y}).y < view.height; y += step) ys.push({pos: S({x: 0, y}).y, label: fmt(y)})
+  for (let i = 0, y = y0; S({x: 0, y}).y < view.height; y = y0 + ++i * step) ys.push({pos: S({x: 0, y}).y, label: label(y)})
   // a label that would run under the corner square is left out (its tick stays)
   for (const t of xs) if (t.pos + 3 < RULER) t.label = ''
   for (const t of ys) if (t.pos + 3 - t.label.length * 5.5 < RULER) t.label = ''
   return {xs, ys, minor: step / 5 * view.zoom}
 })
+// The ruler corner switches this document's unit.
+const unitMenu = ref<{x: number; y: number} | null>(null)
+const unitItems = computed<MenuItem[]>(() => UNITS.map(u => ({
+  label: `${u}（${UNIT_LABEL[u]}）`, shortcut: u === ed.unit ? '✓' : '', action: () => ed.setUnit(u),
+})))
 const fmt = (v: number) => (Math.abs(v) < 1e-9 ? '0' : String(+v.toFixed(3)))
 const grid = computed(() => {
   const s = ed.doc.grid_spacing * view.zoom
@@ -426,6 +430,12 @@ const cursor = computed(() => {
       />
     </div>
     <div v-if="ed.renderPending" class="busy-badge" data-testid="render-busy">計算中…</div>
+    <button
+      type="button" class="unit-corner" data-testid="unit-corner" :aria-label="`単位：${ed.unit}`"
+      v-tooltip="{content: '単位（この書類）：クリックで切り替え。1pt＝1px（72ppi）', placement: 'right'}"
+      @pointerdown.stop @click="unitMenu = {x: RULER, y: RULER}"
+    >{{ ed.unit }}</button>
+    <CanvasMenu v-if="unitMenu" :at="unitMenu" :bounds="{width: view.width, height: view.height}" :items="unitItems" @close="unitMenu = null" />
     <CanvasMenu v-if="menu" :at="menu" :bounds="{width: view.width, height: view.height}" :items="menuItems" @close="menu = null" />
     <button
       type="button" class="looks-badge" :class="{off: !settings.showLooks}" data-testid="looks-toggle" :aria-pressed="settings.showLooks"
@@ -511,6 +521,12 @@ const cursor = computed(() => {
 .ruler rect {fill: var(--tq-color-surface, var(--tq-color-input)); }
 .ruler .corner {fill: var(--tq-color-input)}
 .ruler line {stroke: var(--tq-color-border); stroke-width: 1}
+.unit-corner {
+  position: absolute; left: 0; top: 0; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 0;
+  font: inherit; font-size: 9px; line-height: 20px; text-align: center; color: var(--tq-color-text-mute);
+  background: transparent; cursor: pointer;
+}
+.unit-corner:hover {color: var(--tq-color-text); background: var(--tq-color-input-hover)}
 .ruler text {font-size: 9px; fill: var(--tq-color-text-mute); font-variant-numeric: tabular-nums; pointer-events: none}
 .snap-bar {
   position: absolute; left: 28px; bottom: 10px; display: flex; align-items: center; gap: 2px;

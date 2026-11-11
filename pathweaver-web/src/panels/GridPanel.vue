@@ -3,6 +3,7 @@ import ParameterGrid from '../../vendor/tweeq/src/ParameterGrid/ParameterGrid.vu
 import Parameter from '../../vendor/tweeq/src/ParameterGrid/Parameter.vue'
 import ParameterHeading from '../../vendor/tweeq/src/ParameterGrid/ParameterHeading.vue'
 import InputNumber from '../../vendor/tweeq/src/InputNumber/InputNumber.vue'
+import LengthField from './LengthField.vue'
 import InputCheckbox from '../../vendor/tweeq/src/InputCheckbox/InputCheckbox.vue'
 import InputButton from '../../vendor/tweeq/src/InputButton/InputButton.vue'
 import {vTooltip} from '../../vendor/tweeq/src/Tooltip'
@@ -30,7 +31,7 @@ function setNumber(key: 'grid_spacing' | 'angle_step', v: number) { ed.begin(); 
         <InputCheckbox :model-value="ed.doc[f]" :aria-label="label" @update:model-value="v => toggle(f, v)" />
       </Parameter>
       <Parameter label="グリッド間隔">
-        <InputNumber :model-value="ed.doc.grid_spacing" :min="1" :max="10000" :bar="false" @focus="ed.begin()" @update:model-value="v => setNumber('grid_spacing', v)" @confirm="ed.commit()" @blur="ed.commit()" />
+        <LengthField data-field="grid-spacing" :model-value="ed.doc.grid_spacing" :min="1" :max="10000" @focus="ed.begin()" @update:model-value="v => setNumber('grid_spacing', v)" @confirm="ed.commit()" @blur="ed.commit()" />
       </Parameter>
       <Parameter label="回転の刻み" hint="Shiftを押しながら回転したときの角度">
         <InputNumber :model-value="ed.doc.angle_step" :min="1" :max="90" suffix="°" :bar="false" @focus="ed.begin()" @update:model-value="v => setNumber('angle_step', v)" @confirm="ed.commit()" @blur="ed.commit()" />

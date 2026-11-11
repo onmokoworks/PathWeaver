@@ -7,8 +7,8 @@ import Parameter from '../../vendor/tweeq/src/ParameterGrid/Parameter.vue'
 import ParameterHeading from '../../vendor/tweeq/src/ParameterGrid/ParameterHeading.vue'
 import InputNumber from '../../vendor/tweeq/src/InputNumber/InputNumber.vue'
 import InputAngle from '../../vendor/tweeq/src/InputAngle/InputAngle.vue'
-import InputPosition from '../../vendor/tweeq/src/InputPosition/InputPosition.vue'
-import InputSize from '../../vendor/tweeq/src/InputSize/InputSize.vue'
+import LengthField from './LengthField.vue'
+import LengthPair from './LengthPair.vue'
 import InputString from '../../vendor/tweeq/src/InputString/InputString.vue'
 import InputRadio from '../../vendor/tweeq/src/InputRadio/InputRadio.vue'
 import InputButton from '../../vendor/tweeq/src/InputButton/InputButton.vue'
@@ -327,7 +327,7 @@ function setCap(end: 'start' | 'end', angle: number | null) {
       <ParameterGrid>
         <ParameterHeading>アンカー（{{ ed.anchors.length }}点）</ParameterHeading>
         <Parameter label="位置" hint="左の点の格子をドラッグすると縦横に一度に動かせます">
-          <InputPosition data-field="anchor-position" :model-value="[r2(lastAnchor.n!.p.x), r2(lastAnchor.n!.p.y)]" @focus="begin" @update:model-value="v => setAnchorXY(v as [number, number])" @confirm="endAnchor" @blur="endAnchor" />
+          <LengthPair kind="position" data-field="anchor-position" :model-value="[lastAnchor.n!.p.x, lastAnchor.n!.p.y]" @focus="begin" @update:model-value="v => setAnchorXY(v as [number, number])" @confirm="endAnchor" @blur="endAnchor" />
         </Parameter>
         <Parameter label="種類">
           <InputRadio
@@ -344,7 +344,7 @@ function setCap(end: 'start' | 'end', angle: number | null) {
       </div>
       <ParameterGrid v-if="cornerTargets.length">
         <Parameter label="角丸" hint="キャンバスの角の内側の丸をドラッグしても変えられます（Option＋クリックで種類）">
-          <InputNumber data-field="corner-radius" :model-value="r2(cornerRadius)" :min="0" :bar="false" @focus="begin" @update:model-value="setCornerRadius" @confirm="commit" @blur="commit" />
+          <LengthField data-field="corner-radius" :model-value="cornerRadius" :min="0" @focus="begin" @update:model-value="setCornerRadius" @confirm="commit" @blur="commit" />
         </Parameter>
         <Parameter label="角の種類">
           <InputRadio data-field="corner-kind" :model-value="cornerKind" :options="['Circular', 'Clothoid', 'Bevel']" :labels="['円弧', 'クロソイド', '面取り']" @update:model-value="v => setCornerKind(v as CornerWidget['kind'])" />
@@ -365,10 +365,10 @@ function setCap(end: 'start' | 'end', angle: number | null) {
       <ParameterGrid>
         <ParameterHeading>{{ widthPoint.target === 'start' ? '始点の太さ' : widthPoint.target === 'end' ? '終点の太さ' : '幅点' }}</ParameterHeading>
         <Parameter label="太さ" hint="左右に同じ量を足します（左右差は保つ）。キャンバスで端を普通にドラッグするのと同じ">
-          <InputNumber :model-value="r2(widthPoint.h.left + widthPoint.h.right)" :min="0" :max="2000" :bar="false" @focus="begin" @update:model-value="setTotal" @confirm="commit" @blur="commit" />
+          <LengthField data-field="width-total" :model-value="widthPoint.h.left + widthPoint.h.right" :min="0" :max="2000" @focus="begin" @update:model-value="setTotal" @confirm="commit" @blur="commit" />
         </Parameter>
-        <Parameter label="左だけ" hint="Option＋左の端をドラッグと同じ"><InputNumber :model-value="r2(widthPoint.h.left)" :min="0" :max="1000" :bar="false" @focus="begin" @update:model-value="v => setWidth({left: v})" @confirm="commit" @blur="commit" /></Parameter>
-        <Parameter label="右だけ" hint="Option＋右の端をドラッグと同じ"><InputNumber :model-value="r2(widthPoint.h.right)" :min="0" :max="1000" :bar="false" @focus="begin" @update:model-value="v => setWidth({right: v})" @confirm="commit" @blur="commit" /></Parameter>
+        <Parameter label="左だけ" hint="Option＋左の端をドラッグと同じ"><LengthField data-field="width-left" :model-value="widthPoint.h.left" :min="0" :max="1000" @focus="begin" @update:model-value="v => setWidth({left: v})" @confirm="commit" @blur="commit" /></Parameter>
+        <Parameter label="右だけ" hint="Option＋右の端をドラッグと同じ"><LengthField data-field="width-right" :model-value="widthPoint.h.right" :min="0" :max="1000" @focus="begin" @update:model-value="v => setWidth({right: v})" @confirm="commit" @blur="commit" /></Parameter>
         <Parameter label="方向" hint="幅を測る向きを芯の法線から傾けます。つまみを回すか数字をドラッグ"><InputAngle data-field="width-angle" :model-value="r2(widthPoint.h.angle)" :min="-89" :max="89" @focus="begin" @update:model-value="v => setWidth({angle: v})" @confirm="commit" @blur="commit" /></Parameter>
       </ParameterGrid>
       <div v-if="typeof widthPoint.target === 'number'" class="buttons">
@@ -387,7 +387,7 @@ function setCap(end: 'start' | 'end', angle: number | null) {
         <Parameter label="塗り"><PaintField label="塗り" :value="fill ?? null" :mixed="fill === undefined" @begin="begin" @change="v => setPaint('fill', v)" @commit="commit" /></Parameter>
         <Parameter label="線"><PaintField label="線" :value="edge ?? null" :mixed="edge === undefined" @begin="begin" @change="v => setPaint('edge', v)" @commit="commit" /></Parameter>
         <Parameter label="線幅" :hint="strokes.length > 1 ? `選択中の${strokes.length}本すべてを、それぞれの幅点の比率を保ったまま同じ最大幅にします（表示は編集中のパス）` : '幅点の比率を保ったまま、いちばん太い所の幅を変えます'">
-          <InputNumber :model-value="r2(lineWidth)" :min="0" :max="1000" :bar="false" suffix=" pt" @focus="begin" @update:model-value="setLineWidth" @confirm="commit" @blur="commit" />
+          <LengthField data-field="line-width" :model-value="lineWidth" :min="0" :max="1000" @focus="begin" @update:model-value="setLineWidth" @confirm="commit" @blur="commit" />
         </Parameter>
         <Parameter label="角">
           <InputRadio data-field="join" :model-value="join" :options="['Miter', 'Round', 'Bevel']" :labels="['鋭角', '丸', '面取り']" @update:model-value="v => setJoin(v as Join)" />
@@ -462,10 +462,10 @@ function setCap(end: 'start' | 'end', angle: number | null) {
           <template #right><PivotPicker v-tooltip="'基準点：位置はこの点の座標、サイズと回転はこの点を動かさずに変わる。キャンバスの十字をドラッグしても動かせる（パスや角のハンドルと重なっているときは⌘を押しながら。ダブルクリックで中心）'" :model-value="pivot" @update:model-value="canvas.setPivot" /></template>
         </ParameterHeading>
         <Parameter label="位置" hint="基準点の位置。左の点の格子をドラッグすると縦横に一度に動かせます">
-          <InputPosition data-field="position" :model-value="[r2(at.x), r2(at.y)]" @focus="beginTransform" @update:model-value="v => setPosition(v as [number, number])" @confirm="endTransform" @blur="endTransform" />
+          <LengthPair kind="position" data-field="position" :model-value="[at.x, at.y]" @focus="beginTransform" @update:model-value="v => setPosition(v as [number, number])" @confirm="endTransform" @blur="endTransform" />
         </Parameter>
         <Parameter label="サイズ" hint="鎖のマークで縦横比の固定を切り替えます">
-          <InputSize data-field="size" :model-value="[r2(bounds.x1 - bounds.x0), r2(bounds.y1 - bounds.y0)]" @focus="beginTransform" @update:model-value="v => setSize(v as [number, number])" @confirm="endTransform" @blur="endTransform" />
+          <LengthPair kind="size" data-field="size" :model-value="[bounds.x1 - bounds.x0, bounds.y1 - bounds.y0]" @focus="beginTransform" @update:model-value="v => setSize(v as [number, number])" @confirm="endTransform" @blur="endTransform" />
         </Parameter>
         <Parameter label="回転" hint="基準点を中心に回す（回し終わると0に戻る）">
           <InputAngle data-field="rotate" :model-value="turn" @focus="beginTransform" @update:model-value="setTurn" @confirm="endTurn" @blur="endTurn" />
@@ -483,7 +483,7 @@ function setCap(end: 'start' | 'end', angle: number | null) {
       <ParameterGrid data-testid="draw-style" v-tooltip="'次に描くパスの見た目（最後に選んだパスから引き継ぎ）'">
         <Parameter label="塗り"><PaintField label="塗り" :value="style.fill" :mixed="false" @begin="() => {}" @change="v => setStyle({fill: v})" @commit="() => {}" /></Parameter>
         <Parameter label="線"><PaintField label="線" :value="style.edge" :mixed="false" @begin="() => {}" @change="v => setStyle({edge: v})" @commit="() => {}" /></Parameter>
-        <Parameter label="線幅"><InputNumber data-field="draw-width" :model-value="r2(style.width)" :min="0.1" :max="1000" :bar="false" suffix=" pt" @update:model-value="v => setStyle({width: v})" /></Parameter>
+        <Parameter label="線幅"><LengthField data-field="draw-width" :model-value="style.width" :min="0.1" :max="1000" @update:model-value="v => setStyle({width: v})" /></Parameter>
       </ParameterGrid>
     </template>
   </div>

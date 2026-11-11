@@ -9,6 +9,7 @@ import {reactive, watch} from 'vue'
 import {call} from '../core/wasm'
 import {baselineTop, DEFAULT_FONT} from '../core/textOutline'
 import {buildShapes, defaults, fromDrag, isGroupShape, shapeInfo, type ShapeKind, type ShapeParams} from '../core/shapes'
+import {readout} from '../core/units'
 import {settings, wheelZoom, type Paper} from '../core/settings'
 import type {Editor} from '../core/editor'
 import type {Anchor, Artboard, CornerWidget, Document, Frame, PathNode, SnapGuide, Stroke, Vec2, WidthHandle} from '../core/types'
@@ -1081,13 +1082,13 @@ export function createCanvas(ed: Editor) {
         const back = h ? scale(h.dir, (d.side === 'left' ? 1 : -1) * GRIP / view.zoom) : ZERO
         const r = ed.coreEdit<{left: number; right: number}>('moveWidthHandle', {stroke: d.stroke, target: d.target, side: d.side, p: sub(raw, back), independent: e.altKey, base: d.base})
         if (r) ed.status = e.altKey
-          ? `この側だけ：${d.side === 'left' ? '左' : '右'} ${r[d.side].toFixed(1)}（Optionを離すと両側）`
-          : `両側に同じ量：左 ${r.left.toFixed(1)} ／ 右 ${r.right.toFixed(1)}（Optionでこの側だけ）`
+          ? `この側だけ：${d.side === 'left' ? '左' : '右'} ${readout(r[d.side])}（Optionを離すと両側）`
+          : `両側に同じ量：左 ${readout(r.left)} ／ 右 ${readout(r.right)}（Optionでこの側だけ）`
         return
       }
       case 'corner': {
         const r = ed.coreEdit<number>('dragCorner', {stroke: d.stroke, node: d.node, p: raw, zoom: view.zoom})
-        if (r !== undefined) ed.status = `角丸 半径 ${r.toFixed(1)}（Option＋クリックで種類を切替）`
+        if (r !== undefined) ed.status = `角丸 半径 ${readout(r)}（Option＋クリックで種類を切替）`
         return
       }
       case 'widthSlide': {

@@ -6,10 +6,10 @@ import ParameterGrid from '../../vendor/tweeq/src/ParameterGrid/ParameterGrid.vu
 import Parameter from '../../vendor/tweeq/src/ParameterGrid/Parameter.vue'
 import ParameterHeading from '../../vendor/tweeq/src/ParameterGrid/ParameterHeading.vue'
 import InputString from '../../vendor/tweeq/src/InputString/InputString.vue'
-import InputPosition from '../../vendor/tweeq/src/InputPosition/InputPosition.vue'
-import InputSize from '../../vendor/tweeq/src/InputSize/InputSize.vue'
 import InputDropdown from '../../vendor/tweeq/src/InputDropdown/InputDropdown.vue'
 import InputButton from '../../vendor/tweeq/src/InputButton/InputButton.vue'
+import LengthPair from './LengthPair.vue'
+import {display, formatSize, fromUnit} from '../core/units'
 import type {Editor} from '../core/editor'
 import type {Canvas} from '../canvas/controller'
 import type {Artboard} from '../core/types'
@@ -21,16 +21,17 @@ const list = computed(() => { void ed.revision; return (ed.doc.artboards ?? []).
 const board = computed(() => list.value.find(a => a.id === props.canvas.state.artboard) ?? null)
 const live = () => (ed.doc.artboards ?? []).find(a => a.id === props.canvas.state.artboard)
 
-/** Common page sizes (points / pixels: one document unit each). */
-const PRESETS: {label: string; w: number; h: number}[] = [
-  {label: 'A4 縦', w: 595, h: 842}, {label: 'A4 横', w: 842, h: 595},
-  {label: 'A3 縦', w: 842, h: 1191}, {label: 'はがき', w: 283, h: 420},
-  {label: 'レター', w: 612, h: 792},
-  {label: '1920×1080', w: 1920, h: 1080}, {label: '1080×1080', w: 1080, h: 1080},
-  {label: '1080×1920', w: 1080, h: 1920}, {label: '1280×720', w: 1280, h: 720},
+/** Common page sizes, defined in their own unit (paper in mm / in, screens in px = pt). */
+const mm = (v: number) => fromUnit(v, 'mm')
+const PRESETS: {label: string; w: number; h: number; screen?: boolean}[] = [
+  {label: 'A4 縦', w: mm(210), h: mm(297)}, {label: 'A4 横', w: mm(297), h: mm(210)},
+  {label: 'A3 縦', w: mm(297), h: mm(420)}, {label: 'はがき', w: mm(100), h: mm(148)},
+  {label: 'レター', w: fromUnit(8.5, 'in'), h: fromUnit(11, 'in')},
+  {label: '1920×1080', w: 1920, h: 1080, screen: true}, {label: '1080×1080', w: 1080, h: 1080, screen: true},
+  {label: '1080×1920', w: 1080, h: 1920, screen: true}, {label: '1280×720', w: 1280, h: 720, screen: true},
 ]
-const presetLabels = PRESETS.map(p => `${p.label}（${p.w}×${p.h}）`)
-const r2 = (v: number) => Math.round(v * 100) / 100
+// Paper sizes read in the document's unit; screen sizes are pixel counts.
+const presetLabels = computed(() => PRESETS.map(p => (p.screen ? `${p.label} px` : `${p.label}（${formatSize(p.w, p.h, display.unit)}）`)))
 
 let editing = false
 function begin() { if (!editing) { ed.begin(); editing = true } }
@@ -43,7 +44,7 @@ function patch(p: Partial<Artboard>) {
   ed.changed()
 }
 function choosePreset(label: string) {
-  const p = PRESETS[presetLabels.indexOf(label)]
+  const p = PRESETS[presetLabels.value.indexOf(label)]
   if (!p) return
   patch({w: p.w, h: p.h})
   commit()
@@ -86,10 +87,10 @@ function drawingBounds() {
         <InputString data-field="artboard-name" :model-value="board.name" @update:model-value="v => { patch({name: v}); commit() }" />
       </Parameter>
       <Parameter label="位置" hint="左上の位置">
-        <InputPosition data-field="artboard-position" :model-value="[r2(board.x), r2(board.y)]" @focus="begin" @update:model-value="v => patch({x: v[0], y: v[1]})" @confirm="commit" @blur="commit" />
+        <LengthPair kind="position" data-field="artboard-position" :model-value="[board.x, board.y]" @focus="begin" @update:model-value="v => patch({x: v[0], y: v[1]})" @confirm="commit" @blur="commit" />
       </Parameter>
       <Parameter label="サイズ">
-        <InputSize data-field="artboard-size" :model-value="[r2(board.w), r2(board.h)]" @focus="begin" @update:model-value="v => patch({w: Math.max(1, v[0]), h: Math.max(1, v[1])})" @confirm="commit" @blur="commit" />
+        <LengthPair kind="size" data-field="artboard-size" :model-value="[board.w, board.h]" @focus="begin" @update:model-value="v => patch({w: Math.max(1, v[0]), h: Math.max(1, v[1])})" @confirm="commit" @blur="commit" />
       </Parameter>
       <Parameter label="定型">
         <InputDropdown data-field="artboard-preset" :model-value="''" :options="presetLabels" @update:model-value="choosePreset" />
