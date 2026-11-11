@@ -353,9 +353,10 @@ function dropAt(y: number, moving: DataRow): Drop | null {
 
 <style scoped>
 .path-list {display: flex; flex-direction: column; height: 100%; font-size: 12px}
+.head .ltab {display: flex; align-items: center; gap: 4px; width: auto; height: 22px; padding: 0 6px; flex: none; white-space: nowrap; font-size: 11px}
 .ltab {height: 22px; padding: 0 6px; border: 0; border-radius: 3px; background: transparent; font: inherit; font-size: 11px; color: var(--tq-color-text-mute); cursor: pointer; display: flex; align-items: center; gap: 4px}
-.ltab:hover {color: var(--tq-color-text)}
-.ltab.on {color: var(--tq-color-text); background: color-mix(in srgb, var(--tq-color-text) 8%, transparent)}
+.head .ltab:hover {color: var(--tq-color-text)}
+.head .ltab.on {color: var(--tq-color-text); background: color-mix(in srgb, var(--tq-color-text) 8%, transparent)}
 .ltab .count {font-variant-numeric: tabular-nums; color: var(--tq-color-text-mute)}
 .head {display: flex; align-items: center; gap: 2px; height: 28px; padding: 0 6px 0 12px; font-weight: 500; font-size: 11px; color: var(--tq-color-text-mute); flex: none}
 .spacer {flex: 1}

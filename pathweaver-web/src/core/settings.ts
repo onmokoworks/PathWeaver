@@ -20,10 +20,14 @@ export interface Settings {
   /** Draw appearance nodes on the canvas. Off: every path shows its plain
    *  look (a view setting: the file and the export are unchanged). */
   showLooks: boolean
+  /** Autosave every this many minutes while there are unsaved changes (0 = off). */
+  autosave: number
+  /** Autosave also overwrites a document that already has a file (else a recovery copy only). */
+  autosaveFile: boolean
 }
 
 const KEY = 'pw.settings'
-const defaults: Settings = {zoomSpeed: 1, wheel: 'pan', invertZoom: false, paper: 'white', showWidth: true, theme: 'system', showLooks: true}
+const defaults: Settings = {zoomSpeed: 1, wheel: 'pan', invertZoom: false, paper: 'white', showWidth: true, theme: 'system', showLooks: true, autosave: 5, autosaveFile: false}
 
 function load(): Settings {
   const out = {...defaults}

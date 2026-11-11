@@ -1,6 +1,7 @@
 // Bridge to the macOS host (WKWebView). In a plain browser the same commands
 // fall back to file input / downloads so the UI can be developed and tested.
-import {watch} from 'vue'
+import {ref, watch} from 'vue'
+import {settings} from './core/settings'
 import {call} from './core/wasm'
 import type {Editor} from './core/editor'
 import type {Document} from './core/types'
@@ -21,6 +22,7 @@ export const isNative = () => !!native()
 const post = (m: NativeMessage) => native()?.postMessage(JSON.stringify(m))
 
 export function createHost(ed: Editor, commands: Record<string, () => void>) {
+  const autosavedAt = ref<Date | null>(null)
   if (isNative()) installNativePointerLock(post)
   function open() {
     if (isNative()) return post({type: 'open'})
@@ -53,12 +55,15 @@ export function createHost(ed: Editor, commands: Record<string, () => void>) {
       ed.error = e instanceof Error ? e.message : String(e)
     }
   }
-  function save(saveAs = false) {
-    let text: string
-    // Only pictures still placed somewhere are written (deleted ones drop out).
+  /** The document as file text. Only pictures still placed somewhere are written. */
+  function fileText(): string {
     const used = new Set(ed.doc.strokes.map(s => s.image?.asset).filter(Boolean))
     const assets = Object.fromEntries(Object.entries(ed.doc.assets ?? {}).filter(([k]) => used.has(k)))
-    try { text = call<string>('save', {doc: {...ed.doc, assets}}) } catch (e) { ed.error = String(e instanceof Error ? e.message : e); return }
+    return call<string>('save', {doc: {...ed.doc, assets}})
+  }
+  function save(saveAs = false) {
+    let text: string
+    try { text = fileText() } catch (e) { ed.error = String(e instanceof Error ? e.message : e); return }
     if (isNative()) return post({type: 'save', text, path: saveAs ? null : ed.filePath, name: ed.fileName})
     download(text, ed.fileName.endsWith('.pathweaver') ? ed.fileName : `${ed.fileName}.pathweaver`, 'application/json')
     ed.markSaved(null)
@@ -91,9 +96,58 @@ export function createHost(ed: Editor, commands: Record<string, () => void>) {
     exported: ((path: string) => { ed.status = `書き出しました：${path}` }) as never,
     failed: ((message: string) => { ed.error = message }) as never,
     isDirty: (() => ed.dirty) as never,
+    recovered: ((data: string) => recovered(data)) as never,
     placed: ((name: string, kind: 'svg' | 'image', data: string) => placeHandler?.(name, kind, data)) as never,
   }
   initTextHost(isNative() ? post as never : null)
+
+  // ---- autosave (設定 → 自動保存) ----
+  // While there are unsaved changes, every N minutes: a recovery copy (Mac:
+  // Application Support/PathWeaver/Recovery, browser: localStorage) that the
+  // next launch offers to restore after a crash or force quit; optionally also
+  // the document's own file. Never in the middle of a gesture.
+  const RECOVERY = 'pw.recovery'
+  let lastAutosave = Date.now()
+  function writeRecovery(text: string) {
+    const data = JSON.stringify({text, name: ed.fileName, path: ed.filePath, at: new Date().toISOString()})
+    if (isNative()) return post({type: 'recovery', data})
+    try { localStorage.setItem(RECOVERY, data) } catch { /* too big for the browser's storage: skipped */ }
+  }
+  function clearRecovery() {
+    if (isNative()) return post({type: 'recovery', clear: true})
+    try { localStorage.removeItem(RECOVERY) } catch { /* nothing kept */ }
+  }
+  function autosave() {
+    lastAutosave = Date.now()
+    let text: string
+    try { text = fileText() } catch { return }
+    writeRecovery(text)
+    if (settings.autosaveFile && ed.filePath && isNative()) post({type: 'save', text, path: ed.filePath, name: ed.fileName})
+    autosavedAt.value = new Date()
+  }
+  setInterval(() => {
+    const min = settings.autosave
+    if (!min || !ed.dirty || ed.inGesture() || Date.now() - lastAutosave < min * 60_000) return
+    autosave()
+  }, 5_000)
+  // saved, discarded or a new document: the recovery copy has done its job
+  watch(() => ed.dirty, d => { if (!d) { clearRecovery(); lastAutosave = Date.now() } })
+  /** A recovery copy from a session that ended without saving. */
+  function recovered(data: string) {
+    let r: {text: string; name?: string; path?: string | null; at?: string}
+    try { r = JSON.parse(data) } catch { return clearRecovery() }
+    const when = r.at ? new Date(r.at).toLocaleString('ja-JP') : ''
+    const ok = window.confirm(`前回、保存されないまま終わった「${r.name ?? '名称未設定'}」の変更が残っています（${when}）。\n復元しますか？（「キャンセル」で破棄）`)
+    if (!ok) return clearRecovery()
+    try {
+      ed.load(call<Document>('load', {text: r.text}), r.path ?? null, r.name)
+      ed.markUnsaved()
+      ed.status = '復元しました。保存するまで元のファイルは変わっていません'
+      commands.fit?.()
+    } catch (e) {
+      ed.error = `復元できませんでした：${e instanceof Error ? e.message : e}`
+    }
+  }
   watch(() => [ed.dirty, ed.fileName, ed.filePath], () => {
     document.title = `${ed.dirty ? '• ' : ''}${ed.fileName} — PathWeaver`
     post({type: 'state', dirty: ed.dirty, title: ed.fileName, path: ed.filePath})
@@ -110,5 +164,10 @@ export function createHost(ed: Editor, commands: Record<string, () => void>) {
     window.addEventListener('beforeunload', e => { if (ed.dirty) e.preventDefault() })
   }
   post({type: 'ready'})
-  return {open, save, saveFiles, opened, place}
+  if (!isNative()) {
+    let data: string | null = null
+    try { data = localStorage.getItem(RECOVERY) } catch { /* none */ }
+    if (data) setTimeout(() => recovered(data!), 300)
+  }
+  return {open, save, saveFiles, opened, place, autosavedAt, autosave}
 }

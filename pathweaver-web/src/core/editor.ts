@@ -188,6 +188,11 @@ export function createEditor() {
     void revision.value
     return docText(doc.value) !== savedDoc.value
   })
+  /** A restored recovery copy: its changes are not in any file yet. */
+  function markUnsaved() {
+    savedDoc.value = ''
+    revision.value++
+  }
   function markSaved(path: string | null) {
     savedDoc.value = docText(doc.value)
     if (path) {
@@ -673,7 +678,7 @@ export function createEditor() {
   return reactive({
     doc, selected, anchors, selectedNodes, tool, status, error, filePath, fileName, revision, generation, drawStyle, viewer, geometryRender,
     history, dirty, active, renders, renderPending,
-    begin, commit, cancel, inGesture, edit, coreEdit, changed, undo, redo, load, markSaved,
+    begin, commit, cancel, inGesture, edit, coreEdit, changed, undo, redo, load, markSaved, markUnsaved,
     findStroke, nextId, shown, folderTree, inFolder, folderOf, groupSelection, ungroup, moveInList, regroup, selectPath, selectAnchor, clearSelection, isAnchorSelected,
     blendOf, makeBlend, setBlendSteps, releaseBlend, expandBlend,
     render, newPath, deleteSelection, duplicateSelection, copySelection, cutSelection, paste, makeGuides, arrange, hasClipboard,

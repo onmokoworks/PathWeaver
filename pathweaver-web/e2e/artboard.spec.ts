@@ -172,3 +172,12 @@ test('artboards panel (layers area tab): numbered in order, click selects, doubl
   await expect(page.locator('[data-testid=path-list] ul')).toBeVisible()
   expect(errors).toEqual([])
 })
+
+test('the layers/artboards tabs read on one line', async ({page}) => {
+  await boot(page)
+  for (const id of ['tab-layers', 'tab-artboards']) {
+    const b = (await page.getByTestId(id).boundingBox())!
+    expect(b.height).toBeLessThan(30)
+    expect(b.width).toBeGreaterThan(40)
+  }
+})

@@ -86,6 +86,13 @@ final class Host: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMes
             ready = true
             if let p = pendingOpen { pendingOpen = nil; openPath(p) }
             if let out = ProcessInfo.processInfo.environment["PATHWEAVER_SELFTEST"] { selfTest(out) }
+            else if let data = try? String(contentsOf: recoveryURL, encoding: .utf8) {
+                // the last session ended with unsaved changes: offer them back
+                js("window.pathweaver.recovered(\(json(data)))")
+            }
+        case "recovery":
+            if m["clear"] as? Bool == true { clearRecovery() }
+            else if let data = m["data"] as? String { try? data.write(to: recoveryURL, atomically: true, encoding: .utf8) }
         case "error":
             FileHandle.standardError.write("JS error: \(m["message"] ?? "")\n".data(using: .utf8)!)
         case "state":
@@ -357,6 +364,7 @@ final class Host: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMes
             a.addButton(withTitle: "破棄して開く")
             a.addButton(withTitle: "キャンセル")
             if a.runModal() != .alertFirstButtonReturn { return }
+            clearRecovery()
         }
         do {
             let text = try String(contentsOfFile: p, encoding: .utf8)
@@ -397,6 +405,15 @@ final class Host: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMes
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }()
+    /// Autosave's recovery copy (one, for the open document). Kept until the
+    /// changes are saved or deliberately discarded.
+    lazy var recoveryURL: URL = {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let dir = base.appendingPathComponent("PathWeaver/Recovery", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("recovery.json")
+    }()
+    func clearRecovery() { try? FileManager.default.removeItem(at: recoveryURL) }
     func safeName(_ s: String) -> String {
         let cleaned = s.replacingOccurrences(of: "/", with: "／").replacingOccurrences(of: ":", with: "：").trimmingCharacters(in: .whitespaces)
         return cleaned.isEmpty ? "外観" : cleaned
@@ -495,6 +512,7 @@ final class Host: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMes
                 self.js("window.pathweaver.command('save')")
             case .alertThirdButtonReturn:
                 self.dirty = false
+                self.clearRecovery()
                 self.window.close()
             default: break
             }

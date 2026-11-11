@@ -38,6 +38,14 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey, true))
             <InputRadio data-field="wheel" :model-value="settings.wheel" :options="['pan', 'zoom']" :labels="['移動', 'ズーム']" @update:model-value="v => { settings.wheel = v as Wheel }" />
           </Parameter>
 
+          <ParameterHeading>自動保存</ParameterHeading>
+          <Parameter label="間隔" hint="保存していない変更があるとき、この間隔で復元用のコピーを残します。アプリが落ちたり強制終了したりしても、次に開いたときに復元できます">
+            <InputRadio data-field="autosave" :model-value="settings.autosave" :options="[0, 1, 5, 10]" :labels="['オフ', '1分', '5分', '10分']" @update:model-value="v => { settings.autosave = v as number }" />
+          </Parameter>
+          <Parameter label="ファイル" hint="オン：保存したことのあるファイルは、自動保存のたびに上書きします（Pages などと同じ）。オフ：ファイルは ⌘S するまで変わりません">
+            <InputCheckbox data-field="autosave-file" :model-value="settings.autosaveFile" :disabled="!settings.autosave" label="保存済みのファイルにも上書き保存する" @update:model-value="v => { settings.autosaveFile = v }" />
+          </Parameter>
+
           <ParameterHeading>表示</ParameterHeading>
           <Parameter label="テーマ">
             <InputRadio data-field="theme" :model-value="settings.theme" :options="['system', 'light', 'dark']" :labels="['システム', 'ライト', 'ダーク']" @update:model-value="v => { settings.theme = v as Theme }" />

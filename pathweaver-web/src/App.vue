@@ -315,6 +315,7 @@ function setSideTab(id: string) { sideTab.value = id; try { localStorage.setItem
 // Test hook: lets end-to-end tests read the document without poking internals.
 ;(window as unknown as {__pw: unknown}).__pw = {
   ed, canvas, call, exportAssets,
+  autosave: () => host.autosave(),
   // test hook: lay out the active text again and finish its gesture
   textProbe: async (t: string) => {
     try { (window as unknown as {__pwTextProbe: unknown}).__pwTextProbe = (await outlineText({text: t, font: DEFAULT_FONT, size: 48, line_height: 1.2})).length } catch (e) { (window as unknown as {__pwTextProbe: unknown}).__pwTextProbe = String(e) }
@@ -329,6 +330,7 @@ function setSideTab(id: string) { sideTab.value = id; try { localStorage.setItem
         <div class="doc" :title="ed.filePath ?? ed.fileName">
           <span class="name">{{ ed.fileName }}</span>
           <span v-if="ed.dirty" class="dirty" title="未保存の変更があります">●</span>
+          <span v-if="ed.dirty && host.autosavedAt.value" class="autosaved" data-testid="autosaved" :title="settings.autosaveFile && ed.filePath ? 'ファイルに自動保存しました' : '復元用のコピーを自動保存しました（ファイルは ⌘S で保存）'">自動保存 {{ host.autosavedAt.value.toLocaleTimeString('ja-JP', {hour: '2-digit', minute: '2-digit'}) }}</span>
         </div>
         <div class="actions">
           <template v-if="!isNative()">
@@ -436,6 +438,7 @@ html.fullscreen .app.native .topbar {padding-left: 12px}
 .doc {display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1}
 .name {font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis}
 .dirty {color: var(--tq-color-text-mute); font-size: 9px}
+.autosaved {color: var(--tq-color-text-mute); font-size: 11px; white-space: nowrap}
 .actions {display: flex; align-items: center; gap: 2px; -webkit-app-region: no-drag}
 .sep {width: 1px; height: 16px; background: var(--tq-color-border); margin: 0 4px}
 .body {flex: 1; display: flex; min-height: 0}
