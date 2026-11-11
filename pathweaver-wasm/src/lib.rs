@@ -393,7 +393,19 @@ fn edit(doc: &mut Document, kind: &str, a: &Value) -> Result<Value, String> {
         "pathfinder" => json!(editing::pathfinder(doc, &field::<Vec<u64>>(a, "ids")?, field::<editing::PathfinderOp>(a, "pathfinder")?)?),
         "transform" => {
             // Affine on selected paths; widths scale with the shape.
-            let ids: Vec<u64> = field(a, "ids")?;
+            let mut ids: Vec<u64> = field(a, "ids")?;
+            // Text on a path moves with its path (they read as one thing).
+            let paths: Vec<u64> = doc
+                .strokes
+                .iter()
+                .filter(|s| ids.contains(&s.id))
+                .filter_map(|s| s.text.as_ref()?.on_path.as_ref().map(|p| p.stroke))
+                .collect();
+            for p in paths {
+                if !ids.contains(&p) {
+                    ids.push(p)
+                }
+            }
             let m: [f64; 6] = field(a, "matrix")?;
             let m = Affine::new(m);
             for s in doc.strokes.iter_mut().filter(|s| ids.contains(&s.id)) {

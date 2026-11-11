@@ -6,6 +6,7 @@ import {computed, reactive, ref, shallowRef, triggerRef, watch} from 'vue'
 import {call, CoreError} from './wasm'
 import {createRenderQueue} from './renderQueue'
 import {blendProblem, syncBlends} from './blend'
+import {primeTexts, syncTexts} from './textOutline'
 import type {Anchor, Cap, Document, Folder, Graph, Join, Render, RGB, Stroke, Vec2} from './types'
 
 export interface DrawStyle {fill: RGB | null; edge: RGB | null; width: number; join: Join; cap: Cap}
@@ -59,9 +60,11 @@ export function createEditor() {
   }
 
   const blendSeen = new Map<number, string>()
+  let self: Editor | null = null // the reactive editor (for live text layout)
   function changed() {
     syncShared()
     syncBlends(doc.value, () => nextId(), blendSeen)
+    if (self) syncTexts(self)
     revision.value++
     triggerRef(doc)
   }
@@ -182,6 +185,7 @@ export function createEditor() {
     status.value = ''
     generation.value++
     viewer.value = null
+    primeTexts(next)
     changed()
   }
   const dirty = computed(() => {
@@ -519,18 +523,38 @@ export function createEditor() {
     for (const placed of [c.text, c.image]) if (placed) { placed.matrix[4] += dx; placed.matrix[5] += dy }
     return c
   }
+  /** The ids plus the paths their text sits on (text on a path goes with its path). */
+  function withTextPaths(ids: number[]): number[] {
+    const out = [...ids]
+    for (const id of ids) {
+      const p = findStroke(id)?.text?.on_path?.stroke
+      if (p != null && findStroke(p) && !out.includes(p)) out.unshift(p)
+    }
+    return out
+  }
+  /** Copies whose text sat on a copied path now sit on the copy. */
+  function remapTextPaths(copies: Stroke[], remap: Map<number, number>) {
+    for (const c of copies) {
+      const on = c.text?.on_path
+      if (on && remap.has(on.stroke)) on.stroke = remap.get(on.stroke)!
+    }
+  }
   function duplicateSelection() {
     if (!selected.value.length) return
     edit(d => {
-      const copies: number[] = []
-      for (const id of selected.value) {
+      const copies: Stroke[] = []
+      const remap = new Map<number, number>()
+      const picked = new Set(selected.value)
+      for (const id of withTextPaths(selected.value)) {
         const s = d.strokes.find(v => v.id === id)
         if (!s) continue
         const c = copyStroke(d, s, 20, 20, `${s.name} のコピー`)
         d.strokes.push(c)
-        copies.push(c.id)
+        remap.set(s.id, c.id)
+        copies.push(c)
       }
-      selected.value = copies
+      remapTextPaths(copies, remap)
+      selected.value = copies.filter(c => [...remap].some(([from, to]) => to === c.id && picked.has(from))).map(c => c.id)
       anchors.value = []
     })
   }
@@ -617,7 +641,7 @@ export function createEditor() {
   let pasteCount = 0
   /** The selected paths as clipboard text (back to front), or '' when none. */
   function copySelection(): string {
-    const ids = new Set(selected.value)
+    const ids = new Set(withTextPaths(selected.value))
     const strokes = doc.value.strokes.filter(s => ids.has(s.id))
     if (!strokes.length) return ''
     pasteCount = 0
@@ -652,6 +676,8 @@ export function createEditor() {
     edit(d => {
       const folders = new Set((d.folders ?? []).map(f => f.id))
       const ids: number[] = []
+      const remap = new Map<number, number>()
+      const copies: Stroke[] = []
       for (const [k, v] of Object.entries(data.assets ?? {})) {
         if (typeof v === 'string' && v.startsWith('data:image/') && !d.assets?.[k]) (d.assets ??= {})[k] = v
       }
@@ -661,7 +687,10 @@ export function createEditor() {
         if (c.appearance) c.appearance.shared = null // an independent copy, like Illustrator
         d.strokes.push(c)
         ids.push(c.id)
+        remap.set(s.id, c.id)
+        copies.push(c)
       }
+      remapTextPaths(copies, remap)
       call('validate', {doc: d})
       selected.value = ids
       anchors.value = []
@@ -675,7 +704,7 @@ export function createEditor() {
     selectedNodes.value = []
   })
 
-  return reactive({
+  const api = reactive({
     doc, selected, anchors, selectedNodes, tool, status, error, filePath, fileName, revision, generation, drawStyle, viewer, geometryRender,
     history, dirty, active, renders, renderPending,
     begin, commit, cancel, inGesture, edit, coreEdit, changed, undo, redo, load, markSaved, markUnsaved,
@@ -683,6 +712,8 @@ export function createEditor() {
     blendOf, makeBlend, setBlendSteps, releaseBlend, expandBlend,
     render, newPath, deleteSelection, duplicateSelection, copySelection, cutSelection, paste, makeGuides, arrange, hasClipboard,
   })
+  self = api as unknown as Editor
+  return api
 }
 
 export type Editor = ReturnType<typeof createEditor>

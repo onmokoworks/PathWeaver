@@ -16,7 +16,22 @@ export interface WidthKey {id: number; segment: number; t: number; width: Width;
 export type Join = 'Miter' | 'Round' | 'Bevel'
 
 /** Live text: characters + font stay editable; contours = laid-out glyphs (placed by matrix). */
-export interface TextSpec {text: string; font: string; size: number; line_height: number; matrix: Matrix}
+export interface TextSpec {
+  text: string; font: string; size: number; line_height: number; matrix: Matrix
+  /** Paragraph alignment around the origin (left when absent). */
+  align?: TextAlign
+  /** 字送り in 1/1000 em. */
+  tracking?: number
+  /** The font's kerning (on when absent). */
+  kerning?: boolean
+  /** Baseline shift in document units, up is positive. */
+  baseline_shift?: number
+  /** Text on a path (the glyphs follow that stroke's centerline). */
+  on_path?: TextPath | null
+}
+export type TextAlign = 'left' | 'center' | 'right' | 'justify'
+/** offset: the anchor as a fraction of the path length; flip: the other side, running back. */
+export interface TextPath {stroke: number; offset: number; flip?: boolean}
 /** A placed bitmap; the pixels are `Document.assets[asset]`. */
 /** 抜き: black keyed out (Unmult) or white paper keyed out. */
 export type Knockout = 'black' | 'white'

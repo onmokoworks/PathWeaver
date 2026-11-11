@@ -7,7 +7,8 @@
 //        segment adds an anchor; Option-drag a handle breaks the pair.
 import {reactive, watch} from 'vue'
 import {call} from '../core/wasm'
-import {baselineTop, DEFAULT_FONT} from '../core/textOutline'
+import {baselineTop, canCarryText, DEFAULT_FONT} from '../core/textOutline'
+import {measurePath, nearestOnPath} from '../core/textLayout'
 import {buildShapes, defaults, fromDrag, isGroupShape, shapeInfo, type ShapeKind, type ShapeParams} from '../core/shapes'
 import {settings, wheelZoom, type Paper} from '../core/settings'
 import type {Editor} from '../core/editor'
@@ -578,10 +579,15 @@ export function createCanvas(ed: Editor) {
   }
 
   // ---------- text ----------
-  /** Click with the text tool: edit the text under the pointer, or start a new one there. */
+  /** Click with the text tool: edit the text under the pointer, or start a new
+   *  one there — on a path's line, a text that runs along the path from there. */
   function textDown(p: Vec2) {
     const hit = pathAt(p)
     if (hit !== null && stroke(hit)?.text) return editText(hit)
+    const seg = segmentAt(p, 6)
+    const carrier = seg ? stroke(seg.stroke) : undefined
+    const line = canCarryText(carrier) ? measurePath(carrier.nodes, carrier.closed) : null
+    const onPath = line && carrier ? {stroke: carrier.id, offset: nearestOnPath(line, p).offset} : null
     const d = ed.doc
     const size = 48, lh = 1.2
     const color = ed.drawStyle.fill ?? ed.drawStyle.edge ?? [32, 33, 36]
@@ -594,8 +600,9 @@ export function createCanvas(ed: Editor) {
       start_width: {left: 0.5, right: 0.5, linked: true, angle: 0}, end_width: {left: 0.5, right: 0.5, linked: true, angle: 0},
       start_angle: 90, end_angle: 90, fill: [...color] as Stroke['fill'], edge: null, edge_width: 1, frame_angle: 0,
       corners: [], join: 'Miter', miter_limit: 10, contours: [], appearance: null,
-      text: {text: '', font: DEFAULT_FONT, size, line_height: lh, matrix: [1, 0, 0, 1, p.x, top]},
+      text: {text: '', font: DEFAULT_FONT, size, line_height: lh, matrix: [1, 0, 0, 1, p.x, top], ...(onPath ? {on_path: onPath} : {})},
     })
+    if (onPath) ed.status = 'パスに沿って文字を打ちます。位置・反対側は右のパネル'
     ed.selected = [id]
     ed.anchors = []
     ed.changed()

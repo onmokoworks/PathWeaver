@@ -238,11 +238,9 @@ async function readSvg(ed: Editor, d: {next_id: number; assets?: Record<string, 
         s.fill = color(cs.fill, svg) ?? [0, 0, 0]
         s.contours = []
         s.text = {text: content, font: family, size, line_height: 1.2, matrix: m}
-        if (anchor === 'middle' || anchor === 'end') {
-          // Shift by the measured width (start-anchored layout here).
-          const w = (el as SVGTextContentElement).getComputedTextLength?.() ?? 0
-          s.text.matrix = mul(s.text.matrix as Affine, [1, 0, 0, 1, anchor === 'middle' ? -w / 2 : -w, 0]) as Matrix
-        }
+        // text-anchor is alignment around the origin, as in PathWeaver's own text.
+        if (anchor === 'middle') s.text.align = 'center'
+        else if (anchor === 'end') s.text.align = 'right'
         out.strokes.push(s)
         out.texts.push(s)
         continue

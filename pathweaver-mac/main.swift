@@ -159,6 +159,11 @@ final class Host: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMes
             let rings = glyphOutlines(text: m["text"] as? String ?? "", family: m["font"] as? String ?? "",
                                       size: m["size"] as? Double ?? 12, lineHeight: m["lineHeight"] as? Double ?? 1.2)
             js("window.pathweaver.glyphs(\(id), \(json(rings)))")
+        case "shape":
+            let id = m["id"] as? Int ?? 0
+            let shaped = shapeGlyphs(text: m["text"] as? String ?? "", family: m["font"] as? String ?? "",
+                                     size: m["size"] as? Double ?? 12, kerning: m["kerning"] as? Bool ?? true)
+            js("window.pathweaver.shaped(\(id), \(json(shaped)))")
         case "menu":
             canUndo = m["undo"] as? Bool ?? false
             canRedo = m["redo"] as? Bool ?? false
@@ -291,6 +296,43 @@ final class Host: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMes
             }
         }
         return rings
+    }
+    /// The font's glyphs for the text, one line per "\n", for the web side to
+    /// lay out (alignment, tracking, text on a path: textLayout.ts). Each glyph:
+    /// its line `l`, pen x `x` on the line (kerning included unless turned
+    /// off), advance `a` and outline rings `r` relative to its pen position on
+    /// the baseline (y down), flattened as [x0, y0, x1, y1, …]. CoreText picks
+    /// fallback fonts (Japanese in a Latin font) per run.
+    func shapeGlyphs(text: String, family: String, size: Double, kerning: Bool) -> [String: Any] {
+        let base = NSFontDescriptor(fontAttributes: [.family: family])
+        let font = NSFont(descriptor: base, size: size) ?? NSFont(name: family, size: size) ?? NSFont.systemFont(ofSize: size)
+        let ctFont = font as CTFont
+        let tolerance = max(0.02, size * 0.004)
+        var glyphsOut: [[String: Any]] = []
+        for (i, line) in text.components(separatedBy: "\n").enumerated() {
+            if line.isEmpty { continue }
+            var attributes: [NSAttributedString.Key: Any] = [.font: font, NSAttributedString.Key(kCTLigatureAttributeName as String): 1]
+            if !kerning { attributes[.kern] = 0 } // 0 turns the font's kerning off
+            let ctLine = CTLineCreateWithAttributedString(NSAttributedString(string: line, attributes: attributes))
+            for run in (CTLineGetGlyphRuns(ctLine) as? [CTRun]) ?? [] {
+                let attrs = CTRunGetAttributes(run) as NSDictionary
+                let runFont = (attrs[kCTFontAttributeName] as! CTFont?) ?? ctFont
+                let n = CTRunGetGlyphCount(run)
+                var glyphs = [CGGlyph](repeating: 0, count: n)
+                var pos = [CGPoint](repeating: .zero, count: n)
+                var adv = [CGSize](repeating: .zero, count: n)
+                CTRunGetGlyphs(run, CFRange(location: 0, length: n), &glyphs)
+                CTRunGetPositions(run, CFRange(location: 0, length: n), &pos)
+                CTRunGetAdvances(run, CFRange(location: 0, length: n), &adv)
+                for k in 0..<n {
+                    // Glyph space is y-up: flip into the page's y-down space.
+                    var m = CGAffineTransform(a: 1, b: 0, c: 0, d: -1, tx: 0, ty: -pos[k].y)
+                    let rings = CTFontCreatePathForGlyph(runFont, glyphs[k], &m).map { flattenPath($0, tolerance: tolerance) } ?? []
+                    glyphsOut.append(["l": i, "x": Double(pos[k].x), "a": Double(adv[k].width), "r": rings])
+                }
+            }
+        }
+        return ["ascent": Double(CTFontGetAscent(ctFont)), "descent": Double(CTFontGetDescent(ctFont)), "glyphs": glyphsOut]
     }
     func flattenPath(_ path: CGPath, tolerance: Double) -> [[Double]] {
         var rings: [[Double]] = []

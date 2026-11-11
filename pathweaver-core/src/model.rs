@@ -110,9 +110,76 @@ pub struct Text {
     pub line_height: f64,
     /// Local text space (origin = top-left of the first line box) → world.
     pub matrix: [f64; 6],
+    /// Paragraph alignment around the text origin (point text: the origin
+    /// stays put; on a path: around `TextPath::offset`).
+    #[serde(default, skip_serializing_if = "TextAlign::is_left")]
+    pub align: TextAlign,
+    /// 字送り in 1/1000 em, added after every character (Illustrator's tracking).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub tracking: f64,
+    /// Use the font's kerning (on unless turned off).
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub kerning: bool,
+    /// Baseline shift in document units (up is positive).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub baseline_shift: f64,
+    /// Text on a path: the glyphs follow another stroke's centerline. The
+    /// path stays an ordinary path; when it is gone the text falls back to
+    /// point text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_path: Option<TextPath>,
 }
 fn default_line_height() -> f64 {
     1.2
+}
+impl Default for Text {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            font: String::new(),
+            size: 12.,
+            line_height: default_line_height(),
+            matrix: [1., 0., 0., 1., 0., 0.],
+            align: TextAlign::Left,
+            tracking: 0.,
+            kerning: true,
+            baseline_shift: 0.,
+            on_path: None,
+        }
+    }
+}
+fn is_true(v: &bool) -> bool {
+    *v
+}
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TextAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+    Justify,
+}
+impl TextAlign {
+    fn is_left(&self) -> bool {
+        *self == TextAlign::Left
+    }
+}
+
+/// Where text on a path sits: `stroke` = the path, `offset` = the anchor as
+/// a fraction of the path's length (0…1), `flip` = the other side, running
+/// the other way.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TextPath {
+    pub stroke: u64,
+    #[serde(default)]
+    pub offset: f64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub flip: bool,
 }
 
 /// A placed bitmap. The pixels live once in `Document::assets[asset]`; the
@@ -840,6 +907,11 @@ impl Document {
                     || !t.line_height.is_finite()
                     || !(0.1..=10.0).contains(&t.line_height)
                     || bad_matrix(&t.matrix)
+                    || !t.tracking.is_finite()
+                    || !(-1000.0..=10000.0).contains(&t.tracking)
+                    || !t.baseline_shift.is_finite()
+                    || t.baseline_shift.abs() > 1e5
+                    || t.on_path.as_ref().is_some_and(|p| !p.offset.is_finite() || p.offset.abs() > 100.0 || p.stroke == s.id)
                 {
                     return Err("テキストが不正です".into());
                 }
@@ -1001,6 +1073,33 @@ mod tests {
         d.folders[0].parent = Some(a);
         assert!(d.validate().is_err());
         d.folders[0].parent = Some(9_999_999);
+        assert!(d.validate().is_err());
+    }
+    #[test]
+    fn type_settings_are_optional_and_validated() {
+        // A text saved before alignment / tracking / text on a path loads unchanged.
+        let old = r#"{"text":"Ab","font":"Hiragino Sans","size":48.0,"line_height":1.2,"matrix":[1.0,0.0,0.0,1.0,0.0,0.0]}"#;
+        let t: Text = serde_json::from_str(old).unwrap();
+        assert_eq!(t.align, TextAlign::Left);
+        assert!(t.kerning && t.tracking == 0. && t.baseline_shift == 0. && t.on_path.is_none());
+        // and saves the same way (defaults are left out)
+        assert_eq!(serde_json::to_string(&t).unwrap(), old);
+        let new = r#"{"text":"Ab","font":"F","size":10,"matrix":[1,0,0,1,0,0],"align":"center","tracking":100,"kerning":false,"baseline_shift":2,"on_path":{"stroke":1,"offset":0.25,"flip":true}}"#;
+        let t: Text = serde_json::from_str(new).unwrap();
+        assert_eq!(t.align, TextAlign::Center);
+        assert!(!t.kerning);
+        assert_eq!(t.on_path, Some(TextPath { stroke: 1, offset: 0.25, flip: true }));
+        let mut d = Document::example();
+        let id = d.id();
+        let mut s = Stroke::new(id, "t".into());
+        s.text = Some(t);
+        d.strokes.push(s);
+        assert!(d.validate().is_ok());
+        d.strokes.last_mut().unwrap().text.as_mut().unwrap().tracking = f64::NAN;
+        assert!(d.validate().is_err());
+        d.strokes.last_mut().unwrap().text.as_mut().unwrap().tracking = 0.;
+        // a text cannot sit on itself
+        d.strokes.last_mut().unwrap().text.as_mut().unwrap().on_path = Some(TextPath { stroke: id, offset: 0., flip: false });
         assert!(d.validate().is_err());
     }
 }

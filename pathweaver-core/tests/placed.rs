@@ -26,7 +26,7 @@ fn placement_follows_transforms() {
     // The pick rectangle moves with it.
     assert_eq!(moved.contours.as_ref().unwrap()[0], img.rect());
     let mut t = Stroke::new(1, "t".into());
-    t.text = Some(Text { text: "A".into(), font: "Helvetica".into(), size: 12., line_height: 1.2, matrix: [1., 0., 0., 1., 0., 0.] });
+    t.text = Some(Text { text: "A".into(), font: "Helvetica".into(), size: 12., line_height: 1.2, matrix: [1., 0., 0., 1., 0., 0.], ..Default::default() });
     let r = t.transformed(Affine::rotate(std::f64::consts::FRAC_PI_2), true);
     let m = r.text.unwrap().matrix;
     assert!((m[1] - 1.).abs() < 1e-9 && (m[2] + 1.).abs() < 1e-9);

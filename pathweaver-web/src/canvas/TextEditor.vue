@@ -3,25 +3,45 @@
 // outlines (same font, size, line height and placement as the layout in
 // textOutline.ts), with its own glyphs transparent: what you see is the real
 // shape updating as you type, with the system caret, selection and IME.
+// Alignment, tracking and kerning carry over to the box (CSS lays it out the
+// same way). Text on a path is typed in a plain box at the start of the text,
+// turned to the path there, its letters shown faintly over the bent glyphs.
 import {computed, nextTick, onMounted, ref} from 'vue'
 import type {Editor} from '../core/editor'
 import type {Canvas} from './controller'
-import {relayout} from '../core/textOutline'
+import {baselineTop, onPathStart, relayout} from '../core/textOutline'
 
 const props = defineProps<{ed: Editor; canvas: Canvas; id: number}>()
 const box = ref<HTMLDivElement>()
 const s = computed(() => { void props.ed.revision; return props.ed.findStroke(props.id) })
 const t = computed(() => s.value?.text)
 
+const onPath = computed(() => {
+  void props.ed.revision
+  const tt = t.value
+  if (!tt?.on_path) return null
+  const at = onPathStart(props.ed.doc, tt)
+  if (!at) return null
+  // the box's top-left: the first baseline sits on the path
+  const top = baselineTop(tt.font, tt.size, tt.line_height) - (tt.baseline_shift ?? 0)
+  const c = Math.cos(at.angle), s = Math.sin(at.angle)
+  return [c, s, -s, c, at.p.x + s * top, at.p.y - c * top] as const
+})
 const style = computed(() => {
   const v = props.canvas.view
-  const m = t.value?.matrix ?? [1, 0, 0, 1, 0, 0]
+  const m = onPath.value ?? t.value?.matrix ?? [1, 0, 0, 1, 0, 0]
   const z = v.zoom
+  const align = onPath.value ? 'left' : t.value?.align ?? 'left'
+  // Point text grows around its origin: centred / right text is shifted back.
+  const shift = align === 'center' ? ' translateX(-50%)' : align === 'right' ? ' translateX(-100%)' : ''
   return {
-    transform: `matrix(${m[0] * z}, ${m[1] * z}, ${m[2] * z}, ${m[3] * z}, ${v.panX + m[4] * z}, ${v.panY + m[5] * z})`,
+    transform: `matrix(${m[0] * z}, ${m[1] * z}, ${m[2] * z}, ${m[3] * z}, ${v.panX + m[4] * z}, ${v.panY + m[5] * z})${shift}`,
     fontFamily: /^(sans-serif|serif|monospace)$/.test(t.value?.font ?? '') ? t.value!.font : JSON.stringify(t.value?.font ?? ''),
     fontSize: `${t.value?.size ?? 12}px`,
     lineHeight: String(t.value?.line_height ?? 1.2),
+    textAlign: align,
+    letterSpacing: `${(t.value?.tracking ?? 0) / 1000}em`,
+    fontKerning: (t.value?.kerning === false ? 'none' : 'normal') as 'none' | 'normal',
   }
 })
 
@@ -67,7 +87,7 @@ onMounted(async () => {
 <template>
   <div
     ref="box" class="text-editor" data-testid="text-editor" contenteditable="plaintext-only" spellcheck="false"
-    role="textbox" aria-multiline="true" aria-label="テキスト" :style="style"
+    role="textbox" aria-multiline="true" aria-label="テキスト" :class="{'on-path': !!onPath}" :style="style"
     @input="onInput" @keydown="onKey" @blur="finish" @pointerdown.stop @wheel.stop
   />
 </template>
@@ -80,5 +100,6 @@ onMounted(async () => {
   color: transparent; caret-color: var(--tq-color-accent); background: transparent;
   font-kerning: normal; cursor: text; z-index: 5;
 }
+.text-editor.on-path {color: color-mix(in srgb, var(--tq-color-accent) 45%, transparent)}
 .text-editor::selection {background: color-mix(in srgb, var(--tq-color-accent) 30%, transparent)}
 </style>
