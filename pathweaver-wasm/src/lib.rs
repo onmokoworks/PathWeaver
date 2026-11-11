@@ -15,7 +15,7 @@ use pathweaver_core::{
     corners,
     editing::{self, Anchor, AnchorKind, MergeTarget},
     model::{Corner, CornerKind, Document, Stroke, WidthTarget},
-    outline, snapping,
+    export, outline, pdf, snapping,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -212,6 +212,25 @@ pub fn dispatch(op: &str, a: &Value) -> Result<Value, String> {
             let background: Option<[u8; 3]> = field(a, "background")?;
             let margin: Option<f64> = field(a, "margin")?;
             json!(outline::svg_frame(&doc, frame, background, margin.unwrap_or(16.))?)
+        }
+        "exportSvg" => {
+            // Structured SVG: folders as groups, lines kept as lines (or outlined).
+            let doc: Document = field(a, "doc")?;
+            let frame: Option<[f64; 4]> = field(a, "frame")?;
+            let background: Option<[u8; 3]> = field(a, "background")?;
+            let margin: Option<f64> = field(a, "margin")?;
+            let outline: Option<bool> = field(a, "outline")?;
+            let options = export::Options { outline: outline.unwrap_or(false) };
+            json!(export::svg(&doc, frame, background, margin.unwrap_or(16.), options)?)
+        }
+        "exportPdf" => {
+            // One page per frame; the bytes come back as base64.
+            let doc: Document = field(a, "doc")?;
+            let frames: Vec<[f64; 4]> = field(a, "frames")?;
+            let background: Option<[u8; 3]> = field(a, "background")?;
+            let outline: Option<bool> = field(a, "outline")?;
+            let options = export::Options { outline: outline.unwrap_or(false) };
+            json!(pdf::base64(&pdf::pdf(&doc, &frames, background, options)?))
         }
         "render" => render(&field::<Stroke>(a, "stroke")?),
         "widthHandles" => json!(width_handles(&field::<Stroke>(a, "stroke")?)),

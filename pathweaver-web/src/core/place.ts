@@ -220,7 +220,7 @@ async function readSvg(ed: Editor, d: {next_id: number; assets?: Record<string, 
       const cs = getComputedStyle(el)
       if (cs.display === 'none' || cs.visibility === 'hidden') continue
       if (tag === 'use') { out.skipped++; continue }
-      const label = el.getAttribute('id') || el.getAttribute('inkscape:label') || ''
+      const label = el.getAttribute('data-name') || el.getAttribute('id') || el.getAttribute('inkscape:label') || ''
       if (tag === 'image') {
         const href = el.getAttribute('href') ?? el.getAttribute('xlink:href') ?? ''
         if (!href.startsWith('data:image/')) { out.skipped++; continue }

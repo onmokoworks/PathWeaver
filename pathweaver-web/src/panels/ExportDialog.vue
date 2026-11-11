@@ -1,7 +1,8 @@
 <script setup lang="ts">
 // 書き出し（⌘E）: what (artboards / selection / whole drawing), as what
-// (SVG / PNG / JPEG), how big and on what background. The choices are kept
-// for next time; the artboards to export default to all of them.
+// (SVG / PDF / PNG / JPEG), how big, on what background, and for SVG / PDF
+// whether lines stay lines. The choices are kept for next time; the
+// artboards to export default to all of them.
 import {computed, onBeforeUnmount, onMounted, reactive, ref, watch} from 'vue'
 import ParameterGrid from '../../vendor/tweeq/src/ParameterGrid/ParameterGrid.vue'
 import Parameter from '../../vendor/tweeq/src/ParameterGrid/Parameter.vue'
@@ -26,7 +27,9 @@ const opts = reactive({
   format: (saved.format as ExportFormat) ?? 'png',
   scale: Number(saved.scale) || 2,
   background: (saved.background as 'none' | 'white') ?? 'none',
+  lines: (saved.lines as 'keep' | 'outline') ?? 'keep',
 })
+const vector = computed(() => opts.format === 'svg' || opts.format === 'pdf')
 // a target that is not available falls back to one that is
 if (opts.target === 'artboards' && !boards.value.length) opts.target = hasSelection ? 'selection' : 'all'
 if (opts.target === 'selection' && !hasSelection) opts.target = boards.value.length ? 'artboards' : 'all'
@@ -47,6 +50,7 @@ const options = computed<ExportOptions>(() => ({
   format: opts.format, scale: opts.scale,
   background: opts.background === 'white' || opts.format === 'jpeg' ? [255, 255, 255] : null,
   base: ed.fileName.replace(/\.pathweaver$/, '') || '名称未設定',
+  outline: opts.lines === 'outline',
 }))
 // measured once per choice (the core paints the selection / drawing to measure it)
 const list = computed(() => { try { return frames(ed.doc, options.value) } catch { return [] } })
@@ -54,6 +58,7 @@ const summary = computed(() => {
   if (!list.value.length) return '書き出すものがありません'
   const f = list.value[0].frame
   if (opts.format === 'svg') return list.value.length > 1 ? `${list.value.length} ファイル` : formatSize(f[2], f[3], display.unit)
+  if (opts.format === 'pdf') return list.value.length > 1 ? `1 ファイル・${list.value.length} ページ` : formatSize(f[2], f[3], display.unit)
   const sizes = list.value.map(v => pixelSize(v.frame[2], v.frame[3], opts.scale))
   const first = `${sizes[0].w}×${sizes[0].h} px`
   return (list.value.length > 1 ? `${list.value.length} ファイル（1枚目 ${first}）` : first) + (sizes.some(s => s.clamped) ? '・大きすぎるので縮めます' : '')
@@ -100,9 +105,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey, true))
             />
           </li>
           <Parameter label="形式">
-            <InputRadio data-field="export-format" :model-value="opts.format" :options="['svg', 'png', 'jpeg']" :labels="['SVG', 'PNG', 'JPEG']" @update:model-value="v => { opts.format = v as ExportFormat }" />
+            <InputRadio data-field="export-format" :model-value="opts.format" :options="['svg', 'pdf', 'png', 'jpeg']" :labels="['SVG', 'PDF', 'PNG', 'JPEG']" @update:model-value="v => { opts.format = v as ExportFormat }" />
           </Parameter>
-          <Parameter v-if="opts.format !== 'svg'" label="倍率" hint="1pt（書類の1単位）を何ピクセルにするか。画面用なら2倍がくっきり">
+          <Parameter v-if="vector" label="線" hint="線のまま：太さが一定の線は線として残す（強弱のある線は輪郭になる）。輪郭にする：すべて塗りの形にする">
+            <InputRadio data-field="export-lines" :model-value="opts.lines" :options="['keep', 'outline']" :labels="['線のまま', '輪郭にする']" @update:model-value="v => { opts.lines = v as 'keep' | 'outline' }" />
+          </Parameter>
+          <Parameter v-if="!vector" label="倍率" hint="1pt（書類の1単位）を何ピクセルにするか。画面用なら2倍がくっきり">
             <InputRadio data-field="export-scale" :model-value="opts.scale" :options="[1, 2, 3, 4]" :labels="['1×', '2×', '3×', '4×']" @update:model-value="v => { opts.scale = v as number }" />
           </Parameter>
           <Parameter v-if="opts.format !== 'jpeg'" label="背景">

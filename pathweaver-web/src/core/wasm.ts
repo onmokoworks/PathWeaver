@@ -37,7 +37,7 @@ export class CoreError extends Error {}
 
 // Placed images can be megabytes: only export and save need their pixels, so
 // every other call sends the document without them (the core accepts that).
-const NEEDS_ASSETS = new Set(['svg', 'save'])
+const NEEDS_ASSETS = new Set(['svg', 'exportSvg', 'exportPdf', 'save'])
 function lean(op: string, args: Record<string, unknown>) {
   const d = args.doc as {assets?: Record<string, string>} | undefined
   if (NEEDS_ASSETS.has(op) || !d || typeof d !== 'object' || !d.assets || !Object.keys(d.assets).length) return args
