@@ -9,6 +9,7 @@ import {scalar, vec2} from 'linearly'
 import {
 	Component,
 	computed,
+	inject,
 	nextTick,
 	ref,
 	type StyleValue,
@@ -26,6 +27,7 @@ import {useDrag} from '../use/useDrag'
 import {useValidator} from '../use/useValidator'
 import {getNumberPresition, precisionOf, toFixed, toPercent} from '../util'
 import * as V from '../validator'
+import {InputNumberContextKey} from './context'
 import InputNumberScales from './InputNumberScales.vue'
 import {type InputNumberProps} from './types'
 
@@ -44,6 +46,11 @@ const props = withDefaults(defineProps<InputNumberProps>(), {
 })
 
 const emit = defineEmits<InputEmits>()
+
+// PathWeaver patch: units etc. provided by an ancestor (see ./context.ts)
+const ctx = inject(InputNumberContextKey, null)
+const basePrecision = computed(() => ctx?.value.precision ?? props.precision)
+const suffixText = computed(() => props.suffix || ctx?.value.suffix || '')
 
 function onReset() {
 	if (props.default !== undefined) {
@@ -125,14 +132,18 @@ const precision = computed(() => {
 		)
 	}
 
+	// PathWeaver patch: a provided precision is the display precision (trailing
+	// zeros trimmed), so a value converted to another unit keeps its decimals.
+	if (ctx?.value.precision !== undefined) return ctx.value.precision
+
 	return Math.min(
-		props.precision,
+		basePrecision.value,
 		Math.max(displayPrecision.value, sliderPrecision.value)
 	)
 })
 
 const minSpeed = computed(() => {
-	let prec = props.precision
+	let prec = basePrecision.value
 
 	if (props.step && barVisible.value) {
 		const stepCount = (props.max - props.min) / props.step
@@ -231,7 +242,7 @@ const {dragging: tweaking} = useDrag($input, {
 			? (props.max - props.min) / width.value
 			: props.step
 				? props.step / PX_PER_STEP
-				: 1
+				: (ctx?.value.speed ?? 1)
 
 		const delta = dx * baseSpeed * speed.value * offsetWeight
 
@@ -348,7 +359,7 @@ function onInput(e: Event) {
 
 	try {
 		const fn = eval(`(x, {i}) => {
-			const result = (${value})
+			const result = (${ctx?.value.expression ? ctx.value.expression(value) : value})
 			if (typeof result === 'number') {
 				return result
 			}
@@ -390,7 +401,7 @@ function onIncrementByKey(delta: number) {
 			multiplier *= 0.1
 		}
 
-		local.value += delta * multiplier
+		local.value += delta * multiplier * (ctx?.value.keyStep ?? 1)
 		local.value = scalar.clamp(local.value, validMin.value, validMax.value)
 	}
 
@@ -607,7 +618,7 @@ const barStyle = computed<StyleValue>(() => {
 			<div class="display-at-inactive">
 				<span v-if="prefix" class="prefix">{{ prefix }}</span>
 				{{ display }}
-				<span v-if="suffix" class="suffix">{{ suffix }}</span>
+				<span v-if="suffixText" class="suffix">{{ suffixText }}</span>
 			</div>
 		</template>
 		<template #back>

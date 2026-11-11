@@ -8,6 +8,7 @@ import Parameter from '../../vendor/tweeq/src/ParameterGrid/Parameter.vue'
 import InputRadio from '../../vendor/tweeq/src/InputRadio/InputRadio.vue'
 import InputCheckbox from '../../vendor/tweeq/src/InputCheckbox/InputCheckbox.vue'
 import InputButton from '../../vendor/tweeq/src/InputButton/InputButton.vue'
+import {display, formatSize} from '../core/units'
 import type {Editor} from '../core/editor'
 import type {Canvas} from '../canvas/controller'
 import {exportFiles, frames, pixelSize, type ExportFile, type ExportFormat, type ExportOptions, type ExportTarget} from '../core/exporter'
@@ -52,7 +53,7 @@ const list = computed(() => { try { return frames(ed.doc, options.value) } catch
 const summary = computed(() => {
   if (!list.value.length) return '書き出すものがありません'
   const f = list.value[0].frame
-  if (opts.format === 'svg') return list.value.length > 1 ? `${list.value.length} ファイル` : `${Math.round(f[2])}×${Math.round(f[3])}`
+  if (opts.format === 'svg') return list.value.length > 1 ? `${list.value.length} ファイル` : formatSize(f[2], f[3], display.unit)
   const sizes = list.value.map(v => pixelSize(v.frame[2], v.frame[3], opts.scale))
   const first = `${sizes[0].w}×${sizes[0].h} px`
   return (list.value.length > 1 ? `${list.value.length} ファイル（1枚目 ${first}）` : first) + (sizes.some(s => s.clamped) ? '・大きすぎるので縮めます' : '')
@@ -95,13 +96,13 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey, true))
           <li v-if="opts.target === 'artboards'" class="boards">
             <InputCheckbox
               v-for="a in boards" :key="a.id" :data-export-board="a.id" :model-value="picked.includes(a.id)"
-              :label="`${a.name}（${Math.round(a.w)}×${Math.round(a.h)}）`" @update:model-value="v => toggle(a.id, v)"
+              :label="`${a.name}（${formatSize(a.w, a.h, display.unit)}）`" @update:model-value="v => toggle(a.id, v)"
             />
           </li>
           <Parameter label="形式">
             <InputRadio data-field="export-format" :model-value="opts.format" :options="['svg', 'png', 'jpeg']" :labels="['SVG', 'PNG', 'JPEG']" @update:model-value="v => { opts.format = v as ExportFormat }" />
           </Parameter>
-          <Parameter v-if="opts.format !== 'svg'" label="倍率" hint="1単位を何ピクセルにするか。画面用なら2倍がくっきり">
+          <Parameter v-if="opts.format !== 'svg'" label="倍率" hint="1pt（書類の1単位）を何ピクセルにするか。画面用なら2倍がくっきり">
             <InputRadio data-field="export-scale" :model-value="opts.scale" :options="[1, 2, 3, 4]" :labels="['1×', '2×', '3×', '4×']" @update:model-value="v => { opts.scale = v as number }" />
           </Parameter>
           <Parameter v-if="opts.format !== 'jpeg'" label="背景">

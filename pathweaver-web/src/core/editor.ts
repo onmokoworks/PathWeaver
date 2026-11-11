@@ -2,7 +2,8 @@
 // One user gesture = begin() … commit() = one undo step. Everything geometric
 // goes through the Rust core (call()).
 import {settings} from './settings'
-import {computed, reactive, ref, shallowRef, triggerRef, watch} from 'vue'
+import {computed, reactive, ref, shallowRef, triggerRef, watch, watchEffect} from 'vue'
+import {display, isUnit, type Unit} from './units'
 import {call, CoreError} from './wasm'
 import {createRenderQueue} from './renderQueue'
 import {blendProblem, syncBlends} from './blend'
@@ -670,6 +671,19 @@ export function createEditor() {
     return true
   }
 
+  // ---- units: the document's own, else the viewer's default; stored lengths never change ----
+  const unit = computed<Unit>(() => {
+    void revision.value
+    const u = doc.value.units
+    return isUnit(u) ? u : settings.unit
+  })
+  watchEffect(() => { display.unit = unit.value }, {flush: 'sync'})
+  /** Set this document's unit (one undo step; saved in the file). */
+  function setUnit(u: Unit) {
+    if (doc.value.units === u) return
+    edit(d => { d.units = u })
+  }
+
   watch(selected, () => {
     // Graph node selection belongs to the active path.
     selectedNodes.value = []
@@ -677,7 +691,7 @@ export function createEditor() {
 
   return reactive({
     doc, selected, anchors, selectedNodes, tool, status, error, filePath, fileName, revision, generation, drawStyle, viewer, geometryRender,
-    history, dirty, active, renders, renderPending,
+    history, dirty, active, renders, renderPending, unit, setUnit,
     begin, commit, cancel, inGesture, edit, coreEdit, changed, undo, redo, load, markSaved, markUnsaved,
     findStroke, nextId, shown, folderTree, inFolder, folderOf, groupSelection, ungroup, moveInList, regroup, selectPath, selectAnchor, clearSelection, isAnchorSelected,
     blendOf, makeBlend, setBlendSteps, releaseBlend, expandBlend,

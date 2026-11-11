@@ -616,8 +616,15 @@ pub struct Document {
     pub artboards: Vec<Artboard>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub assets: std::collections::BTreeMap<String, String>,
+    /// Display/input unit of lengths ("pt", "px", "mm", "cm", "in", "pc").
+    /// Only how numbers are shown and typed: every stored length stays in
+    /// document units (1 unit = 1 pt). None: the viewer's default unit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub units: Option<String>,
     pub strokes: Vec<Stroke>,
 }
+/// Units a document may name as its display unit.
+pub const UNITS: [&str; 6] = ["pt", "px", "mm", "cm", "in", "pc"];
 fn default_angle_step() -> f64 {
     15.
 }
@@ -639,6 +646,7 @@ impl Default for Document {
             blends: vec![],
             artboards: vec![],
             assets: Default::default(),
+            units: None,
             strokes: vec![],
         }
     }
@@ -731,6 +739,9 @@ impl Document {
         self.validate()
     }
     pub fn validate(&self) -> Result<(), String> {
+        if self.units.as_deref().is_some_and(|u| !UNITS.contains(&u)) {
+            return Err("単位が不正です".into());
+        }
         if self.artboards.len() > 1000 {
             return Err("アートボードが多すぎます".into());
         }
@@ -1002,5 +1013,17 @@ mod tests {
         assert!(d.validate().is_err());
         d.folders[0].parent = Some(9_999_999);
         assert!(d.validate().is_err());
+    }
+    #[test]
+    fn display_unit_is_optional_round_trips_and_is_checked() {
+        let mut d = Document::example();
+        // left out when unset: older files and readers see no change
+        assert!(!serde_json::to_string(&d).unwrap().contains("units"));
+        d.units = Some("mm".into());
+        assert!(d.validate().is_ok());
+        let back: Document = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert_eq!(back.units.as_deref(), Some("mm"));
+        d.units = Some("furlong".into());
+        assert!(d.validate().unwrap_err().contains("単位"));
     }
 }

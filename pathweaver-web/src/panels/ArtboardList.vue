@@ -4,6 +4,7 @@
 // rename, drag to reorder, ⤢ to bring it into view. Each change is one undo.
 import {computed, nextTick, ref} from 'vue'
 import {Icon} from '../../vendor/tweeq/src/Icon'
+import {display, formatSize} from '../core/units'
 import type {Editor} from '../core/editor'
 import type {Canvas} from '../canvas/controller'
 
@@ -91,7 +92,7 @@ function onDragEnd() { dragging.value = dropAt.value = null }
           @keydown.enter.prevent="finishRename(true)" @keydown.esc.prevent.stop="finishRename(false)" @blur="finishRename(true)"
         >
         <span v-else class="name" title="ダブルクリックで名前を変える" @dblclick.stop="startRename(a.id, a.name)">{{ a.name }}</span>
-        <span class="size">{{ Math.round(a.w) }}×{{ Math.round(a.h) }}</span>
+        <span class="size" :title="formatSize(a.w, a.h, display.unit)">{{ formatSize(a.w, a.h, display.unit, true) }}</span>
         <button type="button" class="show" title="このアートボードを表示" aria-label="表示" @click.stop="show(a.id)"><Icon icon="mdi:crop-free" /></button>
       </li>
     </ul>

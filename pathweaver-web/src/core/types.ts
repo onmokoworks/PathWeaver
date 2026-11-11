@@ -116,6 +116,8 @@ export interface Document {
   blends?: Blend[]
   /** Named pages on the canvas: what an export frames. */
   artboards?: Artboard[]
+  /** Unit lengths are shown and typed in (pt px mm cm in pc). Display only: stored lengths are always pt. */
+  units?: string
   strokes: Stroke[]
 }
 /** An artboard (top-left x, y; size w, h in document units). */

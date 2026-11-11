@@ -2,6 +2,7 @@
 // One place for everything that used to be scattered: zoom feel, wheel
 // behaviour, artwork background, width handles, theme.
 import {reactive, watch} from 'vue'
+import {isUnit, type Unit} from './units'
 
 export type Paper = 'white' | 'gray' | 'black' | 'checker'
 export type Wheel = 'pan' | 'zoom'
@@ -24,10 +25,12 @@ export interface Settings {
   autosave: number
   /** Autosave also overwrites a document that already has a file (else a recovery copy only). */
   autosaveFile: boolean
+  /** Unit for lengths in documents that do not name their own (new documents). */
+  unit: Unit
 }
 
 const KEY = 'pw.settings'
-const defaults: Settings = {zoomSpeed: 1, wheel: 'pan', invertZoom: false, paper: 'white', showWidth: true, theme: 'system', showLooks: true, autosave: 5, autosaveFile: false}
+const defaults: Settings = {zoomSpeed: 1, wheel: 'pan', invertZoom: false, paper: 'white', showWidth: true, theme: 'system', showLooks: true, autosave: 5, autosaveFile: false, unit: 'pt'}
 
 function load(): Settings {
   const out = {...defaults}
@@ -39,6 +42,7 @@ function load(): Settings {
     Object.assign(out, JSON.parse(localStorage.getItem(KEY) ?? '{}'))
   } catch { /* preferences only */ }
   if (!(out.zoomSpeed >= 0.25 && out.zoomSpeed <= 4)) out.zoomSpeed = 1
+  if (!isUnit(out.unit)) out.unit = 'pt'
   return out
 }
 

@@ -9,7 +9,10 @@ import InputRadio from '../../vendor/tweeq/src/InputRadio/InputRadio.vue'
 import InputCheckbox from '../../vendor/tweeq/src/InputCheckbox/InputCheckbox.vue'
 import InputButton from '../../vendor/tweeq/src/InputButton/InputButton.vue'
 import {resetSettings, settings, type Paper, type Theme, type Wheel} from '../core/settings'
+import {UNITS, type Unit} from '../core/units'
+import type {Editor} from '../core/editor'
 
+defineProps<{ed: Editor}>()
 const emit = defineEmits<{close: []}>()
 function onKey(e: KeyboardEvent) {
   if (e.key === 'Escape' && !document.querySelector('.Popover:popover-open')) { e.stopPropagation(); emit('close') }
@@ -36,6 +39,14 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey, true))
           </Parameter>
           <Parameter label="ホイール" hint="修飾キーなしのスクロール。トラックパッドは「移動」、マウスは「ズーム」が使いやすい">
             <InputRadio data-field="wheel" :model-value="settings.wheel" :options="['pan', 'zoom']" :labels="['移動', 'ズーム']" @update:model-value="v => { settings.wheel = v as Wheel }" />
+          </Parameter>
+
+          <ParameterHeading>単位</ParameterHeading>
+          <Parameter label="この書類" hint="大きさ・位置・線幅などの表示と入力の単位。ファイルに保存されます（数値そのものは変わりません）。1pt＝1px（72ppi）。欄には 10mm や 1in＋2pt のように単位つきでも打てます。定規の左上の角をクリックしても切り替えられます">
+            <InputRadio data-field="doc-unit" :model-value="ed.unit" :options="UNITS" :labels="UNITS" @update:model-value="v => ed.setUnit(v as Unit)" />
+          </Parameter>
+          <Parameter label="新しい書類" hint="単位を決めていない書類（新しい書類や前の版のファイル）で使う単位">
+            <InputRadio data-field="default-unit" :model-value="settings.unit" :options="UNITS" :labels="UNITS" @update:model-value="v => { settings.unit = v as Unit }" />
           </Parameter>
 
           <ParameterHeading>自動保存</ParameterHeading>
