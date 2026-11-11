@@ -48,7 +48,7 @@ test('SVG export keeps folders, curves and line settings; it places back as the 
   await pick(page, 'export-target', 'アートボード')
   await pick(page, 'export-format', 'SVG')
   await pick(page, 'export-lines', '線のまま')
-  await expect(page.getByTestId('export-summary')).toHaveText('300×200')
+  await expect(page.getByTestId('export-summary')).toHaveText('300×200 pt')
   const svg = (await bytes(await run(page))).toString()
   // well-formed, with the folder as a group holding both paths
   const parsed = await page.evaluate(text => {
