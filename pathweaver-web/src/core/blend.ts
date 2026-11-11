@@ -95,6 +95,7 @@ const mixWidth = (a: Width, b: Width, t: number): Width => ({left: lerp(a.left, 
 /** Why two paths cannot blend, or null. */
 export function blendProblem(a: Stroke, b: Stroke): string | null {
   if (a.image || b.image) return '配置画像はブレンドできません'
+  if (a.compound != null || b.compound != null) return '複合パスはブレンドできません（解除すると個々のパスでブレンドできます）'
   if (!!a.contours !== !!b.contours) return '線のパスと塗りの形（文字・複合パス）はブレンドできません'
   if (a.contours && b.contours && a.contours.length !== b.contours.length) return `輪郭の数が違う形はブレンドできません（${a.contours.length}と${b.contours.length}）`
   if (!a.contours && a.closed !== b.closed) return '開いたパスと閉じたパスはブレンドできません'

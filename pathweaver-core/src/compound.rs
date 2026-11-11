@@ -322,8 +322,9 @@ pub const ACCURACY: f64 = 0.1;
 /// when any member is selected) become one compound path, in the place and
 /// with the look of the front-most one. Old flattened shapes (contours) are
 /// turned into editable paths on the way, so a single one of them can be
-/// "made" just to make it editable. Returns the compound id.
-pub fn make(doc: &mut Document, ids: &[u64]) -> Result<u64, String> {
+/// "made" just to make it editable. Returns the ids of the members (a single
+/// resulting path is left a plain path).
+pub fn make(doc: &mut Document, ids: &[u64]) -> Result<Vec<u64>, String> {
     let mut next = doc.clone();
     let d = &mut next;
     let touched: Vec<u64> = d.strokes.iter().filter(|s| ids.contains(&s.id)).filter_map(|s| s.compound).collect();
@@ -400,13 +401,18 @@ pub fn make(doc: &mut Document, ids: &[u64]) -> Result<u64, String> {
     if members.is_empty() {
         return Err("複合パスにできる形がありません".into());
     }
+    if members.len() == 1 {
+        members[0].compound = None;
+        members[0].fill_rule = FillRule::NonZero;
+    }
+    let out = members.iter().map(|m| m.id).collect();
     let at = (0..front).filter(|&i| !picked(&d.strokes[i])).count();
     let mut rest: Vec<Stroke> = d.strokes.iter().filter(|s| !picked(s)).cloned().collect();
     rest.splice(at..at, members);
     d.strokes = rest;
     next.validate()?;
     *doc = next;
-    Ok(id)
+    Ok(out)
 }
 
 /// Object → Compound Path → Release (⌥⇧⌘8): the members of the selected
@@ -543,7 +549,9 @@ mod tests {
         assert!(filled(&d, Point::new(50., 50.)));
         let c = make(&mut d, &ids[1..]).unwrap_err();
         assert!(c.contains("2つ以上"));
-        let c = make(&mut d, &ids).unwrap();
+        let made = make(&mut d, &ids).unwrap();
+        assert_eq!(made.len(), 2);
+        let c = d.strokes[0].compound.unwrap();
         assert!(d.strokes.iter().all(|s| s.compound == Some(c)));
         // the front-most path's look, even-odd: the inner square is a hole
         assert!(d.strokes.iter().all(|s| s.fill == Some([200, 0, 0]) && s.fill_rule == FillRule::EvenOdd));
@@ -562,6 +570,45 @@ mod tests {
     }
 
     #[test]
+    fn pathfinder_takes_a_compound_whole_and_keeps_its_hole() {
+        let outer = vec![Point::new(0., 0.), Point::new(100., 0.), Point::new(100., 100.), Point::new(0., 100.)];
+        let inner = vec![Point::new(30., 30.), Point::new(70., 30.), Point::new(70., 70.), Point::new(30., 70.)];
+        let side = vec![Point::new(90., 40.), Point::new(150., 40.), Point::new(150., 60.), Point::new(90., 60.)];
+        let mut d = doc_with(&[outer, inner, side]);
+        let ids: Vec<u64> = d.strokes.iter().map(|s| s.id).collect();
+        make(&mut d, &ids[..2]).unwrap();
+        // only one member named: the whole compound takes part
+        let out = crate::editing::pathfinder(&mut d, &[ids[0], ids[2]], crate::editing::PathfinderOp::Unite).unwrap();
+        assert_eq!(out.len(), 2, "outline + hole");
+        assert!(d.strokes.iter().all(|s| s.contours.is_none() && s.compound.is_some()));
+        assert!(!filled(&d, Point::new(50., 50.)), "the hole survives");
+        assert!(filled(&d, Point::new(140., 50.)));
+        // a transform moves every member (and so the shape) together
+        let moved: Vec<Stroke> = d.strokes.iter().map(|s| s.transformed(kurbo::Affine::translate((1000., 0.)), true)).collect();
+        d.strokes = moved;
+        assert!(!filled(&d, Point::new(1050., 50.)) && filled(&d, Point::new(1010., 50.)));
+        d.validate().unwrap();
+    }
+
+    #[test]
+    fn appearance_runs_on_the_whole_compound() {
+        let outer = vec![Point::new(0., 0.), Point::new(100., 0.), Point::new(100., 100.), Point::new(0., 100.)];
+        let inner = vec![Point::new(30., 30.), Point::new(70., 30.), Point::new(70., 70.), Point::new(30., 70.)];
+        let mut d = doc_with(&[outer, inner]);
+        let ids: Vec<u64> = d.strokes.iter().map(|s| s.id).collect();
+        make(&mut d, &ids).unwrap();
+        let g = crate::appearance::Graph::default();
+        for s in &mut d.strokes {
+            s.appearance = Some(g.clone());
+        }
+        let p = painted(&d);
+        assert_eq!(p.len(), 1);
+        let layers = outline::paint_layers(&p[0]).unwrap();
+        assert!(!layers.is_empty());
+        assert!(!filled(&d, Point::new(50., 50.)));
+    }
+
+    #[test]
     fn old_flattened_shape_becomes_editable() {
         let mut d = Document::default();
         let mut s = Stroke::new(d.id(), "古い形".into());
@@ -573,7 +620,8 @@ mod tests {
         d.strokes.push(s);
         let id = d.strokes[0].id;
         assert!(filled(&d, Point::new(10., 10.)) && !filled(&d, Point::new(50., 50.)));
-        let c = make(&mut d, &[id]).unwrap();
+        make(&mut d, &[id]).unwrap();
+        let c = d.strokes[0].compound.unwrap();
         assert_eq!(d.strokes.len(), 2);
         assert_eq!(d.strokes[0].id, id, "the first member keeps the id");
         assert!(d.strokes.iter().all(|s| s.contours.is_none() && s.compound == Some(c)));

@@ -91,6 +91,8 @@ const menuItems = computed<MenuItem[]>(() => {
     {label: '最背面へ', disabled: !any, action: () => ed.arrange('back')},
     {label: '', separator: true},
     {label: 'フォルダにまとめる', shortcut: '⌘G', action: () => emit('command', 'group')},
+    {label: '複合パスを作成', shortcut: '⌘8', disabled: !any, action: () => ed.makeCompound()},
+    {label: '複合パスを解除', shortcut: '⌥⇧⌘8', disabled: !sel.some(s => s.compound != null), action: () => ed.releaseCompound()},
     {label: 'ブレンド', shortcut: '⌥⌘B', disabled: sel.length !== 2 || sel.some(s => ed.blendOf(s.id)), action: () => emit('command', 'makeBlend')},
     {label: 'ブレンドを解除', shortcut: '⌥⇧⌘B', disabled: !sel.some(s => ed.blendOf(s.id)), action: () => emit('command', 'releaseBlend')},
     {label: one?.appearance ? '外観ノードを編集' : '外観ノードを開く', disabled: !one || !!one.guide, action: () => emit('command', 'openNodes')},
@@ -178,7 +180,7 @@ const widthOverlay = computed(() => {
   // The side being dragged, else the one under the pointer.
   const hot = d?.kind === 'width' ? {stroke: d.stroke, target: d.target, side: d.side} : cv.state.hoverGrip
   const alt = cv.state.alt
-  return selectedStrokes.value.filter(s => !s.contours).flatMap(s => cv.widthHandles(s).map(h => {
+  return selectedStrokes.value.filter(s => !s.contours && s.compound == null).flatMap(s => cv.widthHandles(s).map(h => {
     const g = cv.widthGrips(h)
     const t = cv.state.widthTarget
     const mine = !!hot && hot.stroke === s.id && hot.target === h.target

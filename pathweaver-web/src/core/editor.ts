@@ -6,6 +6,7 @@ import {computed, reactive, ref, shallowRef, triggerRef, watch} from 'vue'
 import {call, CoreError} from './wasm'
 import {createRenderQueue} from './renderQueue'
 import {blendProblem, syncBlends} from './blend'
+import {compoundGroups, gather, isHead, remapCompounds, SHARED_LOOK} from './compound'
 import type {Anchor, Cap, Document, Folder, Graph, Join, Render, RGB, Stroke, Vec2} from './types'
 
 export interface DrawStyle {fill: RGB | null; edge: RGB | null; width: number; join: Join; cap: Cap}
@@ -60,6 +61,7 @@ export function createEditor() {
 
   const blendSeen = new Map<number, string>()
   function changed() {
+    syncCompounds()
     syncShared()
     syncBlends(doc.value, () => nextId(), blendSeen)
     revision.value++
@@ -90,6 +92,51 @@ export function createEditor() {
       for (const o of users) if (o !== source) o.appearance = JSON.parse(JSON.stringify(g)) as Graph
       sharedSeen.set(id, sig(g))
     }
+  }
+
+  // A compound path is one shape: its members share one look (paint, line,
+  // appearance, fill rule, visibility, folder) and sit next to each other in
+  // the stacking order. An edit made on any member (the direct tool selects
+  // just one) goes to all — the member that changed since the last sync is
+  // the source, like the shared appearance above.
+  const compoundSeen = new Map<number, string>()
+  const lookSig = (o: Stroke) => JSON.stringify(SHARED_LOOK.map(k => o[k] ?? null), (k, v) => (k === 'png' && typeof v === 'string' ? `${v.length}:${v.slice(-48)}` : v))
+  function syncCompounds() {
+    const d = doc.value
+    gather(d)
+    const groups = compoundGroups(d.strokes)
+    for (const id of [...compoundSeen.keys()]) if (!groups.has(id)) compoundSeen.delete(id)
+    for (const [id, users] of groups) {
+      const sigs = users.map(lookSig)
+      if (sigs.every(v => v === sigs[0])) { compoundSeen.set(id, sigs[0]); continue }
+      const seen = compoundSeen.get(id)
+      const changedOnes = users.filter((_, i) => sigs[i] !== seen)
+      const source = changedOnes.find(o => o === active.value) ?? changedOnes[0] ?? users[0]
+      for (const o of users) {
+        if (o === source) continue
+        for (const k of SHARED_LOOK) {
+          const v = source[k]
+          if (v === undefined) delete (o as unknown as Record<string, unknown>)[k]
+          else (o as unknown as Record<string, unknown>)[k] = typeof v === 'object' ? JSON.parse(JSON.stringify(v)) : v
+        }
+      }
+      compoundSeen.set(id, lookSig(source))
+    }
+  }
+  const groups = computed(() => { void revision.value; return compoundGroups(doc.value.strokes) })
+  /** The paths that make up this one's shape: its compound's members, or itself. */
+  function membersOf(id: number): Stroke[] {
+    const s = findStroke(id)
+    if (!s) return []
+    return s.compound != null ? groups.value.get(s.compound) ?? [s] : [s]
+  }
+  /** Ids with every compound they touch completed (the selection tool takes a compound whole). */
+  function withCompounds(ids: number[]): number[] {
+    const out: number[] = []
+    for (const id of ids) for (const m of membersOf(id)) if (!out.includes(m.id)) out.push(m.id)
+    // keep the given active (last) path active
+    const last = ids[ids.length - 1]
+    return last !== undefined && out.includes(last) ? [...out.filter(v => v !== last), last] : out
   }
 
   /** Start a gesture. Nested begins are ignored; the outermost gesture wins. */
@@ -301,11 +348,15 @@ export function createEditor() {
     edit(d => {
       const moving = what.folder !== undefined
         ? d.strokes.filter(s => inFolder(s, what.folder!, d))
-        : d.strokes.filter(s => s.id === what.stroke)
+        : (() => { const s = d.strokes.find(v => v.id === what.stroke); return s?.compound != null ? d.strokes.filter(v => v.compound === s.compound) : d.strokes.filter(v => v.id === what.stroke) })()
       if (!moving.length && what.folder === undefined) return
       const rest = d.strokes.filter(s => !moving.includes(s))
-      const fromTop = Math.max(0, Math.min(rest.length, beforeIndex))
-      const at = rest.length - fromTop
+      // Positions count list rows: a compound path is one row (its first member).
+      const g = compoundGroups(rest)
+      const rows = rest.filter(s => s.blend_of == null && isHead(s, g))
+      const fromTop = Math.max(0, Math.min(rows.length, beforeIndex))
+      const above = rows[rows.length - fromTop]
+      const at = above ? rest.indexOf(above) : rest.length
       if (what.stroke !== undefined) for (const s of moving) s.folder = into
       else {
         const f = d.folders?.find(x => x.id === what.folder)
@@ -322,15 +373,19 @@ export function createEditor() {
     const target = findStroke(id)
     if (!target || !shown(target)) return
     anchors.value = []
+    // A compound path is picked whole (its first member active).
+    const all = membersOf(id).map(s => s.id)
+    if (all.length > 1) id = all[0]
+    const others = all.filter(v => v !== id)
     if (add) {
       selected.value = selected.value.includes(id)
-        ? selected.value.filter(v => v !== id)
-        : [...selected.value, id]
+        ? selected.value.filter(v => !all.includes(v))
+        : [...selected.value.filter(v => !all.includes(v)), ...others, id]
     } else if (!selected.value.includes(id)) {
-      selected.value = [id]
+      selected.value = [...others, id]
     } else {
       // Clicking an already selected path makes it active without dropping others.
-      selected.value = [...selected.value.filter(v => v !== id), id]
+      selected.value = [...selected.value.filter(v => !all.includes(v)), ...others, id]
     }
   }
   function selectAnchor(at: Anchor, add = false) {
@@ -394,11 +449,37 @@ export function createEditor() {
       return {...s, appearance: call<Graph>('graphConnect', {graph: g, from: v.node, to: g.output, port: 0})}
     } catch { return s }
   }
+  // Compound paths: the first member paints the whole shape (computed by the
+  // core from all members); the others draw only their own centerline, so
+  // they show and pick like any path but paint nothing twice.
+  const shapeCache = new Map<number, {key: string; stroke: Stroke}>()
+  function compoundShape(group: Stroke[], key: string): Stroke {
+    const head = group[0]
+    const hit = shapeCache.get(head.id)
+    if (hit && hit.key === key) return hit.stroke
+    let shape: Stroke
+    try { shape = call<Stroke>('compoundShape', {strokes: group}) } catch { shape = {...head, contours: []} }
+    shapeCache.set(head.id, {key, stroke: shape})
+    if (shapeCache.size > 2000) shapeCache.clear()
+    return shape
+  }
+  /** What a path paints: itself, its compound's shape (first member), or nothing but its line (other members). */
+  function painted(s: Stroke): {stroke: Stroke; key: string} {
+    if (s.compound == null) return {stroke: s, key: JSON.stringify(s)}
+    const group = groups.value.get(s.compound) ?? [s]
+    if (group[0] !== s) {
+      const line = {...s, fill: null, edge: null, appearance: null}
+      return {stroke: line, key: 'member:' + JSON.stringify(line)}
+    }
+    const key = 'compound:' + JSON.stringify(group)
+    return {stroke: compoundShape(group, key), key}
+  }
   function render(s0: Stroke): Render {
-    const s = viewed(s0)
+    const p = painted(s0)
+    const s = viewed(p.stroke)
     // 外観を表示しない (view setting): the plain look, nothing sent to the worker
     const looks = settings.showLooks
-    const key = (looks ? '' : 'plain:') + (s !== s0 ? `view:${viewer.value!.node}:` : '') + JSON.stringify(s)
+    const key = (looks ? '' : 'plain:') + (s !== p.stroke ? `view:${viewer.value!.node}:` : '') + p.key
     const hit = renderCache.get(s.id)
     if (hit && hit.key === key) return hit.render
     let r: Render
@@ -429,10 +510,12 @@ export function createEditor() {
   // or on when the worker finishes. Effects are counted only by exports of
   // the selection / whole drawing, which the core measures itself.
   const geometryCache = new Map<number, {key: string; render: Render}>()
-  function geometryRender(s: Stroke): Render | undefined {
-    if (!s.appearance?.enabled) return renders.value.get(s.id)
-    const plain = {...s, appearance: null}
-    const key = JSON.stringify(plain)
+  function geometryRender(s0: Stroke): Render | undefined {
+    if (!s0.appearance?.enabled || (s0.compound != null && !isHead(s0, groups.value))) return renders.value.get(s0.id)
+    const p = painted(s0)
+    const plain = {...p.stroke, appearance: null}
+    const key = 'geometry:' + p.key
+    const s = s0
     const hit = geometryCache.get(s.id)
     if (hit && hit.key === key) return hit.render
     const r = syncRender(plain)
@@ -456,7 +539,7 @@ export function createEditor() {
   const drawStyle = reactive<DrawStyle>({fill: null, edge: [32, 33, 36], width: 24, join: 'Miter', cap: 'Butt'})
   watch(() => [active.value?.id, revision.value], () => {
     const s = active.value
-    if (!s || s.contours) return
+    if (!s || s.contours || s.compound != null) return
     drawStyle.fill = s.fill ? [...s.fill] as RGB : null
     drawStyle.edge = s.edge ? [...s.edge] as RGB : null
     const ws = [s.start_width, s.end_width, ...s.widths.map(k => k.width)]
@@ -530,6 +613,7 @@ export function createEditor() {
         d.strokes.push(c)
         copies.push(c.id)
       }
+      remapCompounds(d.strokes.filter(s => copies.includes(s.id)), () => nextId(d))
       selected.value = copies
       anchors.value = []
     })
@@ -587,26 +671,59 @@ export function createEditor() {
   /** Illustrator's Make / Release Guides on the selected paths. */
   function makeGuides(on: boolean) {
     const ids = new Set(selected.value)
-    const targets = doc.value.strokes.filter(s => ids.has(s.id) && !!s.guide !== on && !s.contours)
+    const targets = doc.value.strokes.filter(s => ids.has(s.id) && !!s.guide !== on && !s.contours && s.compound == null)
     if (!targets.length) { status.value = on ? 'ガイドにするパスを選んでください' : '解除するガイドを選んでください'; return }
     edit(() => { for (const s of targets) s.guide = on || undefined })
     anchors.value = []
     status.value = on ? `${targets.length}本のパスをガイドにしました（⌥⌘5で解除）` : `${targets.length}本のガイドをパスに戻しました`
   }
 
+  // ---- compound paths (Object → Compound Path) ----
+  /** ⌘8: the selected paths become one compound path (holes where one lies inside another).
+   *  Old flattened shapes (pathfinder results, outlines from earlier versions) become editable on the way. */
+  function makeCompound() {
+    if (!selected.value.length) { status.value = '複合パスにするパスを選んでください'; return }
+    const ids = coreEdit<number[]>('makeCompound', {ids: selected.value})
+    if (!ids) return
+    selected.value = [...ids.slice(1), ids[0]]
+    anchors.value = []
+    status.value = ids.length > 1
+      ? '複合パスにしました。内側の形は穴になります（ダイレクト選択でアンカーを直せます・⌥⇧⌘8で解除）'
+      : '編集できるパスにしました（ダイレクト選択でアンカーを直せます）'
+  }
+  /** ⌥⇧⌘8: the members become separate paths again. */
+  function releaseCompound() {
+    const ids = coreEdit<number[]>('releaseCompound', {ids: selected.value})
+    if (!ids) return
+    selected.value = ids
+    anchors.value = []
+    status.value = `複合パスを解除しました（${ids.length}本のパス）`
+  }
+
   /** Stacking order of the selected paths (Illustrator's Arrange). Folders stay together. */
   function arrange(where: 'front' | 'forward' | 'backward' | 'back') {
-    const ids = new Set(selected.value)
+    const ids = new Set(withCompounds(selected.value))
     if (!ids.size) return
     edit(d => {
       const list = d.strokes
       if (where === 'front' || where === 'back') {
         const moving = list.filter(s => ids.has(s.id)), rest = list.filter(s => !ids.has(s.id))
         d.strokes = where === 'front' ? [...rest, ...moving] : [...moving, ...rest]
-      } else if (where === 'forward') {
-        for (let i = list.length - 2; i >= 0; i--) if (ids.has(list[i].id) && !ids.has(list[i + 1].id)) [list[i], list[i + 1]] = [list[i + 1], list[i]]
       } else {
-        for (let i = 1; i < list.length; i++) if (ids.has(list[i].id) && !ids.has(list[i - 1].id)) [list[i], list[i - 1]] = [list[i - 1], list[i]]
+        // Step past one neighbour — a compound path counts as one.
+        const units: Stroke[][] = []
+        for (const s of list) {
+          const prev = units[units.length - 1]
+          if (prev && s.compound != null && prev[0].compound === s.compound) prev.push(s)
+          else units.push([s])
+        }
+        const sel = (u: Stroke[]) => ids.has(u[0].id)
+        if (where === 'forward') {
+          for (let i = units.length - 2; i >= 0; i--) if (sel(units[i]) && !sel(units[i + 1])) [units[i], units[i + 1]] = [units[i + 1], units[i]]
+        } else {
+          for (let i = 1; i < units.length; i++) if (sel(units[i]) && !sel(units[i - 1])) [units[i], units[i - 1]] = [units[i - 1], units[i]]
+        }
+        d.strokes = units.flat()
       }
       regroup(d)
     })
@@ -662,6 +779,7 @@ export function createEditor() {
         d.strokes.push(c)
         ids.push(c.id)
       }
+      remapCompounds(d.strokes.filter(s => ids.includes(s.id)), () => nextId(d))
       call('validate', {doc: d})
       selected.value = ids
       anchors.value = []
@@ -680,7 +798,7 @@ export function createEditor() {
     history, dirty, active, renders, renderPending,
     begin, commit, cancel, inGesture, edit, coreEdit, changed, undo, redo, load, markSaved, markUnsaved,
     findStroke, nextId, shown, folderTree, inFolder, folderOf, groupSelection, ungroup, moveInList, regroup, selectPath, selectAnchor, clearSelection, isAnchorSelected,
-    blendOf, makeBlend, setBlendSteps, releaseBlend, expandBlend,
+    blendOf, makeBlend, setBlendSteps, releaseBlend, expandBlend, membersOf, withCompounds, makeCompound, releaseCompound,
     render, newPath, deleteSelection, duplicateSelection, copySelection, cutSelection, paste, makeGuides, arrange, hasClipboard,
   })
 }

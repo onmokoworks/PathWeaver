@@ -14,6 +14,7 @@ import {layout, setFolded} from '../core/layout'
 import {categoryOf, nodeInfo} from '../nodes/catalog'
 import {lookOf} from '../core/looks'
 import {placedHref} from '../core/knockout'
+import {compoundGroups, isHead} from '../core/compound'
 
 const props = defineProps<{ed: Editor; canvas?: Canvas}>()
 // レイヤー | アートボード (Illustrator keeps the two panels side by side)
@@ -66,7 +67,9 @@ function toggleLookEnabled(s: Stroke) { ed.edit(() => { if (s.appearance) s.appe
 const order = computed(() => {
   void ed.revision
   // Blend steps are generated: the list shows their sources (marked) only.
-  return ed.doc.strokes.filter(s => s.blend_of == null).reverse()
+  // A compound path is one row: its first member stands for it.
+  const groups = compoundGroups(ed.doc.strokes)
+  return ed.doc.strokes.filter(s => s.blend_of == null && isHead(s, groups)).reverse()
 })
 const rows = computed<Row[]>(() => {
   void ed.revision
@@ -124,7 +127,7 @@ const focusFolder = ref<number | null>(null)
 function clickPath(e: MouseEvent, id: number) { focusFolder.value = null; ed.selectPath(id, e.shiftKey || e.metaKey) }
 function clickFolder(e: MouseEvent, f: Folder) {
   focusFolder.value = f.id
-  const ids = order.value.filter(s => ed.inFolder(s, f.id) && ed.shown(s)).map(s => s.id)
+  const ids = ed.withCompounds(order.value.filter(s => ed.inFolder(s, f.id) && ed.shown(s)).map(s => s.id))
   ed.anchors = []
   ed.selected = e.shiftKey || e.metaKey ? [...new Set([...ed.selected, ...ids])] : ids
 }
@@ -315,7 +318,7 @@ function dropAt(y: number, moving: DataRow): Drop | null {
         </li>
         <li
           v-else data-row :data-path="row.stroke.id"
-          :class="{selected: ed.selected.includes(row.stroke.id), active: ed.active?.id === row.stroke.id, hidden: !ed.shown(row.stroke)}" :style="{paddingLeft: 10 + row.depth * 16 + (row.depth ? 8 : 0) + 'px'}"
+          :class="{selected: ed.membersOf(row.stroke.id).some(m => ed.selected.includes(m.id)), active: ed.active?.id === row.stroke.id, hidden: !ed.shown(row.stroke)}" :style="{paddingLeft: 10 + row.depth * 16 + (row.depth ? 8 : 0) + 'px'}"
           @pointerdown="onRowDown($event, row)" @click="clickPath($event, row.stroke.id)" @dblclick="startRename(row.key, row.stroke.name)"
         >
           <span class="thumb">
@@ -333,6 +336,7 @@ function dropAt(y: number, moving: DataRow): Drop | null {
           >
           <span v-else class="name" :title="row.stroke.name">{{ row.stroke.name }}</span>
           <span v-if="row.stroke.text" class="kind" title="文字（打ち直せます）"><Icon icon="material-symbols:title" /></span>
+          <span v-if="row.stroke.compound != null" class="kind ref" data-compound :title="`複合パス（${ed.membersOf(row.stroke.id).length}個の形。ダイレクト選択でアンカーを直せます）`">複合</span>
           <span v-if="ed.blendOf(row.stroke.id)" class="kind ref" data-blend-source :title="`ブレンドの端（間に${ed.blendOf(row.stroke.id)!.steps}段）`">ブレンド</span>
           <span v-if="row.stroke.image?.reference" class="kind ref" data-reference title="下絵：書き出されず、キャンバスでは選ばれません">下絵</span>
           <button

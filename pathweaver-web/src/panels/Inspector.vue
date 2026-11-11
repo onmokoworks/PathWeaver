@@ -14,7 +14,7 @@ import InputRadio from '../../vendor/tweeq/src/InputRadio/InputRadio.vue'
 import InputButton from '../../vendor/tweeq/src/InputButton/InputButton.vue'
 import InputDropdown from '../../vendor/tweeq/src/InputDropdown/InputDropdown.vue'
 import InputCheckbox from '../../vendor/tweeq/src/InputCheckbox/InputCheckbox.vue'
-import {fontFamilies, relayout} from '../core/textOutline'
+import {fontFamilies, outlineToPaths, relayout} from '../core/textOutline'
 import PaintField from './PaintField.vue'
 import PivotPicker from './PivotPicker.vue'
 import ArtboardPanel from './ArtboardPanel.vue'
@@ -53,14 +53,29 @@ const lineWidth = computed(() => {
   void ed.revision
   const s = active.value
   if (!s) return 0
-  if (s.contours) return s.edge_width
+  if (s.contours || s.compound != null) return s.edge_width
   const ws = [s.start_width, s.closed ? s.start_width : s.end_width, ...s.widths.filter(k => !k.interpolated).map(k => k.width)]
   return Math.max(...ws.map(w => w.left + w.right))
 })
 function setLineWidth(v: number) {
   ed.begin()
-  for (const s of strokes.value) ed.coreEdit('lineWidth', {stroke: s.id, value: v})
+  // A compound path's members share one line: setting it on one sets all.
+  for (const s of units.value) ed.coreEdit('lineWidth', {stroke: s.id, value: v})
 }
+/** One path per shape: a compound path counts once (its first member). */
+const units = computed(() => strokes.value.filter(s => s.compound == null || ed.membersOf(s.id)[0] === s || !strokes.value.includes(ed.membersOf(s.id)[0])))
+const shapeCount = computed(() => new Set(strokes.value.map(s => s.compound != null ? `c${s.compound}` : `p${s.id}`)).size)
+
+// ---- compound paths ----
+const compound = computed(() => strokes.value.find(s => s.compound != null) ?? null)
+const fillRule = computed(() => compound.value?.fill_rule ?? 'nonzero')
+function setFillRule(v: 'nonzero' | 'evenodd') {
+  const c = compound.value
+  if (!c) return
+  ed.edit(() => { if (v === 'nonzero') delete c.fill_rule; else c.fill_rule = v })
+}
+/** Shapes from earlier versions kept as flattened outlines (not text, not images). */
+const flattened = computed(() => strokes.value.filter(s => s.contours && !s.text && !s.image))
 const join = computed(() => same(s => s.join) ?? '')  // '' = mixed
 function setJoin(v: Join) { ed.edit(() => { for (const s of strokes.value) s.join = v }) }
 
@@ -86,10 +101,7 @@ function editTextOnCanvas() {
   props.canvas.setTool('select')
   props.canvas.editText(s.id)
 }
-function outlineTexts() {
-  const list = texts.value
-  ed.edit(() => { for (const s of list) { s.text = null; s.name = `${s.name}（アウトライン）` } })
-}
+function outlineTexts() { outlineToPaths(ed, texts.value) }
 
 // ---- blend ----
 const blend = computed(() => {
@@ -379,7 +391,7 @@ function setCap(end: 'start' | 'end', angle: number | null) {
     <!-- paths -->
     <template v-if="strokes.length && active">
       <ParameterGrid>
-        <ParameterHeading>{{ strokes.length > 1 ? `パス（${strokes.length}本）` : 'パス' }}</ParameterHeading>
+        <ParameterHeading>{{ shapeCount > 1 ? `パス（${shapeCount}本）` : compound && units.length === 1 ? '複合パス' : 'パス' }}</ParameterHeading>
         <Parameter label="名前" :hint="strokes.length > 1 ? '編集中のパス（最後に選択）の名前' : undefined">
           <InputString data-field="name" :model-value="active.name" @focus="begin" @update:model-value="v => { ed.begin(); active!.name = v; ed.changed() }" @confirm="commit" @blur="commit" />
         </Parameter>
@@ -446,7 +458,18 @@ function setCap(end: 'start' | 'end', angle: number | null) {
       <div v-if="canBlend" class="buttons">
         <InputButton subtle class="wide" icon="material-symbols:blur-linear" label="ブレンド（2つの間をつなぐ）" tooltip="⌥⌘B" data-testid="make-blend" @click="ed.makeBlend()" />
       </div>
-      <ParameterGrid v-if="strokes.length >= 2">
+      <ParameterGrid v-if="compound" data-testid="compound-props">
+        <ParameterHeading>複合パス</ParameterHeading>
+        <Parameter label="穴" hint="重なり：内側の形はどれも穴（偶奇）。向き：逆向きに回る形だけが穴（文字と同じ、0以外）">
+          <InputRadio data-field="fill-rule" :model-value="fillRule" :options="['evenodd', 'nonzero']" :labels="['重なり', '向き']" @update:model-value="v => setFillRule(v as 'nonzero' | 'evenodd')" />
+        </Parameter>
+      </ParameterGrid>
+      <div v-if="compound || flattened.length || shapeCount >= 2" class="buttons">
+        <InputButton v-if="flattened.length" subtle class="wide" icon="material-symbols:polyline-outline" label="編集できるパスにする" tooltip="⌘8：以前の版で作った折れ線の形を、アンカーを直せるパスにする" data-testid="make-editable" @click="ed.makeCompound()" />
+        <InputButton v-else-if="shapeCount >= 2" subtle icon="material-symbols:join" label="複合パスにする" tooltip="⌘8：重なった内側の形が穴になる" data-testid="make-compound" @click="ed.makeCompound()" />
+        <InputButton v-if="compound" subtle icon="material-symbols:call-split" label="複合パスを解除" tooltip="⌥⇧⌘8" data-testid="release-compound" @click="ed.releaseCompound()" />
+      </div>
+      <ParameterGrid v-if="shapeCount >= 2">
         <Parameter label="パスファインダー" hint="選んだパスの見えている輪郭どうしを合成します（効果は焼き込み）。前後は重なり順">
           <div class="pathfinder" data-testid="pathfinder">
             <InputButton
@@ -474,7 +497,7 @@ function setCap(end: 'start' | 'end', angle: number | null) {
       <div class="buttons">
         <InputButton v-if="!onlyImages" subtle class="wide" icon="material-symbols:account-tree-outline" :label="active.appearance ? '外観ノードを編集' : '外観ノードを開く'" @click="emit('openNodes')" />
         <InputButton subtle icon="material-symbols:content-copy-outline" label="複製" tooltip="⌘D" @click="ed.duplicateSelection()" />
-        <InputButton subtle icon="material-symbols:delete-outline" :label="strokes.length > 1 ? `パスを削除（${strokes.length}本）` : 'パスを削除'" @click="deletePaths" />
+        <InputButton subtle icon="material-symbols:delete-outline" :label="shapeCount > 1 ? `パスを削除（${shapeCount}本）` : 'パスを削除'" @click="deletePaths" />
       </div>
     </template>
 

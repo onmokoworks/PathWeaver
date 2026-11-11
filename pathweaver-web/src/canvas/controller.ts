@@ -924,8 +924,9 @@ export function createCanvas(ed: Editor) {
       }
     }
     // ⌘ + centerline: add a width point (it follows the current profile).
+    // A compound path's members have no width profile (their line is one width).
     const seg = segmentAt(p, 8)
-    if (seg) {
+    if (seg && stroke(seg.stroke)?.compound == null) {
       if (!ed.selected.includes(seg.stroke)) ed.selectPath(seg.stroke)
       const id = ed.coreEdit<number>('insertWidth', {stroke: seg.stroke, segment: seg.segment, t: seg.t})
       if (id !== undefined) {
@@ -1208,6 +1209,8 @@ export function createCanvas(ed: Editor) {
             if (!pickable(s) || !r) continue
             if (rectHitsRings(b, rings(r)) && !ed.selected.includes(s.id)) ed.selected = [...ed.selected, s.id]
           }
+          // A compound path is taken whole, also when only its fill was touched.
+          ed.selected = ed.withCompounds(ed.selected)
         }
         return
       }

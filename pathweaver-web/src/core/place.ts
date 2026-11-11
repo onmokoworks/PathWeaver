@@ -4,8 +4,9 @@
 import {call} from './wasm'
 import type {Editor} from './editor'
 import type {Matrix, RGB, Stroke, Vec2} from './types'
-import {flatten, parsePath, transformSubpath, type Affine, type Subpath} from './svgPath'
+import {nodesOf, parsePath, transformSubpath, type Affine, type Subpath} from './svgPath'
 import {apply, baselineTop, DEFAULT_FONT, outlineText} from './textOutline'
+import {pathsFromRings} from './compound'
 
 const MAX_SIDE = 4096
 
@@ -140,45 +141,6 @@ function shapeData(el: Element): string | null {
   return null
 }
 
-const near = (a: Vec2, b: Vec2) => Math.hypot(a.x - b.x, a.y - b.y) < 1e-6
-/** A subpath as an editable PathWeaver path (anchors + handles). */
-function nodesOf(ed: Editor, d: {next_id: number}, sp: Subpath, closed: boolean) {
-  const segs = [...sp.segs]
-  let wrap: Vec2 | null = null
-  // Closed and ending on its start: that last segment's handle belongs to the first anchor.
-  if (closed && segs.length > 1 && near(segs.at(-1)!.p, sp.start)) wrap = segs.pop()!.c2
-  const pts = [sp.start, ...segs.map(s => s.p)]
-  const nodes = pts.map(p => ({id: ed.nextId(d as never), p: {...p}, incoming: {x: 0, y: 0}, outgoing: {x: 0, y: 0}, smooth: false}))
-  segs.forEach((s, i) => {
-    const a = nodes[i], b = nodes[i + 1]
-    a.outgoing = {x: s.c1.x - a.p.x, y: s.c1.y - a.p.y}
-    b.incoming = {x: s.c2.x - b.p.x, y: s.c2.y - b.p.y}
-  })
-  if (wrap) {
-    // The closing curve runs from the last anchor back to the first.
-    const last = sp.segs.at(-1)!
-    nodes.at(-1)!.outgoing = {x: last.c1.x - nodes.at(-1)!.p.x, y: last.c1.y - nodes.at(-1)!.p.y}
-    nodes[0].incoming = {x: wrap.x - nodes[0].p.x, y: wrap.y - nodes[0].p.y}
-  }
-  // Straight segments carry no handles; collinear handles are smooth anchors.
-  const tiny = (v: Vec2) => Math.hypot(v.x, v.y) < 1e-6
-  segs.forEach((s, i) => {
-    const a = nodes[i], b = nodes[i + 1]
-    const ab = {x: b.p.x - a.p.x, y: b.p.y - a.p.y}
-    const off = (v: Vec2) => Math.abs(v.x * ab.y - v.y * ab.x) / (Math.hypot(ab.x, ab.y) || 1)
-    if (off(a.outgoing) < 1e-6 && off(b.incoming) < 1e-6 && Math.abs(Math.hypot(a.outgoing.x, a.outgoing.y) * 3 - Math.hypot(ab.x, ab.y)) < 1e-3) {
-      a.outgoing = {x: 0, y: 0}; b.incoming = {x: 0, y: 0}
-    }
-  })
-  for (const n of nodes) {
-    if (tiny(n.incoming) || tiny(n.outgoing)) continue
-    const cross = n.incoming.x * n.outgoing.y - n.incoming.y * n.outgoing.x
-    const dot = n.incoming.x * n.outgoing.x + n.incoming.y * n.outgoing.y
-    n.smooth = Math.abs(cross) < 1e-3 * Math.hypot(n.incoming.x, n.incoming.y) * Math.hypot(n.outgoing.x, n.outgoing.y) && dot < 0
-  }
-  return nodes
-}
-
 interface Imported {strokes: Stroke[]; skipped: number; texts: Stroke[]}
 
 /** Read an SVG document into strokes (not yet in the document). */
@@ -263,21 +225,20 @@ async function readSvg(ed: Editor, d: {next_id: number; assets?: Record<string, 
       const join = cs.strokeLinejoin === 'round' ? 'Round' : cs.strokeLinejoin === 'bevel' ? 'Bevel' : 'Miter'
       const cap = cs.strokeLinecap === 'round' ? 'Round' : cs.strokeLinecap === 'square' ? 'Square' : undefined
       if (fill && subs.length > 1) {
-        // Several subpaths (holes, separate islands): one filled shape.
-        const rings = subs.map(sp => flatten(sp))
-        const s = blankStroke(ed.nextId(d as never), name)
-        s.closed = true
-        s.fill = fill
-        s.contours = call<Vec2[][]>('normalizeRings', {rings, evenodd: cs.fillRule === 'evenodd'})
-        if (!s.contours.length) continue
-        if (edge) { s.edge = edge; s.edge_width = width }
-        s.join = join
-        out.strokes.push(s)
+        // Several subpaths (holes, separate islands): one compound path whose
+        // members keep the file's curves; the file's fill rule decides holes.
+        const t = blankStroke(0, name)
+        t.fill = fill
+        if (edge) { t.edge = edge; t.edge_width = width }
+        t.join = join
+        const rings = subs.map(sp => nodesOf(sp, true, () => 0).map(({id: _, ...n}) => n))
+        const made = pathsFromRings(t, rings, cs.fillRule === 'evenodd' ? 'evenodd' : 'nonzero', () => ed.nextId(d as never))
+        out.strokes.push(...made)
         continue
       }
       for (const sp of subs) {
         const closed = sp.closed || !!fill
-        const nodes = nodesOf(ed, d, sp, closed)
+        const nodes = nodesOf(sp, closed, () => ed.nextId(d as never))
         if (nodes.length < 2) continue
         const s = blankStroke(ed.nextId(d as never), subs.length > 1 ? `${name} ${out.strokes.length + 1}` : name)
         s.closed = closed

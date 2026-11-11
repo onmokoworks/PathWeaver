@@ -175,8 +175,9 @@ test('H-04 pathfinder: two overlapping paths → minus front, one undo restores 
   await expect(pf.locator('[data-op]')).toHaveCount(6)
   await pf.locator('[data-op="MinusFront"]').click()
   let d = await doc(page)
-  expect(d.strokes.length).toBe(1)
-  expect(d.strokes[0].contours.length).toBe(2) // the horizontal bar cut in two
+  // the horizontal bar cut in two: one compound path of two editable pieces
+  expect(d.strokes.length).toBe(2)
+  expect(d.strokes.every((s: any) => !s.contours && s.compound === d.strokes[0].compound && s.nodes.length === 4)).toBe(true)
   await page.getByTestId('canvas').hover()
   await page.keyboard.press('Meta+z')
   d = await doc(page)

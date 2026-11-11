@@ -22,10 +22,10 @@ import {isFolded, layout, setFolded, toggleFolded, type PanelId} from './core/la
 import {settings} from './core/settings'
 import {createHost, isNative} from './host'
 import {call} from './core/wasm'
-import type {Document, Vec2} from './core/types'
+import type {Document, Stroke, Vec2} from './core/types'
 import {placeData, placeFiles, type PlaceTarget} from './core/place'
 import {SHAPES, shapeInfo, type ShapeKind} from './core/shapes'
-import {DEFAULT_FONT, outlineText, relayout} from './core/textOutline'
+import {DEFAULT_FONT, outlineText, outlineToPaths, relayout} from './core/textOutline'
 import {exportAssets} from './core/knockout'
 
 useAppConfigStore().appId = 'pathweaver'
@@ -119,6 +119,8 @@ const commands: Record<string, () => void> = {
   makeBlend: () => ed.makeBlend(),
   releaseBlend: () => { const b = ed.selected.map(id => ed.blendOf(id)).find(Boolean); if (b) ed.releaseBlend(b.id) },
   expandBlend: () => { const b = ed.selected.map(id => ed.blendOf(id)).find(Boolean); if (b) ed.expandBlend(b.id) },
+  makeCompound: () => ed.makeCompound(),
+  releaseCompound: () => ed.releaseCompound(),
 }
 /** Where placed material goes: the given world point, else the middle of the view. */
 function placeTarget(at?: Vec2): PlaceTarget {
@@ -127,12 +129,12 @@ function placeTarget(at?: Vec2): PlaceTarget {
   const v = canvas.view
   return {ed, at: at ?? canvas.toWorld({x: v.width / 2, y: v.height / 2}), viewSize: {w: v.width / v.zoom, h: v.height / v.zoom}}
 }
-/** Type → Create Outlines: the selected text becomes plain shapes. */
-function createOutlines() {
-  const texts = ed.selected.map(id => ed.findStroke(id)).filter(s => s?.text)
+/** Type → Create Outlines: the selected text becomes editable paths (a compound path per text). */
+async function createOutlines() {
+  const texts = ed.selected.map(id => ed.findStroke(id)).filter((s): s is Stroke => !!s?.text)
   if (!texts.length) { ed.status = 'アウトライン化する文字を選んでください'; return }
-  ed.edit(() => { for (const s of texts) { s!.text = null; s!.name = `${s!.name}（アウトライン）` } })
-  ed.status = `${texts.length}個の文字をアウトライン化しました`
+  const n = await outlineToPaths(ed, texts)
+  if (n) ed.status = `${n}個の文字をアウトライン化しました（ダイレクト選択でアンカーを直せます）`
 }
 function onDrop(e: DragEvent) {
   const files = [...(e.dataTransfer?.files ?? [])]
@@ -190,6 +192,7 @@ function onKeyDown(e: KeyboardEvent) {
   if (mod && e.key === ',') { settingsOpen.value = true; e.preventDefault(); return }
   if (mod && k === 'g') { (e.shiftKey ? commands.ungroup : commands.group)(); e.preventDefault(); return }
   if (mod && e.code === 'Digit5') { ed.makeGuides(!e.altKey); e.preventDefault(); return }
+  if (mod && e.code === 'Digit8') { (e.altKey && e.shiftKey ? commands.releaseCompound : commands.makeCompound)(); e.preventDefault(); return }
   // Paths on the clipboard (text fields keep their own copy/paste above).
   // ⌘ only: Ctrl+X belongs to the node editor (dissolve).
   if (e.metaKey && !e.shiftKey && (k === 'c' || k === 'x')) {
