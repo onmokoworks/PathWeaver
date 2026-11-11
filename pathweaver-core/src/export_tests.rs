@@ -205,7 +205,7 @@ fn text_images_and_appearance() {
         })
         .collect()]);
     t.nodes.clear();
-    t.text = Some(Text { text: "あ\"<".into(), font: "Hiragino Sans".into(), size: 20., line_height: 1.2, matrix: [1., 0., 0., 1., 0., 0.] });
+    t.text = Some(Text { text: "あ\"<".into(), font: "Hiragino Sans".into(), size: 20., line_height: 1.2, matrix: [1., 0., 0., 1., 0., 0.], ..Default::default() });
     let mut img = square(&mut d, 0., 0., 10.);
     img.image = Some(Placed { asset: "a".into(), width: 4., height: 2., matrix: [2., 0., 0., 2., 5., 6.], opacity: 0.5, reference: false, knockout: Some(crate::model::Knockout::Black) });
     let mut reference = img.clone();

@@ -14,7 +14,7 @@ import InputRadio from '../../vendor/tweeq/src/InputRadio/InputRadio.vue'
 import InputButton from '../../vendor/tweeq/src/InputButton/InputButton.vue'
 import InputDropdown from '../../vendor/tweeq/src/InputDropdown/InputDropdown.vue'
 import InputCheckbox from '../../vendor/tweeq/src/InputCheckbox/InputCheckbox.vue'
-import {fontFamilies, relayout} from '../core/textOutline'
+import {canCarryText, detachText, fontFamilies, relayout} from '../core/textOutline'
 import PaintField from './PaintField.vue'
 import PaintRows from './PaintRows.vue'
 import PivotPicker from './PivotPicker.vue'
@@ -24,7 +24,7 @@ import {vTooltip} from '../../vendor/tweeq/src/Tooltip'
 import type {Editor} from '../core/editor'
 import type {Canvas} from '../canvas/controller'
 import {call} from '../core/wasm'
-import type {Cap, CornerWidget, Document, Join, Knockout, Stroke} from '../core/types'
+import type {Cap, CornerWidget, Document, Join, Knockout, RGB, Stroke, TextPath, TextSpec} from '../core/types'
 
 const props = defineProps<{ed: Editor; canvas: Canvas}>()
 const emit = defineEmits<{openNodes: []}>()
@@ -67,12 +67,46 @@ const fontOptions = computed(() => {
   const f = text.value?.font
   return f && !fonts.value.includes(f) ? [f, ...fonts.value] : fonts.value
 })
-async function setText(patch: {font?: string; size?: number; line_height?: number}, once = false) {
+async function setText(patch: Partial<Omit<TextSpec, 'text' | 'matrix' | 'on_path'>>, once = false) {
   ed.begin()
   for (const s of texts.value) Object.assign(s.text!, patch)
   ed.changed()
   const done = Promise.all(texts.value.map(s => relayout(ed, s)))
   if (once) { await done; ed.commit() }
+}
+const ALIGNS = ['left', 'center', 'right', 'justify'] as const
+// ---- text on a path ----
+const onPath = computed(() => { void ed.revision; return text.value?.on_path ?? null })
+/** Position and side on the path (every selected text on a path). */
+function setOnPath(patch: Partial<Omit<TextPath, 'stroke'>>) {
+  ed.begin()
+  for (const s of texts.value) if (s.text!.on_path) Object.assign(s.text!.on_path, patch)
+  ed.changed()
+}
+/** One text and one ordinary path selected: the text can go onto the path. */
+const carrier = computed(() => {
+  if (texts.value.length !== 1 || strokes.value.length !== 2) return null
+  const p = strokes.value.find(s => !s.text)
+  return canCarryText(p) && texts.value[0].text!.on_path?.stroke !== p.id ? p : null
+})
+async function attachToPath() {
+  const p = carrier.value, s = texts.value[0]
+  if (!p || !s) return
+  ed.begin()
+  s.text!.on_path = {stroke: p.id, offset: 0}
+  ed.changed()
+  await relayout(ed, s)
+  ed.commit()
+  ed.selected = [s.id]
+  ed.status = 'パスに沿わせました。パスを変えると文字も追従します'
+}
+async function detachFromPath() {
+  const list = texts.value.filter(s => s.text!.on_path)
+  ed.begin()
+  for (const s of list) detachText(ed.doc, s)
+  ed.changed()
+  await Promise.all(list.map(s => relayout(ed, s)))
+  ed.commit()
 }
 function editTextOnCanvas() {
   const s = texts.value.at(-1)
@@ -438,10 +472,32 @@ function setCap(end: 'start' | 'end', angle: number | null) {
         <Parameter label="行送り" hint="文字の大きさに対する行の高さ">
           <InputNumber data-field="line-height" :model-value="r2(text.line_height)" :min="0.5" :max="5" :step="0.05" :bar="false" @focus="begin" @update:model-value="v => setText({line_height: v})" @confirm="commit" @blur="commit" />
         </Parameter>
+        <Parameter label="揃え" :hint="onPath ? 'パス上の位置を基準に揃える（両端：パスの終わりまで広げる）' : '文字の基準点を動かさずに揃える（両端：最後の行以外を最も長い行に合わせる）'">
+          <InputRadio data-field="text-align" :model-value="text.align ?? 'left'" :options="[...ALIGNS]" :labels="['左', '中央', '右', '両端']" :icons="['material-symbols:format-align-left', 'material-symbols:format-align-center', 'material-symbols:format-align-right', 'material-symbols:format-align-justify']" @update:model-value="v => setText({align: v as TextSpec['align']}, true)" />
+        </Parameter>
+        <Parameter label="字送り" hint="文字の間隔。1/1000 em 単位で、＋で広げ −で詰める">
+          <InputNumber data-field="tracking" :model-value="Math.round(text.tracking ?? 0)" :min="-1000" :max="10000" :step="10" :bar="false" @focus="begin" @update:model-value="v => setText({tracking: v})" @confirm="commit" @blur="commit" />
+        </Parameter>
+        <Parameter label="ベースライン" hint="文字を上下にずらす（＋で上）">
+          <InputNumber data-field="baseline-shift" :model-value="r2(text.baseline_shift ?? 0)" :min="-1000" :max="1000" :bar="false" suffix=" pt" @focus="begin" @update:model-value="v => setText({baseline_shift: v})" @confirm="commit" @blur="commit" />
+        </Parameter>
+        <Parameter label="カーニング" hint="フォントに入っている、文字の組み合わせごとの詰め">
+          <InputCheckbox data-field="kerning" :model-value="text.kerning !== false" label="フォントのカーニング" @update:model-value="v => setText({kerning: v}, true)" />
+        </Parameter>
+        <template v-if="onPath">
+          <Parameter label="パス上の位置" hint="パスの長さに対する位置。揃えの基準になる（左揃えなら書き出し）">
+            <InputNumber data-field="path-offset" :model-value="r2(onPath.offset * 100)" :min="0" :max="100" suffix="%" @focus="begin" @update:model-value="v => setOnPath({offset: v / 100})" @confirm="commit" @blur="commit" />
+          </Parameter>
+          <Parameter label="反対側" hint="パスの反対側に、逆向きに並べる">
+            <InputCheckbox data-field="path-flip" :model-value="!!onPath.flip" label="反対側に並べる" @update:model-value="v => { setOnPath({flip: v}); commit() }" />
+          </Parameter>
+        </template>
       </ParameterGrid>
       <div v-if="text" class="buttons">
         <InputButton subtle icon="material-symbols:edit-outline" label="文字を打ち直す" tooltip="キャンバスで文字をダブルクリックしても同じ" @click="editTextOnCanvas" />
         <InputButton subtle icon="material-symbols:format-shapes-outline" label="アウトライン化" tooltip="⇧⌘O：文字をただの形にする（打ち直せなくなる）" data-testid="outline-text" @click="outlineTexts" />
+        <InputButton v-if="carrier" subtle class="wide" icon="material-symbols:route-outline" label="パスに沿わせる" tooltip="選んだパスに沿って文字を並べる（パスを変えると文字も追従）" data-testid="attach-path" @click="attachToPath" />
+        <InputButton v-if="onPath" subtle class="wide" icon="material-symbols:link-off" label="パスから外す" tooltip="ふつうの文字に戻す（パスはそのまま残る）" data-testid="detach-path" @click="detachFromPath" />
       </div>
       <ParameterGrid v-if="image" data-testid="image-props">
         <ParameterHeading>配置画像</ParameterHeading>
