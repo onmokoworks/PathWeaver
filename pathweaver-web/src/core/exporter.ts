@@ -1,11 +1,13 @@
-// Export: SVG, PNG or JPEG of artboards, the selection, or the whole drawing.
-// The core writes the SVG (framed by the artboard); pictures are that SVG
-// drawn into a canvas at the chosen scale, so both always look the same.
+// Export: SVG, PDF, PNG or JPEG of artboards, the selection, or the whole drawing.
+// The core writes the SVG (framed by the artboard; folders as groups, lines
+// kept as lines unless outlined) and the PDF (one page per frame). Pictures
+// are the painted outlines drawn into a canvas at the chosen scale, so they
+// look exactly like the canvas.
 import {call} from './wasm'
 import {exportAssets} from './knockout'
 import type {Document, RGB} from './types'
 
-export type ExportFormat = 'svg' | 'png' | 'jpeg'
+export type ExportFormat = 'svg' | 'pdf' | 'png' | 'jpeg'
 export type ExportTarget = 'artboards' | 'selection' | 'all'
 export interface ExportOptions {
   target: ExportTarget
@@ -19,14 +21,17 @@ export interface ExportOptions {
   background: RGB | null
   /** File name without extension. */
   base: string
+  /** SVG / PDF: every line as its filled outline (輪郭にする). Otherwise a
+   *  line of one width stays a line; a varying width is always an outline. */
+  outline?: boolean
 }
-/** One output file: text (SVG) or base64 bytes (pictures). */
+/** One output file: text (SVG) or base64 bytes (PDF, pictures). */
 export interface ExportFile {name: string; mime: string; text?: string; base64?: string}
 
 /** The largest picture side: beyond this WebKit's canvas gives up. */
 export const MAX_SIDE = 16384
-const EXT: Record<ExportFormat, string> = {svg: 'svg', png: 'png', jpeg: 'jpg'}
-const MIME: Record<ExportFormat, string> = {svg: 'image/svg+xml', png: 'image/png', jpeg: 'image/jpeg'}
+const EXT: Record<ExportFormat, string> = {svg: 'svg', pdf: 'pdf', png: 'png', jpeg: 'jpg'}
+const MIME: Record<ExportFormat, string> = {svg: 'image/svg+xml', pdf: 'application/pdf', png: 'image/png', jpeg: 'image/jpeg'}
 const safe = (s: string) => s.replace(/[\\/:*?"<>|]/g, '_').trim() || 'アートボード'
 
 type Frame = [number, number, number, number]
@@ -57,15 +62,52 @@ export function frames(d: Document, o: ExportOptions): {name: string; frame: Fra
 export async function exportFiles(d: Document, o: ExportOptions): Promise<ExportFile[]> {
   const doc = {...scoped(d, o), assets: await exportAssets(d)}
   const bg = o.format === 'jpeg' ? (o.background ?? [255, 255, 255]) : o.background
+  const list = frames(d, o)
+  const outline = !!o.outline
+  if (o.format === 'pdf') {
+    // one PDF, a page per frame
+    if (!list.length) return []
+    const base64 = call<string>('exportPdf', {doc: {...doc, assets: await pdfAssets(doc.assets)}, frames: list.map(f => f.frame), background: o.background, outline})
+    return [{name: `${list.length === 1 ? list[0].name : o.base}.pdf`, mime: MIME.pdf, base64}]
+  }
   const out: ExportFile[] = []
-  for (const f of frames(d, o)) {
-    // SVG keeps a background only when one was asked for
-    const svg = call<string>('svg', {doc, frame: f.frame, background: o.format === 'svg' ? o.background : null})
+  for (const f of list) {
     const name = `${f.name}.${EXT[o.format]}`
-    if (o.format === 'svg') { out.push({name, mime: MIME.svg, text: svg}); continue }
+    if (o.format === 'svg') {
+      // SVG keeps a background only when one was asked for
+      out.push({name, mime: MIME.svg, text: call<string>('exportSvg', {doc, frame: f.frame, background: o.background, outline})})
+      continue
+    }
+    const svg = call<string>('svg', {doc, frame: f.frame, background: null})
     out.push({name, mime: MIME[o.format], base64: await rasterize(svg, f.frame[2], f.frame[3], o.scale, o.format, bg)})
   }
   return out
+}
+
+/** The PDF writer takes JPEG as it is and 8-bit RGB / RGBA PNG; anything
+ *  else (GIF, WebP, palette or 16-bit PNG) is redrawn as a plain PNG. */
+async function pdfAssets(assets: Record<string, string>): Promise<Record<string, string>> {
+  const out: Record<string, string> = {}
+  for (const [k, url] of Object.entries(assets)) out[k] = /^data:image\/jpe?g;base64,/.test(url) || plainPng(url) ? url : await redraw(url)
+  return out
+}
+function plainPng(url: string): boolean {
+  const m = /^data:image\/png;base64,(.{0,48})/.exec(url)
+  if (!m) return false
+  try {
+    const head = atob(m[1].slice(0, 40))
+    // IHDR: bit depth (24), colour type (25), interlace (28)
+    return head.charCodeAt(24) === 8 && [2, 6].includes(head.charCodeAt(25)) && head.charCodeAt(28) === 0
+  } catch { return false }
+}
+async function redraw(url: string): Promise<string> {
+  const img = new Image()
+  img.src = url
+  await img.decode()
+  const c = document.createElement('canvas')
+  c.width = img.naturalWidth; c.height = img.naturalHeight
+  c.getContext('2d')!.drawImage(img, 0, 0)
+  return c.toDataURL('image/png')
 }
 
 /** Pixel size of a frame at a scale (clamped to what a canvas can hold). */
