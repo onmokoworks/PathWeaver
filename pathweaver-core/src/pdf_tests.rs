@@ -111,3 +111,22 @@ fn huge_pages_use_a_user_unit_and_bad_frames_are_refused() {
     assert!(super::pdf(&d, &[], None, Options::default()).is_err());
     assert!(super::pdf(&d, &[[0., 0., 0., 10.]], None, Options::default()).is_err());
 }
+
+#[test]
+fn gradient_fills_are_shadings() {
+    use crate::paint::{Gradient, GradientStop};
+    let mut d = Document::default();
+    let mut s = square(&mut d, 0., 0., 100.);
+    let stops = vec![
+        GradientStop { offset: 0.2, color: [255, 0, 0], opacity: 1. },
+        GradientStop { offset: 0.5, color: [0, 255, 0], opacity: 1. },
+        GradientStop { offset: 1., color: [0, 0, 255], opacity: 1. },
+    ];
+    s.fill_gradient = Some(Gradient::radial(kurbo::Point::new(50., 50.), 50., stops));
+    d.strokes = vec![s];
+    let pdf = pdf(&d, &[[0., 0., 100., 100.]], None, Options::default()).unwrap();
+    let objs = objects(&pdf);
+    assert!(objs.iter().any(|o| o.contains("/Shading << /Sh0 << /ShadingType 3") && o.contains("/Bounds [0.2 0.5]")), "{objs:?}");
+    let pages = contents(&pdf, &objs);
+    assert!(pages[0].contains("W n\n") && pages[0].contains("/Sh0 sh\n"));
+}

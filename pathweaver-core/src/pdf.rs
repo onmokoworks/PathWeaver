@@ -8,6 +8,7 @@ use kurbo::{Affine, BezPath, PathEl, Point};
 
 use super::export::{num, scene, Item, Options, Picture, Shape, Source};
 use super::model::{Cap, Document, Join};
+use super::paint::{Gradient, GradientKind};
 
 /// Largest page side most PDF readers accept (200 in); bigger pages use UserUnit.
 const MAX_PAGE: f64 = 14400.;
@@ -45,6 +46,8 @@ fn flate(data: &[u8]) -> Vec<u8> {
 #[derive(Default)]
 struct Resources {
     states: HashMap<(u32, u32), String>,
+    /// Gradient shadings (dictionaries), named Sh0, Sh1, … in order.
+    shadings: Vec<String>,
     images: HashMap<String, (String, usize)>,
 }
 
@@ -95,18 +98,68 @@ impl Pdf {
         let n = self.res.states.len();
         Some(self.res.states.entry(key).or_insert_with(|| format!("GS{n}")).clone())
     }
+    /// A shading for `g` in its own unit space (linear 0→1 on x, radial the
+    /// unit circle), padded past the ends like the canvas.
+    fn shading(&mut self, g: &Gradient) -> String {
+        let stops = g.sorted_stops();
+        let col = |c: [u8; 3]| format!("[{}]", rgb(c));
+        let function = match stops.as_slice() {
+            [] => "<< /FunctionType 2 /Domain [0 1] /C0 [0 0 0] /C1 [0 0 0] /N 1 >>".to_string(),
+            [one] => format!("<< /FunctionType 2 /Domain [0 1] /C0 {} /C1 {} /N 1 >>", col(one.color), col(one.color)),
+            _ => {
+                // one linear piece per pair of stops, padded to 0 and 1
+                let mut pts: Vec<(f64, [u8; 3])> = stops.iter().map(|s| (s.offset.clamp(0., 1.), s.color)).collect();
+                if pts[0].0 > 0. {
+                    pts.insert(0, (0., pts[0].1));
+                }
+                if pts.last().unwrap().0 < 1. {
+                    pts.push((1., pts.last().unwrap().1));
+                }
+                let pieces: Vec<String> = pts.windows(2).map(|w| format!("<< /FunctionType 2 /Domain [0 1] /C0 {} /C1 {} /N 1 >>", col(w[0].1), col(w[1].1))).collect();
+                let bounds: Vec<String> = pts[1..pts.len() - 1].iter().map(|p| num(p.0)).collect();
+                let encode = vec!["0 1"; pieces.len()].join(" ");
+                format!("<< /FunctionType 3 /Domain [0 1] /Functions [{}] /Bounds [{}] /Encode [{encode}] >>", pieces.join(" "), bounds.join(" "))
+            }
+        };
+        let (kind, coords) = match g.kind {
+            GradientKind::Linear => (2, "0 0 1 0"),
+            GradientKind::Radial => (3, "0 0 0 0 0 1"),
+        };
+        let n = self.res.shadings.len();
+        self.res.shadings.push(format!("<< /ShadingType {kind} /ColorSpace /DeviceRGB /Coords [{coords}] /Function {function} /Extend [true true] >>"));
+        format!("Sh{n}")
+    }
     fn shape(&mut self, s: &Shape, c: &mut String) {
         if s.path.elements().is_empty() || (s.fill.is_none() && s.line.is_none()) {
             return;
         }
+        // A gradient fill: clip to the path and paint the shading through it,
+        // then the line (if any) on its own. Per-stop opacity becomes the
+        // paint's opacity times the stops' mean (PDF shadings have no alpha).
+        if let Some(f) = s.fill.as_ref().filter(|f| f.gradient.is_some()) {
+            let g = f.gradient.as_ref().unwrap();
+            let mean = if g.stops.is_empty() { 1. } else { g.stops.iter().map(|t| t.opacity).sum::<f64>() / g.stops.len() as f64 };
+            let name = self.shading(g);
+            c.push_str("q\n");
+            if let Some(gs) = self.state(f.opacity * mean, 1.) {
+                let _ = writeln!(c, "/{gs} gs");
+            }
+            path_ops(&s.path, c);
+            let _ = writeln!(c, "W n\n{} cm\n/{name} sh\nQ", matrix(g.affine()));
+            if s.line.is_some() {
+                self.shape(&Shape { path: s.path.clone(), fill: None, line: s.line.clone() }, c);
+            }
+            return;
+        }
         c.push_str("q\n");
-        if let Some(gs) = self.state(s.fill.map_or(1., |p| p.opacity), s.line.map_or(1., |l| l.paint.opacity)) {
+        if let Some(gs) = self.state(s.fill.as_ref().map_or(1., |p| p.opacity), s.line.as_ref().map_or(1., |l| l.paint.opacity)) {
             let _ = writeln!(c, "/{gs} gs");
         }
-        if let Some(f) = s.fill {
+        if let Some(f) = &s.fill {
             let _ = writeln!(c, "{} rg", rgb(f.color));
         }
-        if let Some(l) = s.line {
+        // A gradient line is drawn in its first stop's colour (`color`).
+        if let Some(l) = &s.line {
             let cap = match l.cap {
                 Cap::Butt => 0,
                 Cap::Round => 1,
@@ -304,7 +357,8 @@ pub fn pdf(doc: &Document, frames: &[[f64; 4]], background: Option<[u8; 3]>, opt
     let mut images: Vec<_> = pdf.res.images.values().collect();
     images.sort();
     let images: String = images.iter().map(|(n, id)| format!(" /{n} {id} 0 R")).collect();
-    pdf.w.object(resources, format!("<< /ProcSet [/PDF /ImageB /ImageC] /ExtGState <<{states} >> /XObject <<{images} >> >>").as_bytes());
+    let shadings: String = pdf.res.shadings.iter().enumerate().map(|(i, d)| format!(" /Sh{i} {d}")).collect();
+    pdf.w.object(resources, format!("<< /ProcSet [/PDF /ImageB /ImageC] /ExtGState <<{states} >> /XObject <<{images} >> /Shading <<{shadings} >> >>").as_bytes());
     let kids_ref: String = kids.iter().map(|k| format!("{k} 0 R ")).collect();
     pdf.w.object(pages, format!("<< /Type /Pages /Kids [{}] /Count {} >>", kids_ref.trim_end(), kids.len()).as_bytes());
     pdf.w.object(catalog, format!("<< /Type /Catalog /Pages {pages} 0 R >>").as_bytes());

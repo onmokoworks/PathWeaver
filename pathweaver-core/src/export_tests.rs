@@ -152,9 +152,9 @@ fn folders_are_nested_groups_in_stacking_order_without_hidden_things() {
     let mut d = Document::default();
     let (outer, inner, hidden) = (d.id(), d.id(), d.id());
     d.folders = vec![
-        Folder { id: outer, name: "外 & <中>".into(), visible: true, open: true, parent: None },
-        Folder { id: inner, name: "中".into(), visible: true, open: true, parent: Some(outer) },
-        Folder { id: hidden, name: "隠し".into(), visible: false, open: true, parent: None },
+        Folder { id: outer, name: "外 & <中>".into(), visible: true, open: true, parent: None, locked: false },
+        Folder { id: inner, name: "中".into(), visible: true, open: true, parent: Some(outer), locked: false },
+        Folder { id: hidden, name: "隠し".into(), visible: false, open: true, parent: None, locked: false },
     ];
     let mut a = square(&mut d, 0., 0., 10.);
     a.folder = Some(inner);
@@ -238,4 +238,20 @@ fn num_is_short() {
     assert_eq!(num(-0.0001), "0");
     assert_eq!(num(f64::NAN), "0");
     assert_eq!(num(12.3456), "12.346");
+}
+
+#[test]
+fn gradients_and_opacity_are_written() {
+    use crate::paint::{Gradient, GradientStop};
+    let mut d = Document::default();
+    let mut s = square(&mut d, 0., 0., 100.);
+    let stops = vec![GradientStop { offset: 0., color: [255, 0, 0], opacity: 1. }, GradientStop { offset: 1., color: [0, 0, 255], opacity: 1. }];
+    s.fill_gradient = Some(Gradient::linear(Point::new(0., 0.), Point::new(100., 0.), stops));
+    let mut c = curve(&mut d);
+    c.edge_opacity = 0.5;
+    d.strokes = vec![s, c];
+    let svg = svg(&d, None, None, 0., Options::default()).unwrap();
+    assert!(svg.contains("<linearGradient id=\"pw-gradient-1\""), "{svg}");
+    assert!(svg.contains("fill=\"url(#pw-gradient-1)\""));
+    assert!(svg.contains("stroke-opacity=\"0.5\""));
 }

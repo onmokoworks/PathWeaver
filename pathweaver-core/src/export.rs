@@ -14,14 +14,16 @@ use kurbo::{Affine, BezPath, PathEl, Point};
 use super::model::{Cap, Document, Join, Stroke};
 use super::outline;
 
-/// A solid paint. (Gradients would become another variant here.)
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// A paint: a colour, or a gradient (`color` is then its solid fallback,
+/// the first stop), with an overall opacity.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Paint {
     pub color: [u8; 3],
     pub opacity: f64,
+    pub gradient: Option<super::paint::Gradient>,
 }
 /// A line drawn along a path with a uniform width.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Line {
     pub paint: Paint,
     pub width: f64,
@@ -79,10 +81,10 @@ pub struct Options {
 pub const FIT_ACCURACY: f64 = 0.05;
 
 pub fn fill_paint(s: &Stroke) -> Option<Paint> {
-    s.fill.map(|color| Paint { color, opacity: 1. })
+    s.fill.map(|color| Paint { color, opacity: s.fill_opacity.clamp(0., 1.), gradient: s.fill_gradient.clone() })
 }
 pub fn edge_paint(s: &Stroke) -> Option<Paint> {
-    s.edge.map(|color| Paint { color, opacity: 1. })
+    s.edge.map(|color| Paint { color, opacity: s.edge_opacity.clamp(0., 1.), gradient: s.edge_gradient.clone() })
 }
 
 /// The path's own curve (rounded corners applied), as drawn by the pen.
@@ -251,7 +253,7 @@ pub fn stroke_items(doc: &Document, s: &Stroke, options: Options) -> Result<Opti
             } else if !layer.outline.contours.is_empty() {
                 items.push(Item::Shape(
                     None,
-                    Shape { path: polygon_path(&layer.outline.contours), fill: Some(Paint { color: layer.color, opacity }), line: None },
+                    Shape { path: polygon_path(&layer.outline.contours), fill: Some(Paint { color: layer.color, opacity, gradient: layer.gradient.clone() }), line: None },
                 ));
             }
         }
@@ -264,11 +266,11 @@ pub fn stroke_items(doc: &Document, s: &Stroke, options: Options) -> Result<Opti
     }
     let uniform = line_style(s);
     // a zero-width line paints nothing either way
-    let empty_line = uniform.is_some_and(|l| l.width <= 0.);
+    let empty_line = uniform.as_ref().is_some_and(|l| l.width <= 0.);
     let line = uniform.filter(|_| !options.outline && !empty_line);
     let mut items = vec![];
     if fill.is_some() || line.is_some() {
-        items.push(Shape { path: shape_path(s), fill, line });
+        items.push(Shape { path: shape_path(s), fill, line: line.clone() });
     }
     if s.edge.is_some() && line.is_none() && !empty_line {
         // Variable width (or 輪郭にする): the line's outline, as curves.
@@ -480,22 +482,35 @@ fn meta_attrs(m: &Meta) -> String {
     }
     a
 }
-fn shape_svg(meta: Option<&Meta>, s: &Shape) -> String {
+/// `fill`/`stroke` value for a paint; a gradient's element goes to `defs`.
+fn paint_ref(p: &Paint, defs: &mut String, ids: &mut usize) -> String {
+    match &p.gradient {
+        Some(g) => {
+            *ids += 1;
+            let id = format!("pw-gradient-{ids}");
+            defs.push_str(&super::paint::gradient_svg(g, &id));
+            format!("url(#{id})")
+        }
+        None => hex(p.color),
+    }
+}
+fn shape_svg(meta: Option<&Meta>, s: &Shape, ids: &mut usize) -> String {
+    let mut defs = String::new();
     let mut a = String::from("<path");
     if let Some(m) = meta {
         a.push_str(&meta_attrs(m));
     }
-    match s.fill {
+    match &s.fill {
         Some(p) => {
-            a.push_str(&format!(" fill=\"{}\"", hex(p.color)));
+            a.push_str(&format!(" fill=\"{}\"", paint_ref(p, &mut defs, ids)));
             if p.opacity < 1. {
                 a.push_str(&format!(" fill-opacity=\"{}\"", num(p.opacity)));
             }
         }
         None => a.push_str(" fill=\"none\""),
     }
-    if let Some(l) = s.line {
-        a.push_str(&format!(" stroke=\"{}\" stroke-width=\"{}\"", hex(l.paint.color), num(l.width)));
+    if let Some(l) = &s.line {
+        a.push_str(&format!(" stroke=\"{}\" stroke-width=\"{}\"", paint_ref(&l.paint, &mut defs, ids), num(l.width)));
         if l.paint.opacity < 1. {
             a.push_str(&format!(" stroke-opacity=\"{}\"", num(l.paint.opacity)));
         }
@@ -519,7 +534,7 @@ fn shape_svg(meta: Option<&Meta>, s: &Shape) -> String {
     } else {
         a.push_str("/>");
     }
-    a
+    if defs.is_empty() { a } else { format!("<defs>{defs}</defs>{a}") }
 }
 fn picture_svg(meta: Option<&Meta>, p: &Picture) -> String {
     let href = match &p.source {
@@ -542,17 +557,17 @@ fn picture_svg(meta: Option<&Meta>, p: &Picture) -> String {
     a.push_str(&format!(" href=\"{}\"/>", esc(href)));
     a
 }
-fn items_svg(items: &[Item], depth: usize, out: &mut String) {
+fn items_svg(items: &[Item], depth: usize, out: &mut String, ids: &mut usize) {
     for item in items {
         out.push_str(&"  ".repeat(depth));
         match item {
             Item::Group(m, children) => {
                 out.push_str(&format!("<g{}>\n", meta_attrs(m)));
-                items_svg(children, depth + 1, out);
+                items_svg(children, depth + 1, out, ids);
                 out.push_str(&"  ".repeat(depth));
                 out.push_str("</g>");
             }
-            Item::Shape(m, s) => out.push_str(&shape_svg(m.as_ref(), s)),
+            Item::Shape(m, s) => out.push_str(&shape_svg(m.as_ref(), s, ids)),
             Item::Picture(m, p) => out.push_str(&picture_svg(m.as_ref(), p)),
         }
         out.push('\n');
@@ -569,7 +584,7 @@ pub fn svg(doc: &Document, frame: Option<[f64; 4]>, background: Option<[u8; 3]>,
     if let Some([r, g, b]) = background {
         body.push_str(&format!("  <rect x=\"{x:.4}\" y=\"{y:.4}\" width=\"{w:.4}\" height=\"{h:.4}\" fill=\"#{r:02x}{g:02x}{b:02x}\"/>\n"));
     }
-    items_svg(&scene(doc, options)?, 1, &mut body);
+    items_svg(&scene(doc, options)?, 1, &mut body, &mut 0);
     Ok(format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:inkscape=\"http://www.inkscape.org/namespaces/inkscape\" width=\"{w:.4}\" height=\"{h:.4}\" viewBox=\"{x:.4} {y:.4} {w:.4} {h:.4}\">\n{body}</svg>\n"
     ))
