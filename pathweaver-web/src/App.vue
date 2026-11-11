@@ -357,7 +357,7 @@ function setSideTab(id: string) { sideTab.value = id; try { localStorage.setItem
             </template>
             <template #second>
               <AreaSplit name="pw-side" direction="vertical" fixed="first" :titles="['レイヤー', 'プロパティ']" :min="80" :max="maxSide" :hide="!layersDocked ? 'first' : !propsDocked ? 'second' : null">
-                <template #first><div class="area" data-area="layers"><PathList v-if="layersDocked" :ed="ed" /></div></template>
+                <template #first><div class="area" data-area="layers"><PathList v-if="layersDocked" :ed="ed" :canvas="canvas" /></div></template>
                 <template #second>
                   <div v-if="propsDocked" class="side-tabs area" data-area="props">
                     <div class="tab-bar" role="tablist">
@@ -376,7 +376,7 @@ function setSideTab(id: string) { sideTab.value = id; try { localStorage.setItem
           </AreaSplit>
 
           <!-- floating panels -->
-          <FloatingPanel v-if="!layersDocked" id="layers" :bounds="wsBounds"><PathList :ed="ed" /></FloatingPanel>
+          <FloatingPanel v-if="!layersDocked" id="layers" :bounds="wsBounds"><PathList :ed="ed" :canvas="canvas" /></FloatingPanel>
           <FloatingPanel v-if="!propsDocked" id="props" :bounds="wsBounds">
             <div class="side-tabs">
               <div class="tab-bar" role="tablist">

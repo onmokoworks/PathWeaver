@@ -217,7 +217,7 @@ await page.waitForTimeout(800)
   const r = [
     ['name', await box(`[data-artboard="${id}"] .name`)],
     ['frame', around(br, 9)],
-    ['list', await box('[data-testid=artboard-panel] .list')],
+    ['list', await (async () => { await page.getByTestId('tab-artboards').click(); return box('[data-testid=artboard-list]') })()],
     ['fields', union(await box('[data-field=artboard-name]'), await box('[data-field=artboard-preset]'))],
     ['add', await box('[data-testid=artboard-add]')],
   ]

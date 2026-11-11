@@ -1258,13 +1258,24 @@ export function createCanvas(ed: Editor) {
     view.panX = local.x - before.x * view.zoom
     view.panY = local.y - before.y * view.zoom
   }
+  /** Everything drawn and every artboard in view. */
   function fit() {
     let b: Bounds | null = null
+    const grow = (sb: Bounds) => { b = b ? {x0: Math.min(b.x0, sb.x0), y0: Math.min(b.y0, sb.y0), x1: Math.max(b.x1, sb.x1), y1: Math.max(b.y1, sb.y1)} : sb }
     for (const s of ed.doc.strokes) {
       const r = ed.renders.get(s.id)
       const sb = r && ed.shown(s) ? renderBounds(r, s) : null
-      if (sb) b = b ? {x0: Math.min(b.x0, sb.x0), y0: Math.min(b.y0, sb.y0), x1: Math.max(b.x1, sb.x1), y1: Math.max(b.y1, sb.y1)} : sb
+      if (sb) grow(sb)
     }
+    for (const a of ed.doc.artboards ?? []) grow({x0: a.x, y0: a.y, x1: a.x + a.w, y1: a.y + a.h})
+    fitBounds(b)
+  }
+  /** One artboard filling the view. */
+  function showArtboard(id: number) {
+    const a = ed.doc.artboards?.find(v => v.id === id)
+    if (a) fitBounds({x0: a.x, y0: a.y, x1: a.x + a.w, y1: a.y + a.h})
+  }
+  function fitBounds(b: Bounds | null) {
     const w = view.width - RULER, h = view.height - RULER
     if (!b) { view.zoom = 1; view.panX = RULER + w / 2; view.panY = RULER + h / 2; return }
     const bw = Math.max(b.x1 - b.x0, 1), bh = Math.max(b.y1 - b.y0, 1)
@@ -1357,7 +1368,7 @@ export function createCanvas(ed: Editor) {
   return reactive({
     view, state, toWorld, toScreen, down, move, up, wheel, zoomAt, fit, key, setTool, cancelDrag, setPaper,
     selectionBounds, boxHandles, widthHandles, widthGrips, finishPen, activePathFrame, cornerWidgets, widthVisible, setShowWidth, pathAt,
-    editText, finishText, adjustShape, shapeAdjustable, setShapeKind, setPivot, deleteArtboard, artboardAt,
+    editText, finishText, adjustShape, shapeAdjustable, setShapeKind, setPivot, deleteArtboard, artboardAt, showArtboard,
   })
 }
 export type Canvas = ReturnType<typeof createCanvas>

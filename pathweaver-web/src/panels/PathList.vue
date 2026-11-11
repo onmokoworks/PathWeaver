@@ -8,12 +8,17 @@ import type {Editor} from '../core/editor'
 import type {Folder, GraphNode, Stroke} from '../core/types'
 import {renderBounds} from '../canvas/geometry'
 import PanelPin from './PanelPin.vue'
+import ArtboardList from './ArtboardList.vue'
+import type {Canvas} from '../canvas/controller'
 import {layout, setFolded} from '../core/layout'
 import {categoryOf, nodeInfo} from '../nodes/catalog'
 import {lookOf} from '../core/looks'
 import {placedHref} from '../core/knockout'
 
-const props = defineProps<{ed: Editor}>()
+const props = defineProps<{ed: Editor; canvas?: Canvas}>()
+// レイヤー | アートボード (Illustrator keeps the two panels side by side)
+const tab = ref<'layers' | 'artboards'>((() => { try { return localStorage.getItem('pw.layerTab') === 'artboards' ? 'artboards' : 'layers' } catch { return 'layers' } })())
+function setTab(t: 'layers' | 'artboards') { tab.value = t; try { localStorage.setItem('pw.layerTab', t) } catch { /* preference only */ } }
 const ed = props.ed
 
 type Row =
@@ -254,14 +259,18 @@ function dropAt(y: number, moving: DataRow): Drop | null {
 
 <template>
   <div class="path-list" data-testid="path-list">
-    <div class="head">
-      <span v-if="!layout.layers.floating">レイヤー</span>
+    <div class="head" role="tablist">
+      <button type="button" role="tab" class="ltab" :class="{on: tab === 'layers'}" :aria-selected="tab === 'layers'" data-testid="tab-layers" @click="setTab('layers')">レイヤー</button>
+      <button v-if="canvas" type="button" role="tab" class="ltab" :class="{on: tab === 'artboards'}" :aria-selected="tab === 'artboards'" data-testid="tab-artboards" @click="setTab('artboards')">アートボード<span v-if="ed.doc.artboards?.length" class="count">{{ ed.doc.artboards.length }}</span></button>
       <span class="spacer" />
+      <template v-if="tab === 'layers'">
       <button type="button" :title="ed.selected.length ? '選択したパスをフォルダにまとめる（⌘G）' : '新しいフォルダ（⌘G）'" aria-label="フォルダにまとめる" @click="group"><Icon icon="material-symbols:create-new-folder-outline" /></button>
       <button type="button" title="フォルダを解除（⇧⌘G）：中身はひとつ上へ" aria-label="フォルダを解除" :disabled="!activeFolder" @click="ungroupActive"><Icon icon="material-symbols:folder-off-outline" /></button>
+      </template>
       <PanelPin id="layers" />
     </div>
-    <ul ref="list" @pointermove="onRowMove" @pointerup="onRowUp" @pointercancel="onRowUp">
+    <ArtboardList v-if="tab === 'artboards' && canvas" :ed="ed" :canvas="canvas" />
+    <ul v-show="tab === 'layers' || !canvas" ref="list" @pointermove="onRowMove" @pointerup="onRowUp" @pointercancel="onRowUp">
       <template v-for="row in rows" :key="row.key">
         <li
           v-if="row.type === 'folder'" data-row :data-folder="row.folder.id" class="folder" :style="{paddingLeft: 10 + row.depth * 16 + 'px'}"
@@ -344,6 +353,10 @@ function dropAt(y: number, moving: DataRow): Drop | null {
 
 <style scoped>
 .path-list {display: flex; flex-direction: column; height: 100%; font-size: 12px}
+.ltab {height: 22px; padding: 0 6px; border: 0; border-radius: 3px; background: transparent; font: inherit; font-size: 11px; color: var(--tq-color-text-mute); cursor: pointer; display: flex; align-items: center; gap: 4px}
+.ltab:hover {color: var(--tq-color-text)}
+.ltab.on {color: var(--tq-color-text); background: color-mix(in srgb, var(--tq-color-text) 8%, transparent)}
+.ltab .count {font-variant-numeric: tabular-nums; color: var(--tq-color-text-mute)}
 .head {display: flex; align-items: center; gap: 2px; height: 28px; padding: 0 6px 0 12px; font-weight: 500; font-size: 11px; color: var(--tq-color-text-mute); flex: none}
 .spacer {flex: 1}
 .head button, .eye, .chevron {

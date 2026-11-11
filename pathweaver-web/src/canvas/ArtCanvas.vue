@@ -148,7 +148,8 @@ const boards = computed(() => {
   return (ed.doc.artboards ?? []).map(a => {
     const p = S({x: a.x, y: a.y}), q = S({x: a.x + a.w, y: a.y + a.h})
     const on = ed.tool === 'artboard' && cv.state.artboard === a.id
-    return {a, x: p.x, y: p.y, w: q.x - p.x, h: q.y - p.y, on, handles: on ? cv.boxHandles({x0: a.x, y0: a.y, x1: a.x + a.w, y1: a.y + a.h}).map(S) : []}
+    const active = cv.state.artboard === a.id
+    return {a, x: p.x, y: p.y, w: q.x - p.x, h: q.y - p.y, on, active, handles: on ? cv.boxHandles({x0: a.x, y0: a.y, x1: a.x + a.w, y1: a.y + a.h}).map(S) : []}
   })
 })
 
@@ -369,7 +370,7 @@ const cursor = computed(() => {
 
       <!-- artboards -->
       <g class="artboards" :class="{editing: ed.tool === 'artboard'}">
-        <g v-for="b in boards" :key="b.a.id" :class="{on: b.on}" :data-artboard="b.a.id">
+        <g v-for="b in boards" :key="b.a.id" :class="{on: b.on, active: b.active}" :data-artboard="b.a.id">
           <rect :x="b.x" :y="b.y" :width="b.w" :height="b.h" class="frame" />
           <text :x="b.x" :y="b.y - 5" class="name">{{ b.a.name }}</text>
           <rect v-for="(h, i) in b.handles" :key="i" :x="h.x - 3.5" :y="h.y - 3.5" width="7" height="7" class="handle" />
@@ -492,6 +493,8 @@ const cursor = computed(() => {
 .bbox .bbox-handle {fill: var(--pw-paper)}
 .artboards .frame {fill: none; stroke: color-mix(in srgb, var(--tq-color-text) 45%, transparent); stroke-width: 1; pointer-events: none}
 .artboards .name {font-size: 10px; fill: var(--tq-color-text-mute); pointer-events: none}
+.artboards .active .frame {stroke: var(--tq-color-text)}
+.artboards .active .name {fill: var(--tq-color-text)}
 .artboards .on .frame {stroke: var(--tq-color-accent)}
 .artboards .on .name {fill: var(--tq-color-accent)}
 .artboards .handle {fill: var(--pw-paper); stroke: var(--tq-color-accent); stroke-width: 1}

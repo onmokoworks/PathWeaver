@@ -24,7 +24,8 @@ test('artboard tool: drag makes one, drag moves it, handles resize, panel edits,
   expect([a.x, a.y, a.w, a.h].map(Math.round)).toEqual([0, 0, 200, 100])
   expect(a.name).toBe('アートボード 1')
   // the panel shows the drawn size (not the 1×1 it started from)
-  await expect(page.locator(`[data-artboard-row="${a.id}"] .size`)).toHaveText('200×100')
+  await page.getByTestId('tab-artboards').click()
+  await expect(page.locator(`[data-artboard-item="${a.id}"] .size`)).toHaveText('200×100')
   const undo = (await state(page)).undo
   // drag it by its inside
   await drag(page, {x: 100, y: 50}, {x: 130, y: 70})
@@ -45,7 +46,7 @@ test('artboard tool: drag makes one, drag moves it, handles resize, panel edits,
   await drag(page, {x: 600, y: 300}, {x: 600, y: 300})
   expect(await boards(page)).toHaveLength(1)
   // Delete removes it; undo brings it back
-  await page.locator(`[data-artboard-row="${a.id}"]`).click()
+  await page.locator(`[data-artboard-item="${a.id}"]`).click()
   await page.locator('[data-testid=canvas]').hover()
   await page.keyboard.press('Delete')
   expect(await boards(page)).toHaveLength(0)
@@ -118,5 +119,56 @@ test('export: PNG of an artboard at 2×, JPEG on white, SVG framed by the artboa
   await page.getByTestId('export-run').click()
   await expect.poll(() => names.length).toBe(2)
   expect(names.sort()).toEqual(['名称未設定-A.png', '名称未設定-B.png'])
+  expect(errors).toEqual([])
+})
+
+test('artboards panel (layers area tab): numbered in order, click selects, double-click renames, drag reorders, ⤢ shows it, add and delete', async ({page}) => {
+  const errors = await boot(page)
+  await page.evaluate(() => {
+    const {ed} = (window as any).__pw
+    ed.edit((d: any) => {
+      d.artboards = [
+        {id: ed.nextId(), name: '表紙', x: 0, y: 0, w: 200, h: 100},
+        {id: ed.nextId(), name: '裏', x: 3000, y: 2000, w: 100, h: 100},
+      ]
+    })
+  })
+  await page.getByTestId('tab-artboards').click()
+  const items = page.locator('[data-artboard-item]')
+  await expect(items).toHaveCount(2)
+  await expect(items.nth(0).locator('.num')).toHaveText('1')
+  await expect(items.nth(1).locator('.name')).toHaveText('裏')
+  const [a, b] = await boards(page)
+  // click: active (no undo step)
+  const undo = (await state(page)).undo
+  await items.nth(1).click()
+  expect(await page.evaluate(() => (window as any).__pw.canvas.state.artboard)).toBe(b.id)
+  await expect(items.nth(1)).toHaveClass(/on/)
+  expect((await state(page)).undo).toBe(undo)
+  // ⤢: the artboard far away comes into view
+  await items.nth(1).locator('.show').click()
+  const inView = await page.evaluate(([x, y]) => { const c = (window as any).__pw.canvas; const s = c.toScreen({x, y}); return s.x > 0 && s.y > 0 && s.x < c.view.width && s.y < c.view.height }, [b.x + b.w / 2, b.y + b.h / 2])
+  expect(inView).toBe(true)
+  // double-click the name: rename
+  await items.nth(0).locator('.name').dblclick()
+  await page.getByTestId('artboard-rename').fill('カバー')
+  await page.getByTestId('artboard-rename').press('Enter')
+  expect((await boards(page))[0].name).toBe('カバー')
+  // drag the second above the first: order (and numbers) change, one undo
+  const before = (await state(page)).undo
+  await items.nth(1).dragTo(items.nth(0), {targetPosition: {x: 20, y: 3}})
+  expect((await boards(page)).map((v: any) => v.id)).toEqual([b.id, a.id])
+  await expect(items.nth(0).locator('.name')).toHaveText('裏')
+  expect((await state(page)).undo).toBe(before + 1)
+  // add: next to the last one, same size; delete the active one
+  await page.getByTestId('artboard-list-add').click()
+  const list = await boards(page)
+  expect(list).toHaveLength(3)
+  expect([list[2].w, list[2].h]).toEqual([200, 100])
+  await page.getByTestId('artboard-list-delete').click()
+  expect(await boards(page)).toHaveLength(2)
+  // back to layers
+  await page.getByTestId('tab-layers').click()
+  await expect(page.locator('[data-testid=path-list] ul')).toBeVisible()
   expect(errors).toEqual([])
 })

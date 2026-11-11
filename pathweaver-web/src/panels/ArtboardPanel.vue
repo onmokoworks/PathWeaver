@@ -80,13 +80,7 @@ function drawingBounds() {
 <template>
   <ParameterGrid data-testid="artboard-panel">
     <ParameterHeading>アートボード</ParameterHeading>
-    <li class="list">
-      <button
-        v-for="a in list" :key="a.id" type="button" class="row" :class="{on: a.id === board?.id}" :data-artboard-row="a.id"
-        @click="canvas.state.artboard = a.id"
-      ><span class="name">{{ a.name }}</span><span class="size">{{ r2(a.w) }}×{{ r2(a.h) }}</span></button>
-      <p v-if="!list.length" class="empty">キャンバスの空いた所をドラッグして作れます</p>
-    </li>
+    <li v-if="!board" class="empty">キャンバスでアートボードを押すか、レイヤーの「アートボード」タブで選ぶと、ここで名前と大きさを変えられます</li>
     <template v-if="board">
       <Parameter label="名前">
         <InputString data-field="artboard-name" :model-value="board.name" @update:model-value="v => { patch({name: v}); commit() }" />
@@ -110,7 +104,7 @@ function drawingBounds() {
 </template>
 
 <style scoped>
-.list {grid-column: 1 / 3; display: flex; flex-direction: column; gap: 2px; list-style: none}
+.empty {grid-column: 1 / 3; list-style: none; padding: 4px 0; color: var(--tq-color-text-mute); line-height: 1.6}
 .row {
   display: flex; align-items: center; gap: 8px; height: 24px; padding: 0 8px; border: 0; border-radius: 3px;
   background: transparent; font: inherit; color: var(--tq-color-text); cursor: pointer; text-align: left;
