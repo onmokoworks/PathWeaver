@@ -56,3 +56,7 @@ body .TqParameterHeading .heading {font-size: 14px; font-weight: 400}
 /* A dark colour must not vanish into a dark input: every swatch gets a hairline
    (an outline, drawn over the colour fill, which an inset shadow would sit under) */
 body .TqInputColorPad .default-button {outline: 1px solid color-mix(in srgb, var(--tq-color-text) 22%, transparent); outline-offset: -1px}
+
+/* Paint opacity (%) and gradient stop position: the amount as a grey bar, not a blue one */
+body .TqInputColor .alpha .bar,
+body [data-paint-stop-offset] .bar {background: var(--pw-chip)}

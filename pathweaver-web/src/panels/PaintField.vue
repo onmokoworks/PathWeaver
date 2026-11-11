@@ -1,24 +1,31 @@
 <script setup lang="ts">
 // Optional color: "none" is an explicit state, not a checkbox beside a picker.
+// With `opacity` the same control edits the paint's opacity (Tweeq's alpha:
+// the % beside the colour code, or the A slider in the picker).
 import InputColor from '../../vendor/tweeq/src/InputColor/InputColor.vue'
 import InputButton from '../../vendor/tweeq/src/InputButton/InputButton.vue'
 import type {RGB} from '../core/types'
+import {hexAlpha, parseHexAlpha} from '../core/paint'
 
-const props = defineProps<{value: RGB | null; label: string; fallback?: RGB; mixed?: boolean}>()
-const emit = defineEmits<{begin: []; change: [v: RGB | null]; commit: []}>()
-const hex = (c: RGB) => '#' + c.map(v => v.toString(16).padStart(2, '0')).join('')
-const rgb = (s: string): RGB => [1, 3, 5].map(i => parseInt(s.slice(i, i + 2), 16)) as RGB
-function set(v: RGB | null) { emit('begin'); emit('change', v); emit('commit') }
+const props = defineProps<{value: RGB | null; label: string; fallback?: RGB; mixed?: boolean; opacity?: number}>()
+const emit = defineEmits<{begin: []; change: [v: RGB | null, opacity: number]; commit: []}>()
+function set(v: RGB | null) { emit('begin'); emit('change', v, props.opacity ?? 1); emit('commit') }
+function input(v: string) {
+  const {color, opacity} = parseHexAlpha(v)
+  emit('begin')
+  emit('change', color, props.opacity === undefined ? 1 : opacity)
+}
 </script>
 
 <template>
   <div class="paint" :data-paint="label">
     <template v-if="props.value">
       <InputColor
-        class="color" :model-value="hex(props.value)" :alpha="false" :aria-label="label"
-        @focus="emit('begin')" @update:model-value="v => { emit('begin'); emit('change', rgb(v)) }"
+        class="color" :model-value="hexAlpha(props.value, props.opacity ?? 1)" :alpha="props.opacity !== undefined" :aria-label="label"
+        @focus="emit('begin')" @update:model-value="input"
         @confirm="emit('commit')" @blur="emit('commit')"
       />
+      <slot />
       <InputButton narrow subtle icon="material-symbols:remove" :tooltip="`${label}をなしにする`" :aria-label="`${label}をなしにする`" @click="set(null)" />
     </template>
     <InputButton

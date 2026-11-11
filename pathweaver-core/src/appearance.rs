@@ -817,6 +817,8 @@ pub struct Layer {
     pub contours: Vec<Vec<Point>>,
     /// Bitmap from the raster stage (drawn instead of filling `contours`).
     pub image: Option<std::sync::Arc<super::raster::Image>>,
+    /// Paints `contours` instead of `color` (from a gradient-filled path).
+    pub gradient: Option<super::paint::Gradient>,
 }
 
 #[derive(Clone)]
@@ -841,6 +843,9 @@ fn layers_key(layers: &[Layer]) -> u64 {
     for l in layers {
         l.color.hash(&mut h);
         l.opacity.to_bits().hash(&mut h);
+        if let Some(g) = &l.gradient {
+            serde_json::to_string(g).unwrap_or_default().hash(&mut h);
+        }
         for ring in &l.contours {
             ring.len().hash(&mut h);
             for p in ring {
@@ -1020,6 +1025,14 @@ fn evaluate_values(
                                 for p in layer.contours.iter_mut().flatten() {
                                     *p = forward(*p);
                                 }
+                                // The gradient travels with its shape.
+                                if let Some(g) = &mut layer.gradient {
+                                    let m = kurbo::Affine::translate(center.to_vec2() + t)
+                                        * kurbo::Affine::rotate(angle)
+                                        * kurbo::Affine::scale(node.scale)
+                                        * kurbo::Affine::translate(-center.to_vec2());
+                                    *g = g.transformed(m);
+                                }
                             }
                         }
                     }
@@ -1030,6 +1043,7 @@ fn evaluate_values(
                             *layer = super::raster::tint(img, node.color, 1.).layer(layer.opacity * node.opacity);
                         } else {
                             layer.color = node.color;
+                            layer.gradient = None;
                             layer.opacity *= node.opacity;
                         }
                     }
@@ -1099,6 +1113,7 @@ fn evaluate_values(
                 Kind::Pathfinder | Kind::Boolean => {
                     let base_color = layers.first().map(|l| l.color).unwrap_or([224; 3]);
                     let base_opacity = layers.first().map(|l| l.opacity).unwrap_or(1.);
+                    let base_gradient = layers.first().and_then(|l| l.gradient.clone());
                     let mut groups: Vec<Vec<Vec<Point>>> = if node.kind == Kind::Pathfinder {
                         layers.iter().map(|l| l.contours.clone()).collect()
                     } else {
@@ -1124,6 +1139,7 @@ fn evaluate_values(
                         opacity: base_opacity,
                         contours,
                         image: None,
+                        gradient: base_gradient,
                     }];
                 }
                 kind => {
@@ -1359,7 +1375,7 @@ mod tests {
             color: [30, 90, 200],
             opacity: 1.,
             contours: vec![vec![Point::new(0., 0.), Point::new(80., 0.), Point::new(80., 40.), Point::new(0., 40.)]],
-            image: None,
+            image: None, gradient: None,
         }]
     }
     #[test]
@@ -1455,7 +1471,7 @@ mod tests {
                 Point::new(100., 100.),
                 Point::new(0., 100.),
             ]],
-            image: None,
+            image: None, gradient: None,
         }]
     }
     #[test]
@@ -1537,7 +1553,7 @@ mod tests {
         // wkwkdesign's stamp: light grey shape, black inner glow, then 2 tones
         // by darkness: the dark rim stays as ink, the light middle opens up.
         let square = vec![Layer { color: [221; 3], opacity: 1., contours: vec![vec![
-            Point::new(0., 0.), Point::new(100., 0.), Point::new(100., 100.), Point::new(0., 100.)]], image: None }];
+            Point::new(0., 0.), Point::new(100., 0.), Point::new(100., 100.), Point::new(0., 100.)]], image: None, gradient: None }];
         let mut g = Graph::default();
         let glow = g.add(Kind::Glow, [0., 0.]).unwrap();
         { let n = g.node_mut(glow).unwrap(); n.inner = true; n.color = [0; 3]; n.amount = 20.; n.opacity = 1.; }

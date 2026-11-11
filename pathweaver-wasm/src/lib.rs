@@ -86,7 +86,7 @@ fn original_layers(s: &Stroke) -> Result<Vec<appearance::Layer>, String> {
     plain.appearance = None;
     Ok(outline::contours_only(|| outline::paint_layers(&plain))?
         .into_iter()
-        .map(|l| appearance::Layer { color: l.color, opacity: l.opacity, contours: l.outline.contours, image: None })
+        .map(|l| appearance::Layer { color: l.color, opacity: l.opacity, contours: l.outline.contours, image: None, gradient: l.gradient })
         .collect())
 }
 
@@ -120,7 +120,10 @@ fn render(s: &Stroke) -> Value {
                         "color": hex(l.color), "opacity": l.opacity, "d": d,
                         "image": {"href": img.data_url(), "x": img.x0, "y": img.y0, "w": img.x1() - img.x0, "h": img.y1() - img.y0},
                     }),
-                    None => json!({"color": hex(l.color), "opacity": l.opacity, "d": d}),
+                    None => match &l.gradient {
+                        Some(g) => json!({"color": hex(l.color), "opacity": l.opacity, "d": d, "gradient": g}),
+                        None => json!({"color": hex(l.color), "opacity": l.opacity, "d": d}),
+                    },
                 }).collect::<Vec<_>>(),
                 "hit": ds.concat(),
                 "center": centerline,

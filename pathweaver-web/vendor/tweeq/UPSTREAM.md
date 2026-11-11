@@ -11,3 +11,5 @@ Second compatibility patch: `src/use/useDrag.ts` uses `pointerPosition.ts` to de
 Third patch (PathWeaver web UI): `src/common.styl` no longer imports Google Fonts in `reset-viewport`; the app is offline and uses system fonts.
 
 Fourth patch (measurement units): `src/InputNumber/context.ts` adds an optional provide/inject context (`InputNumberContextKey`). When an ancestor provides it, `InputNumber.vue` rewrites typed text through `expression` before evaluating it, falls back to its `suffix`, uses its `precision` as the display precision, and uses its `speed` / `keyStep` for unranged drags and arrow keys; `InputTranslate.vue` scales its 2D drag by `speed`. Without a provider nothing changes. PathWeaver provides it from `src/panels/LengthField.vue` / `LengthPair.vue` (lengths in the document unit).
+
+Fifth patch (PathWeaver paint opacity): `src/InputColor/InputColor.vue` forwards focus/blur/confirm from its alpha (%) field like the colour-code field does, so an opacity edit closes its undo step.

@@ -5,7 +5,8 @@
 // Matching two paths: the one with fewer anchors gets extra anchors on its
 // longest segments (split exactly, so its shape does not change); closed paths
 // are turned to start at the best-matching anchor and run the same way.
-import type {Blend, Document, PathNode, RGB, Stroke, Vec2, Width} from './types'
+import type {Blend, Document, Gradient, PathNode, RGB, Stroke, Vec2, Width} from './types'
+import {gradientOf, mixGradient, opacityOf, setGradient, setOpacity, type PaintKey} from './paint'
 
 type N = Omit<PathNode, 'id'> & {src: number | null}
 const sub = (a: Vec2, b: Vec2) => ({x: a.x - b.x, y: a.y - b.y})
@@ -90,6 +91,27 @@ function alignRing(a: Vec2[], b: Vec2[]): Vec2[] {
 
 const mixColor = (a: RGB | null, b: RGB | null, t: number): RGB | null =>
   a && b ? [0, 1, 2].map(i => Math.round(lerp(a[i], b[i], t))) as RGB : (t < 0.5 ? a : b)
+/** A solid colour as a gradient shaped like `like` (so it can blend with it). */
+const flat = (like: Gradient, color: RGB, opacity: number): Gradient =>
+  ({kind: like.kind, matrix: [...like.matrix], stops: like.stops.map(s => ({offset: s.offset, color: [...color] as RGB, opacity}))})
+/**
+ * One paint (fill or line) between a and b: colour and opacity mix; a side
+ * without the paint fades it in from transparent; a gradient on one side
+ * meets the other's solid colour stop by stop.
+ */
+export function mixPaint(out: Omit<Stroke, 'id'>, a: Stroke, b: Stroke, key: PaintKey, t: number) {
+  const ca = a[key], cb = b[key]
+  let oa = opacityOf(a, key), ob = opacityOf(b, key)
+  let ga = ca ? gradientOf(a, key) : null, gb = cb ? gradientOf(b, key) : null
+  if (!ca && !cb) { out[key] = null; setOpacity(out as Stroke, key, 1); setGradient(out as Stroke, key, null); return }
+  if (!ca) oa = 0
+  if (!cb) ob = 0
+  if (ga && !gb && cb) gb = flat(ga, cb, 1)
+  if (gb && !ga && ca) ga = flat(gb, ca, 1)
+  out[key] = mixColor(ca ?? cb, cb ?? ca, t)
+  setOpacity(out as Stroke, key, lerp(oa, ob, t))
+  setGradient(out as Stroke, key, mixGradient(ga ?? gb, gb ?? ga, t))
+}
 const mixWidth = (a: Width, b: Width, t: number): Width => ({left: lerp(a.left, b.left, t), right: lerp(a.right, b.right, t), linked: a.linked, angle: lerp(a.angle, b.angle, t)})
 
 /** Why two paths cannot blend, or null. */
@@ -126,8 +148,8 @@ export function blendSteps(a: Stroke, b: Stroke, steps: number): Omit<Stroke, 'i
     const t = i / (steps + 1)
     const near = t < 0.5 ? a : b
     const s: Omit<Stroke, 'id'> = JSON.parse(JSON.stringify({...near, id: undefined}))
-    s.fill = mixColor(a.fill, b.fill, t)
-    s.edge = mixColor(a.edge, b.edge, t)
+    mixPaint(s, a, b, 'fill', t)
+    mixPaint(s, a, b, 'edge', t)
     s.edge_width = lerp(a.edge_width, b.edge_width, t)
     s.start_width = mixWidth(a.start_width, b.start_width, t)
     s.end_width = mixWidth(a.end_width, b.end_width, t)

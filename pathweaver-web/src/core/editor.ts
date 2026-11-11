@@ -9,7 +9,7 @@ import {createRenderQueue} from './renderQueue'
 import {blendProblem, syncBlends} from './blend'
 import type {Anchor, Cap, Document, Folder, Graph, Join, Render, RGB, Stroke, Vec2} from './types'
 
-export interface DrawStyle {fill: RGB | null; edge: RGB | null; width: number; join: Join; cap: Cap}
+export interface DrawStyle {fill: RGB | null; edge: RGB | null; fillOpacity: number; edgeOpacity: number; width: number; join: Join; cap: Cap}
 
 export type Tool = 'select' | 'direct' | 'pen' | 'convert' | 'text' | 'shape' | 'artboard'
 
@@ -516,12 +516,14 @@ export function createEditor() {
   // ---- common path commands ----
   // ---- style of the next path drawn (Illustrator: the last selected path's
   // look carries over; deselecting keeps it). Not part of the document. ----
-  const drawStyle = reactive<DrawStyle>({fill: null, edge: [32, 33, 36], width: 24, join: 'Miter', cap: 'Butt'})
+  const drawStyle = reactive<DrawStyle>({fill: null, edge: [32, 33, 36], fillOpacity: 1, edgeOpacity: 1, width: 24, join: 'Miter', cap: 'Butt'})
   watch(() => [active.value?.id, revision.value], () => {
     const s = active.value
     if (!s || s.contours) return
     drawStyle.fill = s.fill ? [...s.fill] as RGB : null
     drawStyle.edge = s.edge ? [...s.edge] as RGB : null
+    drawStyle.fillOpacity = s.fill_opacity ?? 1
+    drawStyle.edgeOpacity = s.edge_opacity ?? 1
     const ws = [s.start_width, s.end_width, ...s.widths.map(k => k.width)]
     drawStyle.width = Math.max(...ws.map(w => w.left + w.right))
     drawStyle.join = s.join
@@ -544,6 +546,8 @@ export function createEditor() {
       corners: [], join: drawStyle.join, miter_limit: 10, contours: null, appearance: null,
     }
     if (drawStyle.cap !== 'Butt') { s.start_cap = drawStyle.cap; s.end_cap = drawStyle.cap }
+    if (drawStyle.fillOpacity < 1) s.fill_opacity = drawStyle.fillOpacity
+    if (drawStyle.edgeOpacity < 1) s.edge_opacity = drawStyle.edgeOpacity
     d.strokes.push(s)
     selected.value = [id]
     return s
@@ -579,7 +583,7 @@ export function createEditor() {
     }
     for (const corner of c.corners) corner.node = remap.get(corner.node) ?? corner.node
     if (c.contours) c.contours = c.contours.map(r => r.map(p => ({x: p.x + dx, y: p.y + dy})))
-    for (const placed of [c.text, c.image]) if (placed) { placed.matrix[4] += dx; placed.matrix[5] += dy }
+    for (const placed of [c.text, c.image, c.fill_gradient, c.edge_gradient]) if (placed) { placed.matrix[4] += dx; placed.matrix[5] += dy }
     return c
   }
   function duplicateSelection() {

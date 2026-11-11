@@ -7,5 +7,6 @@ pub mod corners;
 pub mod editing;
 pub mod model;
 pub mod outline;
+pub mod paint;
 pub mod raster;
 pub mod snapping;

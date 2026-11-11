@@ -6,6 +6,8 @@ import type {Editor} from './editor'
 import type {Matrix, RGB, Stroke, Vec2} from './types'
 import {flatten, parsePath, transformSubpath, type Affine, type Subpath} from './svgPath'
 import {apply, baselineTop, DEFAULT_FONT, outlineText} from './textOutline'
+import {readPaint, type GradientContext, type Paint} from './svgPaint'
+import {setGradient, setOpacity, type PaintKey} from './paint'
 
 const MAX_SIDE = 4096
 
@@ -99,18 +101,20 @@ const mul = (a: Affine, b: Affine): Affine => [
 ]
 const fromDOM = (m: DOMMatrix | SVGMatrix | null): Affine => (m ? [m.a, m.b, m.c, m.d, m.e, m.f] : ID)
 
-function color(css: string, root: Element): RGB | null {
-  if (!css || css === 'none' || css === 'transparent') return null
-  const url = /url\(["']?#([^"')]+)["']?\)/.exec(css)
-  if (url) {
-    // A gradient or pattern: its first stop stands in for it.
-    const stop = root.querySelector(`[id="${CSS.escape(url[1])}"] stop`)
-    return stop ? color(getComputedStyle(stop).stopColor, root) : [128, 128, 128]
+/** Put a read SVG paint on a stroke (colour, opacity, gradient). */
+function givePaint(s: Stroke, key: PaintKey, p: Paint | null) {
+  s[key] = p ? [...p.color] as RGB : null
+  setOpacity(s, key, p?.opacity ?? 1)
+  setGradient(s, key, p?.gradient ?? null)
+}
+/** `opacity` of the element and every group around it (a group's opacity is not inherited in CSS). */
+function groupOpacity(el: Element, root: Element): number {
+  let k = 1
+  for (let at: Element | null = el; at && at !== root.parentElement; at = at.parentElement) {
+    const o = parseFloat(getComputedStyle(at).opacity)
+    if (Number.isFinite(o)) k *= o
   }
-  const m = /rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s/]+([\d.]+%?))?/.exec(css)
-  if (!m) return null
-  if (m[4] !== undefined && parseFloat(m[4]) === 0) return null
-  return [Math.round(+m[1]), Math.round(+m[2]), Math.round(+m[3])]
+  return k
 }
 
 function shapeData(el: Element): string | null {
@@ -201,6 +205,14 @@ async function readSvg(ed: Editor, d: {next_id: number; assets?: Record<string, 
     const rootInv = fromDOM(svg.getScreenCTM()?.inverse() ?? null)
     const ctm = (el: Element): Affine => mul(rootInv, fromDOM((el as SVGGraphicsElement).getScreenCTM?.() ?? null))
     const out: Imported = {strokes: [], skipped: 0, texts: []}
+    const vb = svg.viewBox?.baseVal
+    const viewport = vb && vb.width > 0 && vb.height > 0 ? {w: vb.width, h: vb.height} : {w: svg.width?.baseVal?.value || 100, h: svg.height?.baseVal?.value || 100}
+    const context = (el: Element, m: Affine): GradientContext => ({
+      byId: id => svg.querySelector(`[id="${CSS.escape(id)}"]`),
+      bbox: () => { try { const b = (el as SVGGraphicsElement).getBBox(); return {x: b.x, y: b.y, width: b.width, height: b.height} } catch { return {x: 0, y: 0, width: 0, height: 0} } },
+      viewport, ctm: m,
+      stopStyle: stop => { const cs = getComputedStyle(stop); return {color: cs.stopColor, opacity: cs.stopOpacity} },
+    })
     const hidden = (el: Element) => el.closest('defs, clipPath, mask, symbol, marker, pattern') !== null
     for (const el of svg.querySelectorAll('*')) {
       if (hidden(el)) continue
@@ -235,7 +247,7 @@ async function readSvg(ed: Editor, d: {next_id: number; assets?: Record<string, 
         const m = mul(ctm(el), [1, 0, 0, 1, x, y - baselineTop(family, size, 1.2)]) as Matrix
         const s = blankStroke(ed.nextId(d as never), label || content.slice(0, 20))
         s.closed = true
-        s.fill = color(cs.fill, svg) ?? [0, 0, 0]
+        givePaint(s, 'fill', readPaint(cs.fill, cs.fillOpacity, groupOpacity(el, svg), context(el, ctm(el))) ?? {color: [0, 0, 0], opacity: 1, gradient: null})
         s.contours = []
         s.text = {text: content, font: family, size, line_height: 1.2, matrix: m}
         if (anchor === 'middle' || anchor === 'end') {
@@ -254,8 +266,9 @@ async function readSvg(ed: Editor, d: {next_id: number; assets?: Record<string, 
       const m = ctm(el)
       subs = subs.map(sp => transformSubpath(sp, m))
       if (!subs.length) continue
-      const fill = cs.fillOpacity === '0' ? null : color(cs.fill, svg)
-      const edge = cs.strokeOpacity === '0' ? null : color(cs.stroke, svg)
+      const group = groupOpacity(el, svg)
+      const fill = readPaint(cs.fill, cs.fillOpacity, group, context(el, m))
+      const edge = readPaint(cs.stroke, cs.strokeOpacity, group, context(el, m))
       const scale = Math.sqrt(Math.abs(m[0] * m[3] - m[1] * m[2])) || 1
       const width = Math.max(0.01, Math.min(2000, (parseFloat(cs.strokeWidth) || 1) * scale))
       const name = label || {path: 'パス', rect: '長方形', circle: '円', ellipse: '楕円', line: '直線', polyline: '折れ線', polygon: '多角形'}[tag] || tag
@@ -267,10 +280,10 @@ async function readSvg(ed: Editor, d: {next_id: number; assets?: Record<string, 
         const rings = subs.map(sp => flatten(sp))
         const s = blankStroke(ed.nextId(d as never), name)
         s.closed = true
-        s.fill = fill
+        givePaint(s, 'fill', fill)
         s.contours = call<Vec2[][]>('normalizeRings', {rings, evenodd: cs.fillRule === 'evenodd'})
         if (!s.contours.length) continue
-        if (edge) { s.edge = edge; s.edge_width = width }
+        if (edge) { givePaint(s, 'edge', edge); s.edge_width = width }
         s.join = join
         out.strokes.push(s)
         continue
@@ -282,8 +295,8 @@ async function readSvg(ed: Editor, d: {next_id: number; assets?: Record<string, 
         const s = blankStroke(ed.nextId(d as never), subs.length > 1 ? `${name} ${out.strokes.length + 1}` : name)
         s.closed = closed
         s.nodes = nodes
-        s.fill = fill
-        s.edge = edge
+        givePaint(s, 'fill', fill)
+        givePaint(s, 'edge', edge)
         const half = Math.min(1000, width / 2)
         s.start_width = {left: half, right: half, linked: true, angle: 0}
         s.end_width = {left: half, right: half, linked: true, angle: 0}
@@ -326,7 +339,7 @@ export async function importSvg(t: PlaceTarget, text: string, name: string): Pro
     for (const s of got.strokes) {
       for (const n of s.nodes) n.p = {x: n.p.x + dx, y: n.p.y + dy}
       if (s.contours) s.contours = s.contours.map(r => r.map(p => ({x: p.x + dx, y: p.y + dy})))
-      for (const pl of [s.text, s.image]) if (pl) { pl.matrix[4] += dx; pl.matrix[5] += dy }
+      for (const pl of [s.text, s.image, s.fill_gradient, s.edge_gradient]) if (pl) { pl.matrix[4] += dx; pl.matrix[5] += dy }
       s.folder = folder
       doc.strokes.push(s)
     }

@@ -87,6 +87,9 @@ function onUpdateAlpha(value: number) {
 			:max="100"
 			inlinePosition="end"
 			@update:modelValue="onUpdateAlpha"
+			@focus="emit('focus')"
+			@blur="emit('blur')"
+			@confirm="emit('confirm')"
 		/>
 	</InputGroup>
 </template>
