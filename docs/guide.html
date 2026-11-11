@@ -1,0 +1,536 @@
+<title>PathWeaver の使い方</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+JP:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: SAP Fundamental–style docs — a quiet sidebar of sections, each section a
+   "component page": what it is, then how to operate it as tables of action → result. */
+:root {
+  --bg: #f7f7f5;          /* drafting-paper grey, a touch warm */
+  --surface: #ffffff;
+  --raised: #efefec;
+  --line: rgba(28, 30, 33, .1);
+  --fg: #1c1e21;          /* ink */
+  --fg-2: #4d5257;
+  --fg-mute: #74797f;
+  --accent: #2f5fd0;      /* the selection blue of the app: "what you are touching" */
+  --accent-soft: rgba(47, 95, 208, .1);
+  --warn: #9a5b12;
+  --warn-soft: rgba(196, 128, 32, .12);
+  --font-body: "IBM Plex Sans JP", "Hiragino Sans", "Hiragino Kaku Gothic ProN", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --side: 248px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #161718; --surface: #1d1f21; --raised: #27292c; --line: rgba(237, 238, 240, .1);
+    --fg: #edeef0; --fg-2: #b4b8bd; --fg-mute: #8c9197; --accent: #7aa2f4; --accent-soft: rgba(122, 162, 244, .14);
+    --warn: #e0a55a; --warn-soft: rgba(224, 165, 90, .12); color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #161718; --surface: #1d1f21; --raised: #27292c; --line: rgba(237, 238, 240, .1);
+  --fg: #edeef0; --fg-2: #b4b8bd; --fg-mute: #8c9197; --accent: #7aa2f4; --accent-soft: rgba(122, 162, 244, .14);
+  --warn: #e0a55a; --warn-soft: rgba(224, 165, 90, .12); color-scheme: dark;
+}
+* {box-sizing: border-box}
+html {scroll-behavior: smooth; scroll-padding-top: 16px}
+@media (prefers-reduced-motion: reduce) {html {scroll-behavior: auto}}
+body {background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: 15px; line-height: 1.75}
+a {color: var(--accent)}
+a:focus-visible, button:focus-visible {outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px}
+
+.shell {display: grid; grid-template-columns: var(--side) minmax(0, 1fr); min-height: 100vh}
+/* ---- sidebar ---- */
+.side {
+  position: sticky; top: env(safe-area-inset-top, 0px); align-self: start; height: 100vh; overflow-y: auto;
+  border-right: 1px solid var(--line); background: var(--surface);
+  padding-block: 24px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: 16px;
+}
+.brand {display: flex; align-items: center; gap: 10px; margin: 0 0 4px 8px}
+.brand svg {flex: none}
+.brand b {font-weight: 600; font-size: 16px; letter-spacing: .01em}
+.version {margin: 0 0 20px 8px; font-size: 12px; color: var(--fg-mute)}
+.side h2 {margin: 20px 8px 6px; font-size: 11px; font-weight: 500; letter-spacing: .08em; color: var(--fg-mute)}
+.side nav ul {list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px}
+.side nav a {display: block; padding: 5px 8px; border-radius: 4px; color: var(--fg-2); text-decoration: none; font-size: 14px; line-height: 1.5}
+.side nav a:hover {background: var(--raised); color: var(--fg)}
+.side nav a.on {background: var(--accent-soft); color: var(--accent); font-weight: 500}
+
+/* ---- content ---- */
+main {min-width: 0; padding-block: 40px 96px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px))}
+.page {max-width: 880px; margin: 0 auto; display: flex; flex-direction: column; gap: 64px}
+section {display: flex; flex-direction: column; gap: 20px; scroll-margin-top: 16px}
+.eyebrow {font-size: 12px; font-weight: 500; letter-spacing: .08em; color: var(--fg-mute); margin: 0}
+h1 {font-size: 32px; line-height: 1.3; font-weight: 600; margin: 0; text-wrap: balance}
+section > header {display: flex; flex-direction: column; gap: 6px; padding-bottom: 16px; border-bottom: 1px solid var(--line)}
+section > header h2 {font-size: 24px; line-height: 1.35; font-weight: 600; margin: 0; text-wrap: balance}
+h3 {font-size: 17px; font-weight: 600; margin: 8px 0 0; text-wrap: balance}
+p {margin: 0; max-width: 42em; color: var(--fg-2)}
+.lead {font-size: 17px; color: var(--fg-2); max-width: 38em}
+
+/* "component" block: a titled card with an action → result table */
+.block {background: var(--surface); border: 1px solid var(--line); border-radius: 8px; overflow: hidden}
+.block > .head {display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; padding: 14px 20px; border-bottom: 1px solid var(--line)}
+.block > .head h3 {margin: 0; font-size: 15px}
+.block > .head .key {margin-left: auto}
+.block > p {padding: 14px 20px 0}
+.block > p:last-child {padding-bottom: 16px}
+.scroll {overflow-x: auto}
+table {width: 100%; border-collapse: collapse; font-size: 14px; line-height: 1.6}
+th, td {text-align: left; vertical-align: top; padding: 10px 20px; border-top: 1px solid var(--line)}
+thead th {border-top: 0; font-size: 12px; font-weight: 500; color: var(--fg-mute); background: var(--raised); padding-block: 6px}
+td:first-child {width: 38%; color: var(--fg)}
+td {color: var(--fg-2)}
+tr:first-child td {border-top: 0}
+thead + tbody tr:first-child td {border-top: 1px solid var(--line)}
+
+kbd {
+  display: inline-block; min-width: 1.6em; padding: 0 .45em; margin: 0 .08em; border-radius: 4px; text-align: center;
+  font-family: var(--font-mono); font-size: 12.5px; line-height: 1.75; color: var(--fg);
+  background: var(--surface); border: 1px solid var(--line); box-shadow: 0 1px 0 var(--line);
+}
+.tag {display: inline-block; padding: 0 8px; border-radius: 999px; font-size: 12px; background: var(--raised); color: var(--fg-2); white-space: nowrap}
+.note {display: flex; gap: 12px; padding: 14px 18px; border-radius: 8px; background: var(--accent-soft); color: var(--fg-2); font-size: 14px}
+.note.warn {background: var(--warn-soft)}
+.note b {color: var(--fg); font-weight: 600; flex: none}
+ul.plain {margin: 0; padding-left: 1.2em; color: var(--fg-2); display: flex; flex-direction: column; gap: 4px; max-width: 44em}
+
+.grid2 {display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px}
+.cell {background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 16px 18px; display: flex; flex-direction: column; gap: 6px; min-width: 0}
+.cell h3 {margin: 0; font-size: 15px}
+.cell p {font-size: 14px}
+
+/* the opening figure: a variable-width stroke with its parts named */
+.figure {background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px 12px 4px}
+.figure svg {display: block; width: 100%; height: auto}
+.figure figcaption {font-size: 12px; color: var(--fg-mute); padding: 4px 8px 8px}
+.fig-ink {fill: var(--fg)}
+.fig-core {fill: none; stroke: var(--accent); stroke-width: 1.5; stroke-dasharray: 4 4}
+.fig-mark {fill: var(--surface); stroke: var(--accent); stroke-width: 1.5}
+.fig-lead {stroke: var(--fg-mute); stroke-width: 1}
+.fig-label {font-size: 13px; fill: var(--fg-2); font-family: var(--font-body)}
+
+.nodes {display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px}
+.nodes .cell ul {margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 6px}
+
+@media (max-width: 860px) {
+  .shell {grid-template-columns: minmax(0, 1fr)}
+  .side {position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line); padding-right: max(16px, env(safe-area-inset-right, 0px))}
+  .side nav ul {flex-direction: row; flex-wrap: wrap; gap: 4px}
+  .side nav a {background: var(--raised)}
+  .side h2 {display: none}
+  .grid2, .nodes {grid-template-columns: minmax(0, 1fr)}
+  td:first-child {width: 44%}
+  th, td {padding-inline: 14px}
+}
+</style>
+
+<div class="shell">
+  <aside class="side">
+    <div class="brand">
+      <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 18 C 8 4, 14 4, 21 9" fill="none" stroke="currentColor" stroke-width="1"/><path d="M3 18 C 7.5 6.6, 13.6 3.2, 21 9 L 21 9 C 14 6.2, 8.6 8.6, 3 18 Z" fill="currentColor"/></svg>
+      <b>PathWeaver</b>
+    </div>
+    <p class="version">使い方ガイド・2026年11月版</p>
+    <nav aria-label="目次">
+      <h2>はじめに</h2>
+      <ul>
+        <li><a href="#intro">PathWeaver とは</a></li>
+        <li><a href="#screen">画面の見方</a></li>
+      </ul>
+      <h2>作る</h2>
+      <ul>
+        <li><a href="#draw">描く</a></li>
+        <li><a href="#select">選ぶ・動かす</a></li>
+        <li><a href="#width">太さ・切り口・角</a></li>
+        <li><a href="#color">色</a></li>
+        <li><a href="#looks">外観ノード</a></li>
+      </ul>
+      <h2>まとめる</h2>
+      <ul>
+        <li><a href="#organize">レイヤー・ガイド・吸着</a></li>
+        <li><a href="#combine">パスファインダー・ブレンド</a></li>
+        <li><a href="#place">読み込み・画像</a></li>
+        <li><a href="#export">アートボード・書き出し</a></li>
+      </ul>
+      <h2>参照</h2>
+      <ul>
+        <li><a href="#view">画面の操作・設定</a></li>
+        <li><a href="#keys">キー一覧</a></li>
+        <li><a href="#limits">いまの制限</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main>
+    <div class="page">
+
+      <section id="intro">
+        <header>
+          <p class="eyebrow">はじめに</p>
+          <h1>PathWeaver の使い方</h1>
+        </header>
+        <p class="lead">PathWeaver は、太さが場所ごとに変わる線を描いて、その見た目をノードで重ねていく Mac 用のベクター描画アプリです。線の太さ・切り口の角度・角の丸みは、描いたあとでもいつでも直せます。</p>
+        <figure class="figure">
+          <svg viewBox="0 0 760 210" role="img" aria-label="太さの変わる線の各部の名前：芯、幅点、切り口">
+            <path class="fig-ink" d="M60 160 C 160 60, 300 40, 420 92 C 520 136, 600 120, 700 54 L 712 70 C 620 150, 520 176, 410 128 C 300 82, 180 108, 84 182 Z"/>
+            <path class="fig-core" d="M72 171 C 170 84, 300 62, 415 110 C 520 156, 610 136, 706 62"/>
+            <circle class="fig-mark" cx="415" cy="110" r="6"/>
+            <circle class="fig-mark" cx="72" cy="171" r="6"/>
+            <line class="fig-lead" x1="415" y1="104" x2="452" y2="30"/>
+            <text class="fig-label" x="458" y="28">幅点：ここの太さを変える</text>
+            <line class="fig-lead" x1="250" y1="90" x2="214" y2="30"/>
+            <text class="fig-label" x="120" y="24">芯（パスそのもの）</text>
+            <line class="fig-lead" x1="704" y1="62" x2="726" y2="128"/>
+            <text class="fig-label" x="600" y="148">切り口：端の角度</text>
+            <line class="fig-lead" x1="72" y1="177" x2="96" y2="200"/>
+            <text class="fig-label" x="104" y="204">始点</text>
+          </svg>
+          <figcaption>線は「芯」と、芯に沿って置いた「幅点」でできている。輪郭は幅点の間をなめらかにつないで自動で作られる。</figcaption>
+        </figure>
+        <div class="grid2">
+          <div class="cell"><h3>いつでも直せる</h3><p>太さ・切り口・角丸・図形の寸法・ブレンドの段数・外観ノードの値は、作ったあとから変えられます。取り消し（<kbd>⌘</kbd><kbd>Z</kbd>）は操作1回ごとに1段です。</p></div>
+          <div class="cell"><h3>外観はノードで</h3><p>ラフ・光彩・ハーフトーンなどの効果は、パスを変えずに「外観」として上から重ねます。外観は他のパスと共有したり、ライブラリに保存して別のファイルで使えます。</p></div>
+        </div>
+      </section>
+
+      <section id="screen">
+        <header><p class="eyebrow">はじめに</p><h2>画面の見方</h2></header>
+        <div class="block">
+          <div class="scroll"><table>
+            <thead><tr><th>場所</th><th>何があるか</th></tr></thead>
+            <tbody>
+              <tr><td>上のバー</td><td>ファイル名（未保存なら点）、開く・保存・書き出し、取り消し・やり直し、ノードパネルの開閉、設定。バーはドラッグでウィンドウを動かせ、ダブルクリックで拡大します。</td></tr>
+              <tr><td>ツールパレット（キャンバス左上）</td><td>選択・ダイレクト選択・ペン・図形・アンカーポイント・文字・アートボード。上のつまみでドラッグして好きな場所へ、ダブルクリックで縦横を切り替えます。</td></tr>
+              <tr><td>キャンバス</td><td>上と左に定規。左下に吸着バー（ガイド・グリッド・接線・法線）。右下に「外観」ボタンと倍率。</td></tr>
+              <tr><td>右上：レイヤー</td><td>パスとフォルダの一覧。目のマークで表示、行のドラッグで重ね順とフォルダの出し入れ。外観のアイコンを開くとノードも並びます。</td></tr>
+              <tr><td>右下：プロパティ</td><td>選んだ物の設定。何も選んでいないときは「次に描くパス」の塗り・線・線幅。タブで「グリッド・ガイド」に切り替えます。</td></tr>
+              <tr><td>下：ノードエディター</td><td>選んだパスの外観ノード。上部のバーで外観の選択・追加。</td></tr>
+              <tr><td>いちばん下：ステータス</td><td>いまのツールの使い方と、操作の結果やエラー。</td></tr>
+            </tbody>
+          </table></div>
+        </div>
+        <p>どのパネルも見出しの <span class="tag">⌄</span> でたたみ、「切り離す」で浮かせられます。<kbd>Ctrl</kbd><kbd>Space</kbd> でポインターの下のエリアだけを大きく表示します（もう一度押すと戻る）。</p>
+      </section>
+
+      <section id="draw">
+        <header><p class="eyebrow">作る</p><h2>描く</h2></header>
+        <div class="block">
+          <div class="head"><h3>ペン</h3><span class="key"><kbd>P</kbd></span></div>
+          <div class="scroll"><table><tbody>
+            <tr><td>クリック</td><td>角のアンカーを置く</td></tr>
+            <tr><td>ドラッグ</td><td>曲線のアンカー（ハンドルを引き出す）</td></tr>
+            <tr><td>最初の点をクリック</td><td>パスを閉じる</td></tr>
+            <tr><td><kbd>Enter</kbd> / <kbd>Esc</kbd></td><td>描き終える（開いたパスのまま）</td></tr>
+            <tr><td><kbd>Shift</kbd>＋クリック・ドラッグ</td><td>角度を刻む（既定 15°。前の点からの向き・ハンドルの向き）</td></tr>
+            <tr><td>線分の上をクリック</td><td>その場所にアンカーを足す</td></tr>
+            <tr><td><kbd>Shift</kbd>＋既存のパスをクリック</td><td>そのパスの上から描き始める。次の点は法線方向に吸着</td></tr>
+          </tbody></table></div>
+        </div>
+        <div class="block">
+          <div class="head"><h3>図形</h3><span class="key"><kbd>M</kbd> 長方形　<kbd>L</kbd> 楕円　<kbd>\</kbd> 直線</span></div>
+          <p>パレットの図形ボタンをもう一度押す（または右クリック）と一覧が出ます：長方形・角丸長方形・楕円・多角形・スター・直線・円弧・スパイラル・長方形グリッド・同心円グリッド。できるのは普通のパスなので、そのままアンカーを直せます。</p>
+          <div class="scroll"><table><tbody>
+            <tr><td>ドラッグ</td><td>描く。クリックだけなら標準の大きさ</td></tr>
+            <tr><td><kbd>Shift</kbd></td><td>縦横同じ（直線は角度刻み）</td></tr>
+            <tr><td><kbd>Option</kbd></td><td>中心から描く</td></tr>
+            <tr><td>ドラッグ中に <kbd>↑</kbd> <kbd>↓</kbd></td><td>多角形の辺・スターの頂点・スパイラルの数</td></tr>
+            <tr><td>描いた直後の左下のパネル</td><td>寸法・角丸・辺の数・分割数などを変えると同じ図形を作り直す（取り消しは1回のまま）。別の操作をすると閉じて、ただのパスになる</td></tr>
+          </tbody></table></div>
+        </div>
+        <div class="block">
+          <div class="head"><h3>文字</h3><span class="key"><kbd>T</kbd></span></div>
+          <div class="scroll"><table><tbody>
+            <tr><td>クリックして打つ</td><td>クリックした所が1行目の基準線。日本語入力もそのまま使えます</td></tr>
+            <tr><td><kbd>Esc</kbd> / ほかをクリック</td><td>確定。空なら何も残らない</td></tr>
+            <tr><td>選択ツールで文字をダブルクリック</td><td>打ち直す</td></tr>
+            <tr><td>右パネル</td><td>フォント（検索できる）・サイズ・行送り</td></tr>
+            <tr><td><kbd>⇧</kbd><kbd>⌘</kbd><kbd>O</kbd></td><td>アウトライン化（ただの形になり、打ち直せなくなる）</td></tr>
+          </tbody></table></div>
+          <p>文字の形にも塗り・線・外観ノードがそのまま効きます。</p>
+        </div>
+      </section>
+
+      <section id="select">
+        <header><p class="eyebrow">作る</p><h2>選ぶ・動かす</h2></header>
+        <div class="block">
+          <div class="head"><h3>選択</h3><span class="key"><kbd>V</kbd></span></div>
+          <div class="scroll"><table><tbody>
+            <tr><td>クリック / <kbd>Shift</kbd>＋クリック</td><td>選ぶ / 追加・外す。空いた所からドラッグで範囲選択</td></tr>
+            <tr><td>ドラッグ</td><td>移動。<kbd>Option</kbd> で複製しながら移動、<kbd>Shift</kbd> で縦横に固定</td></tr>
+            <tr><td>枠の四角をドラッグ</td><td>拡大縮小。<kbd>Shift</kbd> で比率を保つ、<kbd>Option</kbd> で基準点から</td></tr>
+            <tr><td>枠の角のすぐ外をドラッグ</td><td>基準点を中心に回転。<kbd>Shift</kbd> で角度を刻む</td></tr>
+            <tr><td>矢印キー</td><td>1ずつ動かす（<kbd>Shift</kbd> で10）</td></tr>
+            <tr><td>右クリック</td><td>カット・コピー・複製・重ね順・ガイド化・フォルダ・ブレンドなどのメニュー</td></tr>
+          </tbody></table></div>
+        </div>
+        <div class="block">
+          <div class="head"><h3>基準点</h3></div>
+          <p>位置・サイズ・回転は「基準点」を軸に変わります。最初は中心です。</p>
+          <div class="scroll"><table><tbody>
+            <tr><td>右パネル「位置とサイズ」の右の9つの点</td><td>基準点を選ぶ。位置 X/Y はこの点の座標になる</td></tr>
+            <tr><td>キャンバスの十字をドラッグ</td><td>好きな所へ動かす（9点の近くでは吸い付く）。パスや角の四角と重なっているときは <kbd>⌘</kbd> を押しながら</td></tr>
+            <tr><td>十字をダブルクリック</td><td>中心に戻す</td></tr>
+            <tr><td>右パネルの「回転」つまみ</td><td>基準点を中心に回す。回し終わると 0 に戻る</td></tr>
+          </tbody></table></div>
+          <p>位置とサイズは、外観ノードの効果を含まない「パスそのものの形（線幅込み）」で測ります。</p>
+        </div>
+        <div class="block">
+          <div class="head"><h3>ダイレクト選択・アンカーポイント</h3><span class="key"><kbd>A</kbd>　<kbd>⇧</kbd><kbd>C</kbd></span></div>
+          <div class="scroll"><table><tbody>
+            <tr><td>アンカー・ハンドルをドラッグ</td><td>形を直す。<kbd>Shift</kbd> でハンドルの角度を刻む</td></tr>
+            <tr><td>線分を <kbd>Option</kbd>＋クリック / ダブルクリック</td><td>アンカーを足す</td></tr>
+            <tr><td><kbd>Delete</kbd></td><td>選んだアンカーを消す（アンカーを選んでいないときはパスを消す）</td></tr>
+            <tr><td>アンカーポイントツールでクリック / ドラッグ</td><td>角にする / スムーズにする。ハンドルのドラッグは片側だけ動く</td></tr>
+          </tbody></table></div>
+        </div>
+        <div class="block">
+          <div class="head"><h3>コピーと複製</h3></div>
+          <div class="scroll"><table><tbody>
+            <tr><td><kbd>⌘</kbd><kbd>C</kbd> <kbd>⌘</kbd><kbd>X</kbd> <kbd>⌘</kbd><kbd>V</kbd></td><td>コピー・カット・ペースト。外観は独立した複製になる</td></tr>
+            <tr><td><kbd>⌘</kbd><kbd>D</kbd> / <kbd>Option</kbd>＋ドラッグ</td><td>複製。外観は共有されたまま（片方を変えるともう片方も変わる）</td></tr>
+          </tbody></table></div>
+        </div>
+      </section>
+
+      <section id="width">
+        <header><p class="eyebrow">作る</p><h2>太さ・切り口・角</h2></header>
+        <p>ダイレクト選択・ペン・アンカーポイントのツールでは、線の両側にオレンジの太さのつまみが出ます（設定で常時表示をオフにでき、そのときは <kbd>⌘</kbd> を押している間だけ出ます）。</p>
+        <div class="block">
+          <div class="head"><h3>太さ</h3></div>
+          <div class="scroll"><table><tbody>
+            <tr><td>つまみをドラッグ</td><td>両側を同じ量だけ太く・細く（左右の差は保つ）</td></tr>
+            <tr><td><kbd>Option</kbd>＋ドラッグ</td><td>その側だけ</td></tr>
+            <tr><td><kbd>⌘</kbd>＋芯をクリック</td><td>そこに幅点を足す（いまの太さの流れのまま）</td></tr>
+            <tr><td><kbd>⌘</kbd>＋幅点をドラッグ</td><td>幅点を芯に沿って動かす</td></tr>
+            <tr><td>幅点を選んで <kbd>Delete</kbd></td><td>幅点を消す</td></tr>
+            <tr><td>右パネル</td><td>太さ・左だけ・右だけ・方向を数値で</td></tr>
+          </tbody></table></div>
+        </div>
+        <div class="block">
+          <div class="head"><h3>切り口と線端</h3></div>
+          <div class="scroll"><table><tbody>
+            <tr><td><kbd>⌘</kbd>＋端点をドラッグ</td><td>切り口の角度を回す</td></tr>
+            <tr><td>右パネル「始点の切り口」「終点の切り口」</td><td>角度のつまみで直接</td></tr>
+            <tr><td>右パネル「線端」</td><td>平ら・丸・四角</td></tr>
+          </tbody></table></div>
+        </div>
+        <div class="block">
+          <div class="head"><h3>角</h3></div>
+          <div class="scroll"><table><tbody>
+            <tr><td>右パネル「角」</td><td>鋭角・丸・面取り（パス全体の角のつなぎ方）</td></tr>
+            <tr><td>ダイレクト選択で角の内側の丸いつまみをドラッグ</td><td>その角だけ角丸の半径を変える（生きた角丸）</td></tr>
+            <tr><td>つまみを <kbd>Option</kbd>＋クリック</td><td>角丸の種類を切り替える：円弧・クロソイド・面取り</td></tr>
+          </tbody></table></div>
+        </div>
+      </section>
+
+      <section id="color">
+        <header><p class="eyebrow">作る</p><h2>色</h2></header>
+        <div class="block">
+          <div class="scroll"><table><tbody>
+            <tr><td>右パネルの「塗り」「線」</td><td>色見本と16進の欄。「なし — 追加」で付ける、<kbd>−</kbd> でなしにする</td></tr>
+            <tr><td>色見本をクリック</td><td>色のパレット（色の面・色相・プリセット）</td></tr>
+            <tr><td>色見本をドラッグ</td><td>その場で色の面が出て、離すと決まる。ドラッグ中に <kbd>H</kbd> <kbd>S</kbd> <kbd>V</kbd> <kbd>R</kbd> <kbd>G</kbd> <kbd>B</kbd> で動かす成分を切り替え</td></tr>
+          </tbody></table></div>
+        </div>
+        <p>数値の欄はどれも、左右にドラッグして値を変えられます。<kbd>Option</kbd> で1/10の細かさ、<kbd>Shift</kbd> で10倍。クリックすれば数字や式を打てます。</p>
+      </section>
+
+      <section id="looks">
+        <header><p class="eyebrow">作る</p><h2>外観ノード</h2></header>
+        <p>パスを選んで下のノードエディターで「追加」（または <kbd>Shift</kbd><kbd>A</kbd>）すると、元の外観 → ノード → 出力 の形で外観が始まります。パスの形は変えずに、見た目だけを作ります。</p>
+        <div class="block">
+          <div class="head"><h3>つなぐ・並べる</h3></div>
+          <div class="scroll"><table><tbody>
+            <tr><td><kbd>Shift</kbd><kbd>A</kbd></td><td>追加メニュー（打てば検索）。選んだノードはポインターに付いてきて、クリックで置く。リンクの上に置けば間に入る</td></tr>
+            <tr><td>出力のソケットから線を引いて空白で離す</td><td>追加メニュー。選んだノードはその線につながる</td></tr>
+            <tr><td>ノードをリンクの上にドラッグ</td><td>間に挿入</td></tr>
+            <tr><td><kbd>Ctrl</kbd>＋ノードをドラッグ</td><td>リンクから外す（前後はつなぎ直す）</td></tr>
+            <tr><td><kbd>Option</kbd>＋右ドラッグ</td><td>2つのノードを自動でつなぐ</td></tr>
+            <tr><td><kbd>Ctrl</kbd>＋右ドラッグ</td><td>なぞったリンクを切る</td></tr>
+            <tr><td><kbd>G</kbd> / <kbd>Shift</kbd><kbd>D</kbd> / <kbd>X</kbd></td><td>つかんで動かす / 複製 / 削除</td></tr>
+            <tr><td><kbd>Ctrl</kbd><kbd>X</kbd></td><td>ノードを消して前後をつなぐ</td></tr>
+          </tbody></table></div>
+        </div>
+        <div class="block">
+          <div class="head"><h3>見る・止める</h3></div>
+          <div class="scroll"><table><tbody>
+            <tr><td><kbd>M</kbd> / ノードの電源ボタン</td><td>そのノードだけ止める（バイパス）</td></tr>
+            <tr><td><kbd>Ctrl</kbd><kbd>Shift</kbd>＋ノードをクリック</td><td>そのノードの結果をキャンバスに表示（表示だけ。保存・書き出しは最終出力のまま）。上に「表示中」が出る。同じノードか × で戻る</td></tr>
+            <tr><td>ノードバーのチェック</td><td>このパスの外観を全部オン・オフ</td></tr>
+            <tr><td>キャンバス右下の「外観」</td><td>全部のパスの外観を表示だけオフ（重いときに）。ファイルと書き出しは変わらない</td></tr>
+            <tr><td>レイヤー一覧の外観の行</td><td>目のマークでノードごと・外観ごとにオン・オフ</td></tr>
+          </tbody></table></div>
+        </div>
+        <div class="block">
+          <div class="head"><h3>共有とライブラリ</h3></div>
+          <div class="scroll"><table><tbody>
+            <tr><td>ノードバー左の外観の <span class="tag">▾</span></td><td>このファイルの外観・ライブラリから選ぶ。選んでいるパス全部に1つの共有された外観としてかかる</td></tr>
+            <tr><td>使っている数（<span class="tag">2</span> など）を押す</td><td>このパス専用の複製にする</td></tr>
+            <tr><td>「ライブラリに保存」「書き出す…」</td><td>外観を別ファイル（.pwn）にして、ほかの書類でも使う</td></tr>
+          </tbody></table></div>
+        </div>
+        <h3>ノードの種類</h3>
+        <div class="nodes">
+          <div class="cell"><h3>形</h3><ul><li class="tag">ラフ</li><li class="tag">ジグザグ</li><li class="tag">変形</li><li class="tag">パスのオフセット</li><li class="tag">角を丸くする</li><li class="tag">縁取りの形</li><li class="tag">パンク・膨張</li><li class="tag">単純化</li><li class="tag">かすれ</li><li class="tag">エッジを溶かす</li><li class="tag">ハーフトーン</li><li class="tag">メゾティント</li></ul></div>
+          <div class="cell"><h3>色・効果</h3><ul><li class="tag">色</li><li class="tag">不透明度</li><li class="tag">ドロップシャドウ</li><li class="tag">光彩</li><li class="tag">ぼかし</li></ul></div>
+          <div class="cell"><h3>合成</h3><ul><li class="tag">重ねる</li><li class="tag">パスファインダー</li><li class="tag">形の合成</li></ul></div>
+          <div class="cell"><h3>ラスター</h3><ul><li class="tag">画像</li><li class="tag">ラスター化</li><li class="tag">ラスターぼかし</li><li class="tag">しきい値</li><li class="tag">ノイズ</li><li class="tag">画像トレース</li></ul></div>
+          <div class="cell"><h3>数値</h3><ul><li class="tag">値</li><li class="tag">計算</li><li class="tag">形の大きさ</li></ul><p>数値の出力を、ほかのノードの値のソケットにつなぐと、その値を動かせます。</p></div>
+          <div class="cell"><h3>入出力</h3><ul><li class="tag">元の外観</li><li class="tag">出力</li><li class="tag">中継</li></ul></div>
+        </div>
+        <p>形のノードとラスターのノードは自由につなげます。形をラスターのノードにつなぐと自動で画像になり、画像を形のノードにつなぐと自動でトレースされます。ノードの値のバーは「ふだん使う範囲」を表し、バーの先までドラッグし続けたり、もっと大きな数を打ったりもできます。</p>
+      </section>
+
+      <section id="organize">
+        <header><p class="eyebrow">まとめる</p><h2>レイヤー・ガイド・吸着</h2></header>
+        <div class="block">
+          <div class="head"><h3>レイヤーとフォルダ</h3></div>
+          <div class="scroll"><table><tbody>
+            <tr><td><kbd>⌘</kbd><kbd>G</kbd> / <kbd>⇧</kbd><kbd>⌘</kbd><kbd>G</kbd></td><td>選んだパスをフォルダにまとめる / 解除。何も選んでいなければ空のフォルダ</td></tr>
+            <tr><td>行をドラッグ</td><td>重ね順を変える・フォルダへ出し入れ（フォルダの中にフォルダも置ける）</td></tr>
+            <tr><td>行をダブルクリック</td><td>名前を変える</td></tr>
+            <tr><td>目のマーク</td><td>表示・非表示（非表示は書き出されない）</td></tr>
+            <tr><td>右クリック →「重ね順」</td><td>最前面・前面・背面・最背面</td></tr>
+          </tbody></table></div>
+        </div>
+        <div class="block">
+          <div class="head"><h3>ガイドと吸着</h3></div>
+          <div class="scroll"><table><tbody>
+            <tr><td>定規からキャンバスへドラッグ</td><td>ガイドを引く。定規へ戻すと消える</td></tr>
+            <tr><td><kbd>⌘</kbd><kbd>5</kbd> / <kbd>⌥</kbd><kbd>⌘</kbd><kbd>5</kbd></td><td>選んだパスをガイドにする / 戻す（細い線で表示され、書き出されない）</td></tr>
+            <tr><td>吸着バー（キャンバス左下）</td><td>ガイド・グリッド・接線・法線に吸着するか</td></tr>
+            <tr><td><kbd>⌘</kbd><kbd>'</kbd> / <kbd>⌘</kbd><kbd>;</kbd></td><td>グリッドを表示して吸着 / ガイドに吸着</td></tr>
+            <tr><td>ドラッグ中に <kbd>Ctrl</kbd></td><td>一時的に吸着しない</td></tr>
+            <tr><td>右パネルの「グリッド・ガイド」タブ</td><td>グリッドの間隔、<kbd>Shift</kbd> で刻む角度</td></tr>
+          </tbody></table></div>
+        </div>
+      </section>
+
+      <section id="combine">
+        <header><p class="eyebrow">まとめる</p><h2>パスファインダー・ブレンド</h2></header>
+        <div class="grid2">
+          <div class="cell"><h3>パスファインダー</h3><p>2本以上選ぶと右パネルに6つのボタン：合体・前面で型抜き・背面で型抜き・交差・中マド・分割。前後は重ね順で決まり、外観は焼き込まれます。</p></div>
+          <div class="cell"><h3>ブレンド <kbd>⌥</kbd><kbd>⌘</kbd><kbd>B</kbd></h3><p>2つのパスの間に段（標準5）を作ります。端の形・色・太さを変えると間も作り直されます。段数は右パネル。解除は <kbd>⌥</kbd><kbd>⇧</kbd><kbd>⌘</kbd><kbd>B</kbd>、「拡張」で普通のパスになります。</p></div>
+        </div>
+      </section>
+
+      <section id="place">
+        <header><p class="eyebrow">まとめる</p><h2>読み込み・画像</h2></header>
+        <div class="block">
+          <div class="scroll"><table><tbody>
+            <tr><td><kbd>⇧</kbd><kbd>⌘</kbd><kbd>P</kbd> / ファイルをキャンバスへドロップ / 画像をペースト</td><td>SVG と画像（PNG・JPEG・HEIC など）を配置</td></tr>
+            <tr><td>SVG</td><td>形は編集できるパスに、文字は打ち直せる文字に。ファイル名のフォルダに入り、1回で取り消せる</td></tr>
+            <tr><td>画像：右パネル「不透明度」</td><td>透かす</td></tr>
+            <tr><td>画像：右パネル「抜き」</td><td>黒：暗いところほど透ける（光や炎の素材、Unmult）。白：白い紙が透けて線だけ残る（スキャンした線画）。元の画素はそのまま</td></tr>
+            <tr><td>画像：右パネル「下絵にする」</td><td>なぞるための画像に。書き出されず、キャンバスでは選ばれない（レイヤー一覧から選ぶ）</td></tr>
+          </tbody></table></div>
+        </div>
+      </section>
+
+      <section id="export">
+        <header><p class="eyebrow">まとめる</p><h2>アートボード・書き出し</h2></header>
+        <div class="block">
+          <div class="head"><h3>アートボード</h3><span class="key"><kbd>⇧</kbd><kbd>O</kbd></span></div>
+          <div class="scroll"><table><tbody>
+            <tr><td>空いた所をドラッグ</td><td>アートボードを作る。いくつでも置ける</td></tr>
+            <tr><td>中をドラッグ / 枠の四角をドラッグ</td><td>移動 / 大きさ</td></tr>
+            <tr><td><kbd>Delete</kbd></td><td>選んでいるアートボードを消す</td></tr>
+            <tr><td>右パネル</td><td>一覧、名前・位置・サイズ、定型（A4・はがき・1920×1080 など）、「追加」「選択に合わせる」</td></tr>
+          </tbody></table></div>
+        </div>
+        <div class="block">
+          <div class="head"><h3>書き出し</h3><span class="key"><kbd>⌘</kbd><kbd>E</kbd></span></div>
+          <div class="scroll"><table><tbody>
+            <tr><td>範囲</td><td>アートボード（チェックしたものを1枚ずつ）・選択・絵全体。選択と絵全体は光彩などの効果まで含めた広さ</td></tr>
+            <tr><td>形式</td><td>SVG・PNG・JPEG</td></tr>
+            <tr><td>倍率</td><td>1×〜4×（1単位を何ピクセルにするか）。下に出来上がりのピクセル数</td></tr>
+            <tr><td>背景</td><td>透明・白（JPEG は白）</td></tr>
+            <tr><td>保存先</td><td>1ファイルなら保存パネル、複数ならフォルダを選ぶ。名前は「ファイル名-アートボード名」</td></tr>
+          </tbody></table></div>
+        </div>
+      </section>
+
+      <section id="view">
+        <header><p class="eyebrow">参照</p><h2>画面の操作・設定</h2></header>
+        <div class="block">
+          <div class="scroll"><table><tbody>
+            <tr><td>ピンチ / <kbd>⌘</kbd>＋スクロール</td><td>拡大縮小</td></tr>
+            <tr><td>スクロール / <kbd>Space</kbd>＋ドラッグ / 中ボタン</td><td>動かす</td></tr>
+            <tr><td><kbd>⌘</kbd><kbd>0</kbd> / <kbd>F</kbd></td><td>全体を表示</td></tr>
+            <tr><td><kbd>⌘</kbd><kbd>1</kbd> / 右下の倍率をクリック</td><td>100%</td></tr>
+            <tr><td><kbd>⌘</kbd><kbd>+</kbd> / <kbd>⌘</kbd><kbd>−</kbd></td><td>拡大 / 縮小</td></tr>
+            <tr><td><kbd>⌥</kbd><kbd>⌘</kbd><kbd>N</kbd></td><td>ノードパネルを表示 / 隠す</td></tr>
+            <tr><td><kbd>⌘</kbd><kbd>,</kbd></td><td>設定：ズームの速さと向き、ホイール（移動 / ズーム）、テーマ、作品の背景、太さのつまみの常時表示</td></tr>
+          </tbody></table></div>
+        </div>
+      </section>
+
+      <section id="keys">
+        <header><p class="eyebrow">参照</p><h2>キー一覧</h2></header>
+        <div class="grid2">
+          <div class="block">
+            <div class="head"><h3>ツール</h3></div>
+            <div class="scroll"><table><tbody>
+              <tr><td><kbd>V</kbd></td><td>選択</td></tr>
+              <tr><td><kbd>A</kbd></td><td>ダイレクト選択</td></tr>
+              <tr><td><kbd>P</kbd></td><td>ペン</td></tr>
+              <tr><td><kbd>⇧</kbd><kbd>C</kbd></td><td>アンカーポイント</td></tr>
+              <tr><td><kbd>M</kbd> <kbd>L</kbd> <kbd>\</kbd></td><td>長方形・楕円・直線</td></tr>
+              <tr><td><kbd>T</kbd></td><td>文字</td></tr>
+              <tr><td><kbd>⇧</kbd><kbd>O</kbd></td><td>アートボード</td></tr>
+            </tbody></table></div>
+          </div>
+          <div class="block">
+            <div class="head"><h3>ファイル・編集</h3></div>
+            <div class="scroll"><table><tbody>
+              <tr><td><kbd>⌘</kbd><kbd>N</kbd> <kbd>⌘</kbd><kbd>O</kbd></td><td>新規・開く</td></tr>
+              <tr><td><kbd>⌘</kbd><kbd>S</kbd> <kbd>⇧</kbd><kbd>⌘</kbd><kbd>S</kbd></td><td>保存・別名で保存</td></tr>
+              <tr><td><kbd>⇧</kbd><kbd>⌘</kbd><kbd>P</kbd> <kbd>⌘</kbd><kbd>E</kbd></td><td>配置・書き出し</td></tr>
+              <tr><td><kbd>⌘</kbd><kbd>Z</kbd> <kbd>⇧</kbd><kbd>⌘</kbd><kbd>Z</kbd></td><td>取り消し・やり直し</td></tr>
+              <tr><td><kbd>⌘</kbd><kbd>A</kbd> <kbd>Esc</kbd></td><td>すべて選択・選択解除</td></tr>
+              <tr><td><kbd>⌘</kbd><kbd>D</kbd> <kbd>Delete</kbd></td><td>複製・削除</td></tr>
+              <tr><td><kbd>⌘</kbd><kbd>G</kbd> <kbd>⇧</kbd><kbd>⌘</kbd><kbd>G</kbd></td><td>フォルダにまとめる・解除</td></tr>
+              <tr><td><kbd>⇧</kbd><kbd>⌘</kbd><kbd>O</kbd></td><td>アウトライン化</td></tr>
+              <tr><td><kbd>⌥</kbd><kbd>⌘</kbd><kbd>B</kbd></td><td>ブレンドを作成</td></tr>
+              <tr><td><kbd>⌘</kbd><kbd>5</kbd></td><td>ガイドにする</td></tr>
+            </tbody></table></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="limits">
+        <header><p class="eyebrow">参照</p><h2>いまの制限</h2></header>
+        <p>使う前に知っておくと困らないことです。どれも今後の改善の候補です。</p>
+        <div class="note warn"><b>保存</b><span>自動保存はありません。こまめに <kbd>⌘</kbd><kbd>S</kbd> してください。</span></div>
+        <ul class="plain">
+          <li>パスファインダーの結果・アウトライン化した文字・穴のある SVG の形は、細かい折れ線の形になり、アンカーを直せません。</li>
+          <li>SVG の書き出しは見た目どおりの輪郭（塗りの形）で出ます。曲線・線の設定・フォルダの構造は残りません。PDF の書き出しはありません。</li>
+          <li>整列・分布、ロック、他の物への吸着（スマートガイド）はまだありません。</li>
+          <li>色ごとの不透明度とグラデーションはありません（不透明度は外観ノードで付けられます）。SVG のグラデーションは最初の色で読み込まれます。</li>
+          <li>文字の設定はフォント・サイズ・行送りだけです（揃え・字送り・パス上文字はありません）。</li>
+          <li>大きさの単位は1種類（1単位＝1pt／1px）です。</li>
+        </ul>
+      </section>
+
+    </div>
+  </main>
+</div>
+
+<script>
+// highlight the section in view in the sidebar
+(() => {
+  const links = [...document.querySelectorAll('.side nav a')]
+  const byId = new Map(links.map(a => [a.getAttribute('href').slice(1), a]))
+  const seen = new Set()
+  const io = new IntersectionObserver(entries => {
+    for (const e of entries) e.isIntersecting ? seen.add(e.target.id) : seen.delete(e.target.id)
+    const first = [...byId.keys()].find(id => seen.has(id))
+    links.forEach(a => a.classList.toggle('on', a === byId.get(first)))
+  }, {rootMargin: '0px 0px -60% 0px'})
+  document.querySelectorAll('main section[id]').forEach(s => io.observe(s))
+})()
+</script>
