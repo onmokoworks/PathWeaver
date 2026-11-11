@@ -17,6 +17,8 @@
 import {call} from './wasm'
 import type {Editor} from './editor'
 import type {Document, Matrix, Stroke, TextSpec, Vec2} from './types'
+import {nodesOf, parsePath, transformSubpath} from './svgPath'
+import {pathsFromRings, type Ring} from './compound'
 import {baselineIn, layoutOnPath, layoutPoint, measurePath, pathTextStart, placedRings, type PathMeasure, type Shaped, type ShapedGlyph} from './textLayout'
 
 export const DEFAULT_FONT = 'Hiragino Sans'
@@ -25,7 +27,7 @@ type Post = (m: {type: string; [k: string]: unknown}) => void
 let post: Post | null = null
 let nextRequest = 1
 interface HostShape {ascent: number; descent: number; glyphs: {l: number; x: number; a: number; r: number[][]}[]}
-const waiting = new Map<number, (r: {shape?: HostShape; error?: string}) => void>()
+const waiting = new Map<number, (r: {shape?: HostShape; contours?: number[][]; curves?: string[]; error?: string}) => void>()
 let fontList: string[] | null = null
 const fontWaiters: ((list: string[]) => void)[] = []
 
@@ -36,6 +38,11 @@ export function initTextHost(p: Post | null) {
   Object.assign(window.pathweaver, {
     shaped: ((id: number, shape: HostShape | null, error?: string) => {
       waiting.get(id)?.(shape ? {shape} : {error: error ?? '文字の形を作れませんでした'})
+      waiting.delete(id)
+    }) as never,
+    // Glyph outlines as path data (curves kept), for Create Outlines.
+    glyphCurves: ((id: number, curves: string[] | null, error?: string) => {
+      waiting.get(id)?.(curves ? {curves} : {error: error ?? '文字の形を作れませんでした'})
       waiting.delete(id)
     }) as never,
     fonts: ((list: string[]) => {
@@ -281,4 +288,65 @@ export function onPathStart(d: Document, t: TextSpec): {p: Vec2; angle: number} 
   if (!path) return null
   const {p, t: dir} = pathTextStart(sh, t, path)
   return {p, angle: Math.atan2(dir.y, dir.x)}
+}
+
+/** The glyphs' own curves in local text space (Mac app: CoreText path data). */
+function nativeCurves(t: Pick<TextSpec, 'text' | 'font' | 'size' | 'line_height'>): Promise<string[]> {
+  const id = nextRequest++
+  return new Promise((resolve, reject) => {
+    waiting.set(id, r => (r.error ? reject(new Error(r.error)) : resolve(r.curves ?? [])))
+    post!({type: 'glyphCurves', id, text: t.text, font: t.font, size: t.size, lineHeight: t.line_height})
+  })
+}
+
+/** The text's outlines as editable rings (world space, anchors + handles). */
+async function outlineRings(s: Stroke): Promise<Ring[]> {
+  const t = s.text!
+  if (!t.text.trim()) return []
+  const m = t.matrix
+  // Plain point text (no alignment, tracking, baseline shift or path): the
+  // font's own curves. Laid-out text: its current outlines, fitted.
+  const plain = (t.align ?? 'left') === 'left' && !t.tracking && !t.baseline_shift && !t.on_path && t.kerning !== false
+  if (post && plain) {
+    // The font's quadratic / cubic outlines, kept as they are.
+    const subs = (await nativeCurves(t)).flatMap(d => parsePath(d)).map(sp => transformSubpath(sp, m))
+    return subs.map(sp => nodesOf(sp, true, () => 0).map(({id: _, ...n}) => n))
+  }
+  // Browser: the traced outlines, fitted with curves (a bit looser than the
+  // trace's pixel steps).
+  const rings = s.contours ?? []
+  const k = Math.hypot(m[0], m[1]) || 1
+  return call<Ring[]>('fitRings', {rings, accuracy: Math.max(0.05, t.size * k * 0.006)})
+}
+
+/**
+ * Type → Create Outlines: each text becomes a compound path of its glyph
+ * outlines — real anchors and handles, counters (o, a, 8, 国) as holes, the
+ * text's look kept. One undo step. Returns how many texts were outlined.
+ */
+export async function outlineToPaths(ed: Editor, texts: Stroke[]): Promise<number> {
+  const shapes: {id: number; rings: Ring[]}[] = []
+  for (const s of texts) {
+    if (!s.text) continue
+    try { shapes.push({id: s.id, rings: await outlineRings(s)}) } catch (e) {
+      ed.error = e instanceof Error ? e.message : String(e)
+      return 0
+    }
+  }
+  const done = ed.edit(d => {
+    const ids: number[] = []
+    for (const {id, rings} of shapes) {
+      const at = d.strokes.findIndex(s => s.id === id)
+      if (at < 0) continue
+      const s = d.strokes[at]
+      const template = {...s, name: `${s.name}（アウトライン）`}
+      const made = pathsFromRings(template, rings, 'nonzero', () => ed.nextId(d), s.id)
+      d.strokes.splice(at, 1, ...made)
+      ids.push(...made.map(m => m.id))
+    }
+    ed.selected = ids
+    ed.anchors = []
+    return shapes.length
+  })
+  return done ?? 0
 }

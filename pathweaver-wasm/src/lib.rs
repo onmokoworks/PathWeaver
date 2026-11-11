@@ -357,6 +357,23 @@ pub fn dispatch(op: &str, a: &Value) -> Result<Value, String> {
             let even: bool = field(a, "evenodd").unwrap_or(false);
             json!(outline::fill_rule_contours(&rings, even))
         }
+        // What a compound path paints: its members' rings filled together
+        // with the first member's look (a plain stroke with contours, so the
+        // render, the effect worker and bounds take it like any shape).
+        "compoundShape" => {
+            let strokes: Vec<Stroke> = field(a, "strokes")?;
+            if strokes.is_empty() {
+                return Err("複合パスのメンバーがありません".into());
+            }
+            serde_json::to_value(pathweaver_core::compound::shape(&strokes.iter().collect::<Vec<_>>())).unwrap()
+        }
+        // Closed polygons (traced text, old flattened shapes) as editable
+        // Bézier rings: corners kept, smooth runs fitted with few anchors.
+        "fitRings" => {
+            let rings: Vec<Vec<Point>> = field(a, "rings")?;
+            let accuracy: f64 = field(a, "accuracy").unwrap_or(pathweaver_core::compound::ACCURACY);
+            json!(rings.iter().map(|r| pathweaver_core::compound::fit_ring(r, accuracy)).collect::<Vec<_>>())
+        }
         // Test hook: proves the host survives a panic inside the core.
         "debugPanic" => panic!("debugPanic requested"),
         _ => return Err(format!("未知の操作: {op}")),
@@ -412,6 +429,8 @@ fn edit(doc: &mut Document, kind: &str, a: &Value) -> Result<Value, String> {
             Value::Null
         }
         "union" => json!(editing::union(doc, &field::<Vec<u64>>(a, "ids")?)?),
+        "makeCompound" => json!(pathweaver_core::compound::make(doc, &field::<Vec<u64>>(a, "ids")?)?),
+        "releaseCompound" => json!(pathweaver_core::compound::release(doc, &field::<Vec<u64>>(a, "ids")?)?),
         "pathfinder" => json!(editing::pathfinder(doc, &field::<Vec<u64>>(a, "ids")?, field::<editing::PathfinderOp>(a, "pathfinder")?)?),
         "transform" => {
             // Affine on selected paths; widths scale with the shape.

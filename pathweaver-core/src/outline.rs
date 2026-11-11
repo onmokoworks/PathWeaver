@@ -848,7 +848,9 @@ pub fn svg_frame(doc: &Document, frame: Option<[f64; 4]>, background: Option<[u8
     let mut gradients = 0usize;
     let mut min = Point::new(f64::INFINITY, f64::INFINITY);
     let mut max = Point::new(f64::NEG_INFINITY, f64::NEG_INFINITY);
-    for s in doc.strokes.iter().filter(|s| doc.shown(s) && !s.guide) {
+    // Compound paths paint as one shape (holes included) at their place.
+    for s in super::compound::painted(doc) {
+        let s = &*s;
         if let Some(img) = &s.image {
             // Placed bitmap: kept as one <image> with its placement; a 下絵
             // (tracing reference) is never exported.

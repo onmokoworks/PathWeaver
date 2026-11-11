@@ -31,12 +31,13 @@ pub struct Line {
     pub join: Join,
     pub miter_limit: f64,
 }
-/// One filled and/or stroked path (nonzero fill rule).
+/// One filled and/or stroked path (nonzero fill rule unless `evenodd`).
 #[derive(Clone, Debug)]
 pub struct Shape {
     pub path: BezPath,
     pub fill: Option<Paint>,
     pub line: Option<Line>,
+    pub evenodd: bool,
 }
 #[derive(Clone, Debug)]
 pub enum Source {
@@ -219,6 +220,43 @@ fn edge_outline(s: &Stroke) -> Result<Vec<Vec<Point>>, String> {
     Ok(outline::paint_layers(&only)?.into_iter().flat_map(|l| l.outline.contours).collect())
 }
 
+/// What a compound path exports as: its members' own curves filled together
+/// by its fill rule, with the first member's look. With appearance nodes (or
+/// a line that is not uniform) the combined shape is drawn as one path is.
+pub fn compound_items(doc: &Document, members: &[&Stroke], options: Options) -> Result<Option<Item>, String> {
+    let head = members[0];
+    let combined = super::compound::shape(members);
+    if head.appearance.is_some() {
+        return stroke_items(doc, &combined, options);
+    }
+    let mut path = BezPath::new();
+    for m in members {
+        path.extend(centerline(m));
+    }
+    if path.elements().is_empty() {
+        return Ok(None);
+    }
+    let fill = fill_paint(head);
+    let uniform = line_style(head).filter(|l| l.width > 0.);
+    let line = uniform.clone().filter(|_| !options.outline);
+    let evenodd = head.fill_rule == super::model::FillRule::EvenOdd;
+    let mut items = vec![];
+    if fill.is_some() || line.is_some() {
+        items.push(Shape { path, fill, line: line.clone(), evenodd });
+    }
+    if head.edge.is_some() && line.is_none() && line_style(head).map_or(true, |l| l.width > 0.) {
+        let rings = edge_outline(&combined)?;
+        if !rings.is_empty() {
+            items.push(Shape { path: contour_curves(&rings, FIT_ACCURACY), fill: edge_paint(head), line: None, evenodd: false });
+        }
+    }
+    Ok(match items.len() {
+        0 => None,
+        1 => Some(Item::Shape(Some(meta(head)), items.pop().unwrap())),
+        _ => Some(Item::Group(meta(head), items.into_iter().map(|x| Item::Shape(None, x)).collect())),
+    })
+}
+
 /// What one path exports as.
 pub fn stroke_items(doc: &Document, s: &Stroke, options: Options) -> Result<Option<Item>, String> {
     if let Some(img) = &s.image {
@@ -253,7 +291,7 @@ pub fn stroke_items(doc: &Document, s: &Stroke, options: Options) -> Result<Opti
             } else if !layer.outline.contours.is_empty() {
                 items.push(Item::Shape(
                     None,
-                    Shape { path: polygon_path(&layer.outline.contours), fill: Some(Paint { color: layer.color, opacity, gradient: layer.gradient.clone() }), line: None },
+                    Shape { path: polygon_path(&layer.outline.contours), fill: Some(Paint { color: layer.color, opacity, gradient: layer.gradient.clone() }), line: None, evenodd: false },
                 ));
             }
         }
@@ -270,13 +308,13 @@ pub fn stroke_items(doc: &Document, s: &Stroke, options: Options) -> Result<Opti
     let line = uniform.filter(|_| !options.outline && !empty_line);
     let mut items = vec![];
     if fill.is_some() || line.is_some() {
-        items.push(Shape { path: shape_path(s), fill, line: line.clone() });
+        items.push(Shape { path: shape_path(s), fill, line: line.clone(), evenodd: false });
     }
     if s.edge.is_some() && line.is_none() && !empty_line {
         // Variable width (or 輪郭にする): the line's outline, as curves.
         let rings = edge_outline(s)?;
         if !rings.is_empty() {
-            items.push(Shape { path: contour_curves(&rings, FIT_ACCURACY), fill: edge_paint(s), line: None });
+            items.push(Shape { path: contour_curves(&rings, FIT_ACCURACY), fill: edge_paint(s), line: None, evenodd: false });
         }
     }
     Ok(match items.len() {
@@ -324,8 +362,20 @@ pub fn scene(doc: &Document, options: Options) -> Result<Vec<Item>, String> {
             stack.last_mut().unwrap().2.push(Item::Group(meta, items));
         }
     }
+    let mut compounds = super::compound::members(doc);
     for s in doc.strokes.iter().filter(|s| doc.shown(s) && !s.guide) {
-        let Some(item) = stroke_items(doc, s, options)? else { continue };
+        let item = match s.compound {
+            // a compound exports once, at its first member's place
+            Some(c) => match compounds.remove(&c) {
+                Some(list) => {
+                    let list: Vec<&Stroke> = list.into_iter().filter(|m| doc.shown(m) && !m.guide).collect();
+                    compound_items(doc, &list, options)?
+                }
+                None => None,
+            },
+            None => stroke_items(doc, s, options)?,
+        };
+        let Some(item) = item else { continue };
         let chain = folder_chain(doc, s);
         let mut depth = 0;
         while depth + 1 < stack.len() && depth < chain.len() && stack[depth + 1].0 == Some(chain[depth]) {
@@ -364,7 +414,8 @@ pub fn painted_bounds(doc: &Document) -> Result<Option<(Point, Point)>, String> 
         max.x = max.x.max(p.x);
         max.y = max.y.max(p.y);
     };
-    for s in doc.strokes.iter().filter(|s| doc.shown(s) && !s.guide) {
+    for s in super::compound::painted(doc) {
+        let s = s.as_ref();
         if let Some(img) = &s.image {
             let keyed = img.knockout.and_then(|k| doc.assets.get(&super::model::knockout_asset(&img.asset, k)));
             if img.reference || img.opacity <= 0. || keyed.or_else(|| doc.assets.get(&img.asset)).is_none() {
@@ -527,6 +578,9 @@ fn shape_svg(meta: Option<&Meta>, s: &Shape, ids: &mut usize) -> String {
         if l.join == Join::Miter {
             a.push_str(&format!(" stroke-miterlimit=\"{}\"", num(l.miter_limit)));
         }
+    }
+    if s.evenodd {
+        a.push_str(" fill-rule=\"evenodd\"");
     }
     a.push_str(&format!(" d=\"{}\"", path_data(&s.path)));
     if let Some(t) = meta.and_then(|m| m.text.as_ref()) {

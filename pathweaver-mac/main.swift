@@ -164,6 +164,11 @@ final class Host: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMes
             let shaped = shapeGlyphs(text: m["text"] as? String ?? "", family: m["font"] as? String ?? "",
                                      size: m["size"] as? Double ?? 12, kerning: m["kerning"] as? Bool ?? true)
             js("window.pathweaver.shaped(\(id), \(json(shaped)))")
+        case "glyphCurves":
+            let id = m["id"] as? Int ?? 0
+            let curves = glyphCurves(text: m["text"] as? String ?? "", family: m["font"] as? String ?? "",
+                                     size: m["size"] as? Double ?? 12, lineHeight: m["lineHeight"] as? Double ?? 1.2)
+            js("window.pathweaver.glyphCurves(\(id), \(json(curves)))")
         case "menu":
             canUndo = m["undo"] as? Bool ?? false
             canRedo = m["redo"] as? Bool ?? false
@@ -267,13 +272,48 @@ final class Host: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMes
     /// fallback fonts (Japanese in a Latin font) per run. Rings come back
     /// flattened as [x0, y0, x1, y1, …].
     func glyphOutlines(text: String, family: String, size: Double, lineHeight: Double) -> [[Double]] {
+        var rings: [[Double]] = []
+        let tolerance = max(0.02, size * 0.004)
+        layoutGlyphs(text: text, family: family, size: size, lineHeight: lineHeight) { path in
+            rings.append(contentsOf: self.flattenPath(path, tolerance: tolerance))
+        }
+        return rings
+    }
+    /// The same glyphs with their curves kept (Create Outlines): one SVG path
+    /// data string per glyph (M/L/Q/C/Z, absolute), laid out as above.
+    func glyphCurves(text: String, family: String, size: Double, lineHeight: Double) -> [String] {
+        var out: [String] = []
+        layoutGlyphs(text: text, family: family, size: size, lineHeight: lineHeight) { path in
+            let d = self.pathData(path)
+            if !d.isEmpty { out.append(d) }
+        }
+        return out
+    }
+    func pathData(_ path: CGPath) -> String {
+        var d = ""
+        func n(_ v: CGFloat) -> String { String(format: "%.4f", Double(v)) }
+        func pt(_ p: CGPoint) -> String { "\(n(p.x)) \(n(p.y))" }
+        path.applyWithBlock { el in
+            let e = el.pointee
+            switch e.type {
+            case .moveToPoint: d += "M\(pt(e.points[0]))"
+            case .addLineToPoint: d += "L\(pt(e.points[0]))"
+            case .addQuadCurveToPoint: d += "Q\(pt(e.points[0])) \(pt(e.points[1]))"
+            case .addCurveToPoint: d += "C\(pt(e.points[0])) \(pt(e.points[1])) \(pt(e.points[2]))"
+            case .closeSubpath: d += "Z"
+            @unknown default: break
+            }
+        }
+        return d
+    }
+    /// Lays out the text (see glyphOutlines) and hands each glyph's path,
+    /// already placed in the page's y-down space, to `each`.
+    func layoutGlyphs(text: String, family: String, size: Double, lineHeight: Double, each: (CGPath) -> Void) {
         let base = NSFontDescriptor(fontAttributes: [.family: family])
         let font = NSFont(descriptor: base, size: size) ?? NSFont(name: family, size: size) ?? NSFont.systemFont(ofSize: size)
         let ctFont = font as CTFont
         let ascent = Double(CTFontGetAscent(ctFont)), descent = Double(CTFontGetDescent(ctFont))
         let lineBox = size * lineHeight
-        var rings: [[Double]] = []
-        let tolerance = max(0.02, size * 0.004)
         for (i, line) in text.components(separatedBy: "\n").enumerated() {
             if line.isEmpty { continue }
             let baseline = Double(i) * lineBox + (lineBox - (ascent + descent)) / 2 + ascent
@@ -291,11 +331,10 @@ final class Host: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMes
                     // Glyph space is y-up: flip into the page's y-down space.
                     var m = CGAffineTransform(a: 1, b: 0, c: 0, d: -1, tx: pos[k].x, ty: CGFloat(baseline) - pos[k].y)
                     guard let path = CTFontCreatePathForGlyph(runFont, glyphs[k], &m) else { continue }
-                    rings.append(contentsOf: flattenPath(path, tolerance: tolerance))
+                    each(path)
                 }
             }
         }
-        return rings
     }
     /// The font's glyphs for the text, one line per "\n", for the web side to
     /// lay out (alignment, tracking, text on a path: textLayout.ts). Each glyph:
@@ -636,6 +675,9 @@ final class Host: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMes
             item("ブレンドを作成", "makeBlend", "b", [.command, .option]),
             item("ブレンドを解除", "releaseBlend", "b", [.command, .option, .shift]),
             item("ブレンドを拡張", "expandBlend"),
+            .separator(),
+            item("複合パスを作成", "makeCompound", "8"),
+            item("複合パスを解除", "releaseCompound", "8", [.command, .option, .shift]),
         ])
         add("書式", [
             item("アウトラインを作成", "outline", "o", [.command, .shift]),

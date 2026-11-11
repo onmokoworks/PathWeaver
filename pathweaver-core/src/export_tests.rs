@@ -255,3 +255,23 @@ fn gradients_and_opacity_are_written() {
     assert!(svg.contains("fill=\"url(#pw-gradient-1)\""));
     assert!(svg.contains("stroke-opacity=\"0.5\""));
 }
+
+#[test]
+fn compound_paths_keep_curves_and_holes() {
+    let mut d = Document::default();
+    let mut outer = square(&mut d, 0., 0., 100.);
+    let mut inner = square(&mut d, 25., 25., 50.);
+    let c = d.id();
+    outer.compound = Some(c);
+    inner.compound = Some(c);
+    outer.fill_rule = crate::model::FillRule::EvenOdd;
+    inner.fill_rule = crate::model::FillRule::EvenOdd;
+    d.strokes = vec![outer, inner];
+    let svg = svg(&d, None, None, 0., Options::default()).unwrap();
+    let paths = tags(&svg, "path");
+    assert_eq!(paths.len(), 1, "{svg}");
+    assert_eq!(attr(&paths[0], "fill-rule"), Some("evenodd"));
+    assert_eq!(attr(&paths[0], "d").unwrap().matches('M').count(), 2);
+    let pdf = crate::pdf::pdf(&d, &[[0., 0., 100., 100.]], None, Options::default()).unwrap();
+    assert!(!pdf.is_empty());
+}

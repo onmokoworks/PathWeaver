@@ -36,7 +36,7 @@ const strokes = async (page: Page) => (await doc(page)).strokes as any[]
 test('place SVG: shapes become editable paths in a folder, nothing in the file runs, one undo', async ({page}) => {
   const errors = await boot(page)
   await placeFiles(page, [{name: 'art.svg', mimeType: 'image/svg+xml', buffer: Buffer.from(SVG)}])
-  await expect.poll(async () => (await strokes(page)).length).toBe(5)
+  await expect.poll(async () => (await strokes(page)).length).toBe(6)
   const d = await doc(page)
   expect(await page.evaluate(() => (window as any).hacked)).toBeUndefined()
   expect(d.folders.map((f: any) => f.name)).toEqual(['art'])
@@ -57,9 +57,12 @@ test('place SVG: shapes become editable paths in a folder, nothing in the file r
   expect(circle.nodes.every((n: any) => n.smooth)).toBe(true)
   const xs = circle.nodes.map((n: any) => n.p.x)
   expect(Math.max(...xs) - Math.min(...xs)).toBeCloseTo(80)
-  // even-odd square ring keeps its hole: one filled shape with contours
+  // even-odd square ring keeps its hole: a compound path of two editable squares
   const ring = by('ring')
-  expect(ring.contours.length).toBe(2)
+  const members = d.strokes.filter((s: any) => s.compound != null && s.compound === ring.compound)
+  expect(members).toHaveLength(2)
+  expect(members.every((s: any) => s.nodes.length === 4 && !s.contours && s.fill_rule === 'evenodd')).toBe(true)
+  await expect(page.locator(`[data-path="${ring.id}"] [data-compound]`)).toHaveCount(1)
   // open curve: round caps, curve handles kept
   const open = by('open')
   expect(open.closed).toBe(false)
@@ -70,7 +73,7 @@ test('place SVG: shapes become editable paths in a folder, nothing in the file r
   expect(text.text.text).toBe('Hi')
   expect(text.contours.length).toBeGreaterThan(1)
   // the imported shapes are selected; the canvas draws them
-  expect((await state(page)).selected).toHaveLength(5)
+  expect((await state(page)).selected).toHaveLength(6)
   await expect(page.locator(`[data-stroke="${box.id}"] path`)).toHaveCount(1)
   // all of it is one undo step
   await page.keyboard.press('Meta+z')
@@ -191,11 +194,11 @@ test('text tool: click and type, retype by double-click, empty text leaves nothi
   ;[s] = await strokes(page)
   expect(s.text.matrix[4]).toBeCloseTo(before + 1)
 
-  // ⇧⌘O: outlines become plain shapes
+  // ⇧⌘O: outlines become editable paths (one compound path)
   await page.keyboard.press('Meta+Shift+o')
-  ;[s] = await strokes(page)
-  expect(s.text).toBeFalsy()
-  expect(s.contours.length).toBeGreaterThan(1)
+  await expect.poll(async () => (await strokes(page)).length).toBeGreaterThan(1)
+  const all = await strokes(page)
+  expect(all.every((v: any) => !v.text && !v.contours && v.compound === all[0].compound && v.nodes.length > 1)).toBe(true)
   expect(errors).toEqual([])
 })
 

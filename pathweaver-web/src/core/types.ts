@@ -72,6 +72,10 @@ export interface Stroke {
   join: Join
   miter_limit: number
   contours?: Vec2[][] | null
+  /** Member of a compound path: every path with this id is one shape (filled
+   *  together by `fill_rule`, painted with the first member's look). */
+  compound?: number | null
+  fill_rule?: FillRule
   appearance?: Graph | null
   folder?: number | null
   /** A guide made from this path: a thin line to snap to, never painted or exported. */
@@ -86,6 +90,8 @@ export type GradientKind = 'Linear' | 'Radial'
 export interface GradientStop {offset: number; color: RGB; opacity: number}
 /** `matrix`: gradient space → document. Linear runs (0,0)→(1,0); radial is the unit circle. */
 export interface Gradient {kind: GradientKind; stops: GradientStop[]; matrix: Matrix}
+/** nonzero: holes run the other way (fonts). evenodd: anything inside another member is a hole. */
+export type FillRule = 'nonzero' | 'evenodd'
 export interface CornerWidget {node: number; p: Vec2; dir: Vec2; radius: number; kind: 'Circular' | 'Clothoid' | 'Bevel'; limit: number}
 
 export type NodeKind =

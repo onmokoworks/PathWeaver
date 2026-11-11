@@ -557,27 +557,49 @@ pub enum PathfinderOp {
     Divide,
 }
 
-/// Returns the ids of the resulting paths (front-most last).
+/// Returns the ids of the resulting paths (front-most last). A compound path
+/// (any member selected) takes part as one shape. Each result is an editable
+/// path again — a compound path when it has holes or separate parts.
 pub fn pathfinder(doc: &mut Document, ids: &[u64], op: PathfinderOp) -> Result<Vec<u64>, String> {
     use i_overlay::core::overlay_rule::OverlayRule;
     transaction(doc, |d| {
-        // selected paths in stacking order (back first)
-        let order: Vec<usize> = (0..d.strokes.len()).filter(|&i| ids.contains(&d.strokes[i].id)).collect();
-        if order.len() < 2 {
+        // selected shapes in stacking order (back first): a path, or all
+        // members of a compound
+        let touched: Vec<u64> = d.strokes.iter().filter(|s| ids.contains(&s.id)).filter_map(|s| s.compound).collect();
+        let picked = |s: &Stroke| ids.contains(&s.id) || s.compound.is_some_and(|c| touched.contains(&c));
+        let mut units: Vec<Vec<usize>> = vec![];
+        for i in 0..d.strokes.len() {
+            let s = &d.strokes[i];
+            if !picked(s) {
+                continue;
+            }
+            match units.iter_mut().find(|u| s.compound.is_some() && d.strokes[u[0]].compound == s.compound) {
+                Some(u) => u.push(i),
+                None => units.push(vec![i]),
+            }
+        }
+        if units.len() < 2 {
             return Err("パスファインダーにはパスを2つ以上選択してください".into());
         }
-        let shapes: Vec<Vec<Vec<Point>>> = order
+        let shapes: Vec<Vec<Vec<Point>>> = units
             .iter()
-            .map(|&i| outline::paint(&d.strokes[i]).map(|p| p.contours))
+            .map(|u| {
+                let s = if d.strokes[u[0]].compound.is_some() {
+                    crate::compound::shape(&u.iter().map(|&i| &d.strokes[i]).collect::<Vec<_>>())
+                } else {
+                    d.strokes[u[0]].clone()
+                };
+                outline::paint(&s).map(|p| p.contours)
+            })
             .collect::<Result<_, _>>()?;
-        // The source whose paint a result takes (by stacking index).
-        let color = |i: usize| i;
+        // The source whose paint a result takes (its first member's stroke index).
+        let color = |i: usize| units[i][0];
         let union_of = |list: &[Vec<Vec<Point>>]| {
             let all: Vec<Vec<Point>> = list.iter().flatten().cloned().collect();
             outline::boolean_contours(&all, &[], OverlayRule::Subject)
         };
-        let last = order.len() - 1;
-        // (contours, colour, the source path whose place/folder it takes)
+        let last = units.len() - 1;
+        // (contours, the stroke whose paint it takes, the source shape whose place/folder it takes)
         let mut results: Vec<(Vec<Vec<Point>>, usize, usize)> = match op {
             PathfinderOp::Unite => vec![(union_of(&shapes), color(last), last)],
             PathfinderOp::MinusFront => vec![(
@@ -636,7 +658,7 @@ pub fn pathfinder(doc: &mut Document, ids: &[u64], op: PathfinderOp) -> Result<V
             return Err("結果の形がありません（重なりがないなど）".into());
         }
         // Results replace the sources, placed where the front-most source was.
-        let front = order[last];
+        let front = *units[last].last().unwrap();
         let anchor_id = d.strokes[front].id;
         let folder = d.strokes[front].folder;
         let label = match op {
@@ -648,15 +670,24 @@ pub fn pathfinder(doc: &mut Document, ids: &[u64], op: PathfinderOp) -> Result<V
             PathfinderOp::Divide => "分割",
         };
         let mut new_strokes = vec![];
+        let mut used_source = false;
         for (k, (contours, color, src)) in results.into_iter().enumerate() {
-            let (source_id, source_name) = (d.strokes[order[src]].id, d.strokes[order[src]].name.clone());
-            let id = if k == 0 { source_id } else { d.id() };
+            let source = &d.strokes[units[src][0]];
+            let (source_id, source_name) = (source.id, source.name.clone());
             let name = if k == 0 { format!("{source_name} / {label}") } else { format!("{source_name} / {label} {}", k + 1) };
-            let mut s = Stroke::new(id, name);
-            s.take_fill_from(&d.strokes[order[color]]);
-            s.contours = Some(contours);
-            s.folder = folder;
-            new_strokes.push(s);
+            let mut template = Stroke::new(0, name);
+            template.take_fill_from(&d.strokes[color]);
+            template.folder = folder;
+            // The first result keeps the source's id (selection, references).
+            let first = if !used_source { used_source = true; Some(source_id) } else { None };
+            new_strokes.extend(crate::compound::paths_from_rings(
+                d,
+                &contours,
+                &template,
+                crate::model::FillRule::EvenOdd,
+                first,
+                crate::compound::ACCURACY,
+            ));
         }
         let ids_out: Vec<u64> = new_strokes.iter().map(|s| s.id).collect();
         let at = d.strokes.iter().position(|s| s.id == anchor_id).unwrap();
@@ -664,7 +695,7 @@ pub fn pathfinder(doc: &mut Document, ids: &[u64], op: PathfinderOp) -> Result<V
         for (i, s) in d.strokes.iter().enumerate() {
             if i == at {
                 rebuilt.extend(new_strokes.iter().cloned());
-            } else if !ids.contains(&s.id) {
+            } else if !picked(s) {
                 rebuilt.push(s.clone());
             }
         }
@@ -857,12 +888,20 @@ mod tests {
             id
         }
         let area = |d: &Document, id: u64| -> f64 {
+            // results are editable paths (compound when they have holes)
             let s = d.strokes.iter().find(|s| s.id == id).unwrap();
-            s.contours.as_ref().unwrap().iter().map(|r| {
+            assert!(s.contours.is_none() && s.nodes.len() >= 3);
+            let members: Vec<&Stroke> = match s.compound {
+                Some(c) => d.strokes.iter().filter(|m| m.compound == Some(c)).collect(),
+                None => vec![s],
+            };
+            let shape = crate::compound::shape(&members);
+            let signed: f64 = shape.contours.as_ref().unwrap().iter().map(|r| {
                 let mut a = 0.;
                 for i in 0..r.len() { let (p, q) = (r[i], r[(i + 1) % r.len()]); a += p.x * q.y - q.x * p.y; }
-                a.abs() * 0.5
-            }).sum()
+                a * 0.5
+            }).sum();
+            signed.abs()
         };
         let setup = || { let mut d = Document::default(); let a = square(&mut d, 0., [255, 0, 0]); let b = square(&mut d, 10., [0, 0, 255]); (d, a, b) };
         let (mut d, a, b) = setup();

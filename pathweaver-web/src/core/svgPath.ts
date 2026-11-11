@@ -1,6 +1,6 @@
 // SVG path data → absolute cubic Bézier subpaths (lines, quadratics and arcs
 // become cubics). Pure geometry, no DOM: unit-tested on its own.
-import type {Vec2} from './types'
+import type {PathNode, Vec2} from './types'
 
 export interface Cubic {c1: Vec2; c2: Vec2; p: Vec2}
 export interface Subpath {start: Vec2; segs: Cubic[]; closed: boolean}
@@ -176,3 +176,43 @@ const ap = (m: Affine, p: Vec2): Vec2 => ({x: m[0] * p.x + m[2] * p.y + m[4], y:
 export function transformSubpath(s: Subpath, m: Affine): Subpath {
   return {start: ap(m, s.start), closed: s.closed, segs: s.segs.map(c => ({c1: ap(m, c.c1), c2: ap(m, c.c2), p: ap(m, c.p)}))}
 }
+
+const near = (a: Vec2, b: Vec2) => Math.hypot(a.x - b.x, a.y - b.y) < 1e-6
+/** A subpath as an editable PathWeaver path (anchors + handles). */
+export function nodesOf(sp: Subpath, closed: boolean, nextId: () => number): PathNode[] {
+  const segs = [...sp.segs]
+  let wrap: Vec2 | null = null
+  // Closed and ending on its start: that last segment's handle belongs to the first anchor.
+  if (closed && segs.length > 1 && near(segs.at(-1)!.p, sp.start)) wrap = segs.pop()!.c2
+  const pts = [sp.start, ...segs.map(s => s.p)]
+  const nodes: PathNode[] = pts.map(p => ({id: nextId(), p: {...p}, incoming: {x: 0, y: 0}, outgoing: {x: 0, y: 0}, smooth: false}))
+  segs.forEach((s, i) => {
+    const a = nodes[i], b = nodes[i + 1]
+    a.outgoing = {x: s.c1.x - a.p.x, y: s.c1.y - a.p.y}
+    b.incoming = {x: s.c2.x - b.p.x, y: s.c2.y - b.p.y}
+  })
+  if (wrap) {
+    // The closing curve runs from the last anchor back to the first.
+    const last = sp.segs.at(-1)!
+    nodes.at(-1)!.outgoing = {x: last.c1.x - nodes.at(-1)!.p.x, y: last.c1.y - nodes.at(-1)!.p.y}
+    nodes[0].incoming = {x: wrap.x - nodes[0].p.x, y: wrap.y - nodes[0].p.y}
+  }
+  // Straight segments carry no handles; collinear handles are smooth anchors.
+  const tiny = (v: Vec2) => Math.hypot(v.x, v.y) < 1e-6
+  segs.forEach((s, i) => {
+    const a = nodes[i], b = nodes[i + 1]
+    const ab = {x: b.p.x - a.p.x, y: b.p.y - a.p.y}
+    const off = (v: Vec2) => Math.abs(v.x * ab.y - v.y * ab.x) / (Math.hypot(ab.x, ab.y) || 1)
+    if (off(a.outgoing) < 1e-6 && off(b.incoming) < 1e-6 && Math.abs(Math.hypot(a.outgoing.x, a.outgoing.y) * 3 - Math.hypot(ab.x, ab.y)) < 1e-3) {
+      a.outgoing = {x: 0, y: 0}; b.incoming = {x: 0, y: 0}
+    }
+  })
+  for (const n of nodes) {
+    if (tiny(n.incoming) || tiny(n.outgoing)) continue
+    const cross = n.incoming.x * n.outgoing.y - n.incoming.y * n.outgoing.x
+    const dot = n.incoming.x * n.outgoing.x + n.incoming.y * n.outgoing.y
+    n.smooth = Math.abs(cross) < 1e-3 * Math.hypot(n.incoming.x, n.incoming.y) * Math.hypot(n.outgoing.x, n.outgoing.y) && dot < 0
+  }
+  return nodes
+}
+

@@ -145,9 +145,10 @@ impl Pdf {
                 let _ = writeln!(c, "/{gs} gs");
             }
             path_ops(&s.path, c);
-            let _ = writeln!(c, "W n\n{} cm\n/{name} sh\nQ", matrix(g.affine()));
+            let clip = if s.evenodd { "W*" } else { "W" };
+            let _ = writeln!(c, "{clip} n\n{} cm\n/{name} sh\nQ", matrix(g.affine()));
             if s.line.is_some() {
-                self.shape(&Shape { path: s.path.clone(), fill: None, line: s.line.clone() }, c);
+                self.shape(&Shape { path: s.path.clone(), fill: None, line: s.line.clone(), evenodd: false }, c);
             }
             return;
         }
@@ -173,9 +174,11 @@ impl Pdf {
             let _ = writeln!(c, "{} RG {} w {cap} J {join} j {} M", rgb(l.paint.color), num(l.width), num(l.miter_limit));
         }
         path_ops(&s.path, c);
-        c.push_str(match (s.fill.is_some(), s.line.is_some()) {
-            (true, true) => "B\n",
-            (true, false) => "f\n",
+        c.push_str(match (s.fill.is_some(), s.line.is_some(), s.evenodd) {
+            (true, true, false) => "B\n",
+            (true, true, true) => "B*\n",
+            (true, false, false) => "f\n",
+            (true, false, true) => "f*\n",
             _ => "S\n",
         });
         c.push_str("Q\n");
