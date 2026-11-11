@@ -1,7 +1,8 @@
 <script setup lang="ts">
 // Layers: front-most first. Folders group paths and nest; drag rows to
 // reorder, onto a folder to put a path or folder inside, out to take it out.
-// Click selects (Shift/⌘ adds), double-click renames, the eye hides.
+// Click selects (Shift/⌘ adds), double-click renames, the eye hides, the
+// lock keeps it from being picked or edited on the canvas (⌘2 / ⌥⌘2).
 import {computed, nextTick, reactive, ref} from 'vue'
 import {Icon} from '../../vendor/tweeq/src/Icon'
 import type {Editor} from '../core/editor'
@@ -124,7 +125,7 @@ const focusFolder = ref<number | null>(null)
 function clickPath(e: MouseEvent, id: number) { focusFolder.value = null; ed.selectPath(id, e.shiftKey || e.metaKey) }
 function clickFolder(e: MouseEvent, f: Folder) {
   focusFolder.value = f.id
-  const ids = order.value.filter(s => ed.inFolder(s, f.id) && ed.shown(s)).map(s => s.id)
+  const ids = order.value.filter(s => ed.inFolder(s, f.id) && ed.shown(s) && !ed.locked(s)).map(s => s.id)
   ed.anchors = []
   ed.selected = e.shiftKey || e.metaKey ? [...new Set([...ed.selected, ...ids])] : ids
 }
@@ -168,6 +169,9 @@ function toggleFolderVisible(f: Folder) {
   ed.selected = ed.selected.filter(v => !hidden.has(v))
   ed.anchors = ed.anchors.filter(a => !hidden.has(a.stroke))
 }
+/** Locked by a folder around it (its own lock button shows that, dimmed). */
+const lockedByFolder = (s: Stroke) => !s.locked && ed.locked(s)
+const folderLockedAbove = (f: Folder) => !f.locked && ed.folderLocked(f)
 function toggleOpen(f: Folder) { f.open = !f.open; ed.changed() } // view state: no undo step
 function group() {
   const id = ed.groupSelection()
@@ -287,6 +291,12 @@ function dropAt(y: number, moving: DataRow): Drop | null {
           >
           <span v-else class="name" :title="row.folder.name">{{ row.folder.name }}</span>
           <span class="count">{{ row.count }}</span>
+          <button
+            type="button" class="lock" :class="{on: row.folder.locked, inherited: folderLockedAbove(row.folder)}" :data-lock-folder="row.folder.id"
+            :disabled="folderLockedAbove(row.folder)" :aria-pressed="!!row.folder.locked"
+            :aria-label="row.folder.locked ? 'フォルダのロックを解除' : 'フォルダをロック'" :title="folderLockedAbove(row.folder) ? '外側のフォルダごとロック中' : row.folder.locked ? 'ロック中（クリックで解除）' : 'ロック：中身をキャンバスで選べなくする'"
+            @pointerdown.stop @click.stop="ed.setLocked({folder: row.folder.id}, !row.folder.locked)"
+          ><Icon :icon="row.folder.locked || folderLockedAbove(row.folder) ? 'material-symbols:lock-outline' : 'material-symbols:lock-open-outline'" /></button>
           <button type="button" class="eye" :aria-label="row.folder.visible ? 'フォルダを隠す' : 'フォルダを表示'" @click.stop="toggleFolderVisible(row.folder)">
             <Icon :icon="row.folder.visible ? 'material-symbols:visibility-outline' : 'material-symbols:visibility-off-outline'" />
           </button>
@@ -340,6 +350,12 @@ function dropAt(y: number, moving: DataRow): Drop | null {
             :aria-label="openLooks.has(row.stroke.id) ? '外観をたたむ' : '外観を表示'" title="このパスの外観（ノード）を一覧に出す"
             @pointerdown.stop @click.stop="toggleLook(row.stroke.id)"
           ><Icon icon="material-symbols:account-tree-outline" /></button>
+          <button
+            type="button" class="lock" :class="{on: row.stroke.locked, inherited: lockedByFolder(row.stroke)}" :data-lock="row.stroke.id"
+            :disabled="lockedByFolder(row.stroke)" :aria-pressed="!!row.stroke.locked"
+            :aria-label="row.stroke.locked ? 'ロックを解除' : 'ロック'" :title="lockedByFolder(row.stroke) ? 'フォルダごとロック中' : row.stroke.locked ? 'ロック中（クリックで解除）' : 'ロック：キャンバスで選べなくする（⌘2）'"
+            @pointerdown.stop @click.stop="ed.setLocked({stroke: row.stroke.id}, !row.stroke.locked)"
+          ><Icon :icon="row.stroke.locked || lockedByFolder(row.stroke) ? 'material-symbols:lock-outline' : 'material-symbols:lock-open-outline'" /></button>
           <button type="button" class="eye" :aria-label="row.stroke.visible ? '隠す' : '表示する'" @click.stop="toggleVisible(row.stroke)">
             <Icon :icon="row.stroke.visible ? 'material-symbols:visibility-outline' : 'material-symbols:visibility-off-outline'" />
           </button>
@@ -360,11 +376,16 @@ function dropAt(y: number, moving: DataRow): Drop | null {
 .ltab .count {font-variant-numeric: tabular-nums; color: var(--tq-color-text-mute)}
 .head {display: flex; align-items: center; gap: 2px; height: 28px; padding: 0 6px 0 12px; font-weight: 500; font-size: 11px; color: var(--tq-color-text-mute); flex: none}
 .spacer {flex: 1}
-.head button, .eye, .chevron {
+.head button, .eye, .chevron, .lock {
   display: grid; place-items: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 2px;
   background: transparent; color: var(--tq-color-text-mute); cursor: pointer; font-size: 14px; flex: none;
 }
-.head button:hover, .eye:hover, .chevron:hover {color: var(--tq-color-text)}
+.head button:hover, .eye:hover, .chevron:hover, .lock:hover {color: var(--tq-color-text)}
+/* The lock shows only where it matters: on hover, or when locked. */
+.lock {font-size: 13px; opacity: 0}
+li:hover .lock, .lock:focus-visible {opacity: .6}
+.lock.on, .lock.inherited {opacity: 1}
+.lock.inherited {opacity: .4; cursor: default}
 .head button:disabled {opacity: .35; pointer-events: none}
 ul {position: relative; list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1}
 /* Flat rows: one straight highlight, no rounded corners or side bars. */

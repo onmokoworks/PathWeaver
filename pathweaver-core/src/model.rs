@@ -192,6 +192,10 @@ pub struct Stroke {
     /// line, snapped to, never painted or exported.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub guide: bool,
+    /// Locked (Illustrator's Lock): drawn and exported, but not picked or
+    /// edited on the canvas. A locked folder locks everything inside it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
     /// Layer folder (`Document::folders`), if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder: Option<u64>,
@@ -307,6 +311,7 @@ impl Stroke {
             image: None,
             appearance: None,
             guide: false,
+            locked: false,
             folder: None,
             closed: false,
             contours: None,
@@ -559,6 +564,9 @@ pub struct Folder {
     pub visible: bool,
     #[serde(default = "default_true")]
     pub open: bool,
+    /// Locked: its contents are drawn but not picked or edited on the canvas.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
     /// Enclosing folder (folders nest); `None` = top level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<u64>,
@@ -597,6 +605,10 @@ pub struct Document {
     pub snap_tangent: bool,
     #[serde(default)]
     pub snap_normal: bool,
+    /// Smart guides: a moved or scaled selection snaps to other objects'
+    /// edges and centres (and the artboards'). On unless turned off.
+    #[serde(default = "default_true")]
+    pub snap_objects: bool,
     #[serde(default)]
     pub guides: Vec<Guide>,
     pub format: String,
@@ -636,6 +648,7 @@ impl Default for Document {
             snap_guides: true,
             snap_tangent: false,
             snap_normal: false,
+            snap_objects: true,
             guides: vec![],
             format: "pathweaver".into(),
             version: 3,
@@ -985,8 +998,8 @@ mod tests {
         let outer = d.id();
         let inner = d.id();
         d.folders = vec![
-            Folder { id: outer, name: "外".into(), visible: true, open: true, parent: None },
-            Folder { id: inner, name: "内".into(), visible: true, open: true, parent: Some(outer) },
+            Folder { id: outer, name: "外".into(), visible: true, open: true, locked: false, parent: None },
+            Folder { id: inner, name: "内".into(), visible: true, open: true, locked: false, parent: Some(outer) },
         ];
         d.strokes[0].folder = Some(inner);
         d
@@ -1002,6 +1015,27 @@ mod tests {
         let json = serde_json::to_string(&d).unwrap();
         let back: Document = serde_json::from_str(&json).unwrap();
         assert_eq!(back.folders, d.folders);
+    }
+    #[test]
+    fn lock_and_smart_guides_are_optional_and_round_trip() {
+        // an old file (no lock, no smart-guide flag) loads with nothing locked
+        // and smart guides on
+        let mut d = doc_with_nested();
+        let mut v = serde_json::to_value(&d).unwrap();
+        v.as_object_mut().unwrap().remove("snap_objects");
+        let old: Document = serde_json::from_value(v).unwrap();
+        assert!(old.snap_objects);
+        assert!(!old.strokes[0].locked && !old.folders[0].locked);
+        // unlocked items write no field; locked ones keep it
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(!json.contains("\"locked\""));
+        d.strokes[0].locked = true;
+        d.folders[1].locked = true;
+        d.snap_objects = false;
+        let back: Document = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert!(back.strokes[0].locked && back.folders[1].locked && !back.folders[0].locked);
+        assert!(!back.snap_objects);
+        assert!(back.validate().is_ok());
     }
     #[test]
     fn folder_loops_and_missing_parents_are_rejected() {

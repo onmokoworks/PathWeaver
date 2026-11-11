@@ -240,6 +240,67 @@ export function createEditor() {
     }
     return true
   }
+  /** Locked: the path or one of its folders is locked. Drawn, never picked or edited on the canvas. */
+  function locked(s: Stroke): boolean {
+    if (s.locked) return true
+    let f = folderOf(s.folder)
+    for (let depth = 0; f && depth < 64; depth++) {
+      if (f.locked) return true
+      f = folderOf(f.parent)
+    }
+    return false
+  }
+  /** A folder locked by itself or by a folder around it. */
+  function folderLocked(f: Folder): boolean {
+    let g: Folder | undefined = f
+    for (let depth = 0; g && depth < 64; depth++) {
+      if (g.locked) return true
+      g = folderOf(g.parent)
+    }
+    return false
+  }
+  /** Drop locked paths from the selection (after a lock). */
+  function dropLocked() {
+    const out = new Set(doc.value.strokes.filter(locked).map(s => s.id))
+    if (!out.size) return
+    selected.value = selected.value.filter(id => !out.has(id))
+    anchors.value = anchors.value.filter(a => !out.has(a.stroke))
+  }
+  /** Lock / unlock one path or folder (the layer list's lock). */
+  function setLocked(what: {stroke?: number; folder?: number}, on: boolean) {
+    edit(d => {
+      const t = what.stroke != null ? d.strokes.find(s => s.id === what.stroke) : d.folders?.find(f => f.id === what.folder)
+      if (!t) return
+      if (on) t.locked = true
+      else delete t.locked
+    })
+    dropLocked()
+  }
+  /** Object → Lock → Selection (⌘2). A blend locks with both its sources. */
+  function lockSelection() {
+    const ids = new Set(selected.value)
+    for (const id of [...ids]) { const b = blendOf(id); if (b) { ids.add(b.a); ids.add(b.b) } }
+    const targets = doc.value.strokes.filter(s => ids.has(s.id) && !s.locked)
+    // (silent when nothing is selected: the Mac menu and the page may both see ⌘2)
+    if (!targets.length) return
+    edit(() => { for (const s of targets) s.locked = true })
+    dropLocked()
+    status.value = `${targets.length}個をロックしました（⌥⌘2ですべて解除）`
+  }
+  /** Object → Unlock All (⌥⌘2): everything unlocked comes back selected. */
+  function unlockAll() {
+    const paths = doc.value.strokes.filter(s => s.locked)
+    const folders = (doc.value.folders ?? []).filter(f => f.locked)
+    if (!paths.length && !folders.length) return
+    const before = new Set(doc.value.strokes.filter(locked).map(s => s.id))
+    edit(() => {
+      for (const s of paths) delete s.locked
+      for (const f of folders) delete f.locked
+    })
+    anchors.value = []
+    selected.value = doc.value.strokes.filter(s => before.has(s.id) && shown(s) && s.blend_of == null).map(s => s.id)
+    status.value = 'すべてのロックを解除しました'
+  }
   const folderDepth = (f: Folder, d: Document = doc.value) => {
     let n = 0
     for (let p = f.parent; p != null && n < 64; n++) p = d.folders?.find(x => x.id === p)?.parent
@@ -322,6 +383,7 @@ export function createEditor() {
   function selectPath(id: number, add = false) {
     const target = findStroke(id)
     if (!target || !shown(target)) return
+    if (locked(target)) { status.value = 'ロックされています（レイヤーの鍵で解除）'; return }
     anchors.value = []
     if (add) {
       selected.value = selected.value.includes(id)
@@ -693,7 +755,7 @@ export function createEditor() {
     doc, selected, anchors, selectedNodes, tool, status, error, filePath, fileName, revision, generation, drawStyle, viewer, geometryRender,
     history, dirty, active, renders, renderPending, unit, setUnit,
     begin, commit, cancel, inGesture, edit, coreEdit, changed, undo, redo, load, markSaved, markUnsaved,
-    findStroke, nextId, shown, folderTree, inFolder, folderOf, groupSelection, ungroup, moveInList, regroup, selectPath, selectAnchor, clearSelection, isAnchorSelected,
+    findStroke, nextId, shown, locked, folderLocked, setLocked, lockSelection, unlockAll, folderTree, inFolder, folderOf, groupSelection, ungroup, moveInList, regroup, selectPath, selectAnchor, clearSelection, isAnchorSelected,
     blendOf, makeBlend, setBlendSteps, releaseBlend, expandBlend,
     render, newPath, deleteSelection, duplicateSelection, copySelection, cutSelection, paste, makeGuides, arrange, hasClipboard,
   })
