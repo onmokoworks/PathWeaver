@@ -12,6 +12,8 @@ import CanvasMenu, {type MenuItem} from './CanvasMenu.vue'
 import TextEditor from './TextEditor.vue'
 import ShapeAdjust from './ShapeAdjust.vue'
 import {placedHref} from '../core/knockout'
+import {hexOf, sortedStops} from '../core/paint'
+import GradientHandles from './GradientHandles.vue'
 
 type Flag = 'snap_guides' | 'snap_grid' | 'snap_tangent' | 'snap_normal'
 const snapFlags: [Flag, string, string][] = [
@@ -303,6 +305,15 @@ const cursor = computed(() => {
               :transform="`matrix(${l.placed.matrix.join(' ')})`" preserveAspectRatio="none" class="placed" :class="{reference: l.placed.reference}" :data-placed="s.id"
             />
             <image v-else-if="l.image" :href="l.image.href" :x="l.image.x" :y="l.image.y" :width="l.image.w" :height="l.image.h" :opacity="l.opacity" preserveAspectRatio="none" class="raster" />
+            <template v-else-if="l.gradient">
+              <radialGradient v-if="l.gradient.kind === 'Radial'" :id="`pwg-${s.id}-${i}`" gradientUnits="userSpaceOnUse" cx="0" cy="0" r="1" :gradientTransform="`matrix(${l.gradient.matrix.join(' ')})`">
+                <stop v-for="(st, k) in sortedStops(l.gradient)" :key="k" :offset="st.offset" :stop-color="hexOf(st.color)" :stop-opacity="st.opacity" />
+              </radialGradient>
+              <linearGradient v-else :id="`pwg-${s.id}-${i}`" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="1" y2="0" :gradientTransform="`matrix(${l.gradient.matrix.join(' ')})`">
+                <stop v-for="(st, k) in sortedStops(l.gradient)" :key="k" :offset="st.offset" :stop-color="hexOf(st.color)" :stop-opacity="st.opacity" />
+              </linearGradient>
+              <path :d="l.d" :fill="`url(#pwg-${s.id}-${i})`" :fill-opacity="l.opacity" fill-rule="nonzero" />
+            </template>
             <path v-else :d="l.d" :fill="l.color" :fill-opacity="l.opacity" fill-rule="nonzero" />
           </template>
         </g>
@@ -367,6 +378,8 @@ const cursor = computed(() => {
         </g>
         <circle v-if="w.key" :cx="w.c.x" :cy="w.c.y" r="2.5" class="key-dot" />
       </g>
+
+      <GradientHandles :ed="ed" :canvas="cv" />
 
       <!-- artboards -->
       <g class="artboards" :class="{editing: ed.tool === 'artboard'}">

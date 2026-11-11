@@ -16,6 +16,7 @@ import InputDropdown from '../../vendor/tweeq/src/InputDropdown/InputDropdown.vu
 import InputCheckbox from '../../vendor/tweeq/src/InputCheckbox/InputCheckbox.vue'
 import {fontFamilies, relayout} from '../core/textOutline'
 import PaintField from './PaintField.vue'
+import PaintRows from './PaintRows.vue'
 import PivotPicker from './PivotPicker.vue'
 import ArtboardPanel from './ArtboardPanel.vue'
 import {pivotIn} from '../canvas/controller'
@@ -23,7 +24,7 @@ import {vTooltip} from '../../vendor/tweeq/src/Tooltip'
 import type {Editor} from '../core/editor'
 import type {Canvas} from '../canvas/controller'
 import {call} from '../core/wasm'
-import type {Cap, CornerWidget, Document, Join, Knockout, RGB, Stroke} from '../core/types'
+import type {Cap, CornerWidget, Document, Join, Knockout, Stroke} from '../core/types'
 
 const props = defineProps<{ed: Editor; canvas: Canvas}>()
 const emit = defineEmits<{openNodes: []}>()
@@ -41,13 +42,6 @@ const begin = () => ed.begin()
 function same<T>(get: (s: Stroke) => T): T | undefined {
   const vals = strokes.value.map(s => JSON.stringify(get(s)))
   return vals.length && vals.every(v => v === vals[0]) ? JSON.parse(vals[0]) : undefined
-}
-const fill = computed(() => same(s => s.fill))
-const edge = computed(() => same(s => s.edge))
-function setPaint(key: 'fill' | 'edge', v: RGB | null) {
-  ed.begin()
-  for (const s of strokes.value) s[key] = v ? [...v] as RGB : null
-  ed.changed()
 }
 const lineWidth = computed(() => {
   void ed.revision
@@ -384,8 +378,8 @@ function setCap(end: 'start' | 'end', angle: number | null) {
           <InputString data-field="name" :model-value="active.name" @focus="begin" @update:model-value="v => { ed.begin(); active!.name = v; ed.changed() }" @confirm="commit" @blur="commit" />
         </Parameter>
         <template v-if="!onlyImages">
-        <Parameter label="塗り"><PaintField label="塗り" :value="fill ?? null" :mixed="fill === undefined" @begin="begin" @change="v => setPaint('fill', v)" @commit="commit" /></Parameter>
-        <Parameter label="線"><PaintField label="線" :value="edge ?? null" :mixed="edge === undefined" @begin="begin" @change="v => setPaint('edge', v)" @commit="commit" /></Parameter>
+        <PaintRows :ed="ed" paint="fill" label="塗り" :strokes="strokes" :active="active" />
+        <PaintRows :ed="ed" paint="edge" label="線" :strokes="strokes" :active="active" />
         <Parameter label="線幅" :hint="strokes.length > 1 ? `選択中の${strokes.length}本すべてを、それぞれの幅点の比率を保ったまま同じ最大幅にします（表示は編集中のパス）` : '幅点の比率を保ったまま、いちばん太い所の幅を変えます'">
           <InputNumber :model-value="r2(lineWidth)" :min="0" :max="1000" :bar="false" suffix=" pt" @focus="begin" @update:model-value="setLineWidth" @confirm="commit" @blur="commit" />
         </Parameter>
@@ -481,8 +475,8 @@ function setCap(end: 'start' | 'end', angle: number | null) {
     <template v-if="!strokes.length">
       <!-- Nothing selected: the look the next path gets (no prose; tooltip explains). -->
       <ParameterGrid data-testid="draw-style" v-tooltip="'次に描くパスの見た目（最後に選んだパスから引き継ぎ）'">
-        <Parameter label="塗り"><PaintField label="塗り" :value="style.fill" :mixed="false" @begin="() => {}" @change="v => setStyle({fill: v})" @commit="() => {}" /></Parameter>
-        <Parameter label="線"><PaintField label="線" :value="style.edge" :mixed="false" @begin="() => {}" @change="v => setStyle({edge: v})" @commit="() => {}" /></Parameter>
+        <Parameter label="塗り"><PaintField label="塗り" :value="style.fill" :mixed="false" :opacity="style.fillOpacity" @begin="() => {}" @change="(v, o) => setStyle({fill: v, fillOpacity: o})" @commit="() => {}" /></Parameter>
+        <Parameter label="線"><PaintField label="線" :value="style.edge" :mixed="false" :opacity="style.edgeOpacity" @begin="() => {}" @change="(v, o) => setStyle({edge: v, edgeOpacity: o})" @commit="() => {}" /></Parameter>
         <Parameter label="線幅"><InputNumber data-field="draw-width" :model-value="r2(style.width)" :min="0.1" :max="1000" :bar="false" suffix=" pt" @update:model-value="v => setStyle({width: v})" /></Parameter>
       </ParameterGrid>
     </template>

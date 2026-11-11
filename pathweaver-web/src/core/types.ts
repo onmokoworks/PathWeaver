@@ -46,6 +46,12 @@ export interface Stroke {
   fill: RGB | null
   edge: RGB | null
   edge_width: number
+  /** Opacity of the fill / line paint, 0..1 (left out = 1). */
+  fill_opacity?: number
+  edge_opacity?: number
+  /** Paints the fill / line instead of the solid colour (which stays as the fallback). */
+  fill_gradient?: Gradient | null
+  edge_gradient?: Gradient | null
   frame_angle: number
   corners: {node: number; radius: number; kind: string}[]
   join: Join
@@ -59,6 +65,10 @@ export interface Stroke {
   end_cap?: Cap
 }
 export type Cap = 'Butt' | 'Round' | 'Square'
+export type GradientKind = 'Linear' | 'Radial'
+export interface GradientStop {offset: number; color: RGB; opacity: number}
+/** `matrix`: gradient space → document. Linear runs (0,0)→(1,0); radial is the unit circle. */
+export interface Gradient {kind: GradientKind; stops: GradientStop[]; matrix: Matrix}
 export interface CornerWidget {node: number; p: Vec2; dir: Vec2; radius: number; kind: 'Circular' | 'Clothoid' | 'Bevel'; limit: number}
 
 export type NodeKind =
@@ -125,6 +135,8 @@ export interface Folder {id: number; name: string; visible: boolean; open: boole
 export interface Anchor {stroke: number; node: number}
 export interface RenderLayer {
   color: string; opacity: number; d: string
+  /** Paints `d` instead of `color`. */
+  gradient?: Gradient
   image?: {href: string; x: number; y: number; w: number; h: number}
   /** A placed image: the canvas draws `Document.assets[asset]` with `matrix`. */
   placed?: {asset: string; w: number; h: number; matrix: Matrix; reference: boolean; knockout?: Knockout | null}
