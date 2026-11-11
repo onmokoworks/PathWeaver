@@ -82,6 +82,23 @@ impl Cap {
         *self == Cap::Butt
     }
 }
+/// How a compound path's subpaths combine into its fill (SVG's fill-rule).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FillRule {
+    /// A region is filled when the subpaths around it wind a nonzero number
+    /// of times (fonts; holes run the other way).
+    #[default]
+    NonZero,
+    /// A region is filled when an odd number of subpaths surround it: any
+    /// subpath inside another is a hole, whichever way it runs.
+    EvenOdd,
+}
+impl FillRule {
+    pub fn is_nonzero(&self) -> bool {
+        *self == FillRule::NonZero
+    }
+}
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CornerKind {
     #[default]
@@ -200,6 +217,15 @@ pub struct Stroke {
     /// Closed, normalized contours after expansion or a Boolean operation.
     #[serde(default)]
     pub contours: Option<Vec<Vec<Point>>>,
+    /// Member of a compound path (Illustrator's compound path): every path
+    /// with the same id is one shape. Each member stays an ordinary editable
+    /// path; together they are filled as one (holes where `fill_rule` says),
+    /// painted with the first member's look (see `compound.rs`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compound: Option<u64>,
+    /// How the members of a compound path fill together.
+    #[serde(default, skip_serializing_if = "FillRule::is_nonzero")]
+    pub fill_rule: FillRule,
     #[serde(default = "default_fill")]
     pub fill: Option<[u8; 3]>,
     #[serde(default)]
@@ -310,6 +336,8 @@ impl Stroke {
             folder: None,
             closed: false,
             contours: None,
+            compound: None,
+            fill_rule: FillRule::NonZero,
             fill: None,
             edge: default_fill(),
             edge_width: default_edge_width(),
@@ -384,7 +412,7 @@ impl Stroke {
     /// The displayed stroke width is the widest part of the editable profile.
     /// Using the maximum (rather than the start) also supports tapered zero tips.
     pub fn line_width(&self) -> f64 {
-        if self.contours.is_some() {
+        if self.contours.is_some() || self.compound.is_some() {
             return self.edge_width;
         }
         let end = if self.closed { self.start_width } else { self.end_width };
@@ -400,7 +428,7 @@ impl Stroke {
         if !value.is_finite() || !(0.0..=1000.0).contains(&value) {
             return Err("線幅は0〜1000の範囲で入力してください".into());
         }
-        if self.contours.is_some() {
+        if self.contours.is_some() || self.compound.is_some() {
             self.edge_width = value;
             return Ok(());
         }
@@ -808,12 +836,22 @@ impl Document {
         if self.blends.len() > 1000 || self.blends.iter().any(|b| b.steps == 0 || b.steps > 1000) {
             return Err("ブレンドが不正です".into());
         }
-        if self.strokes.len() > 1000 {
+        // Outlined text and imported drawings are compound paths of many
+        // members, so the limit counts members, not shapes.
+        if self.strokes.len() > 20000 {
             return Err("パスが多すぎます".into());
         }
         for s in &self.strokes {
             check_id(s.id)?;
             if let Some(graph) = &s.appearance { graph.validate()?; }
+            if let Some(c) = s.compound {
+                if c == 0 || c >= self.next_id {
+                    return Err("複合パスのIDが不正です".into());
+                }
+                if s.contours.is_some() || s.text.is_some() || s.image.is_some() || s.guide || s.blend_of.is_some() {
+                    return Err("複合パスにできない種類のパスが含まれています".into());
+                }
+            }
             if !s.edge_width.is_finite() || !(0.0..=10000.0).contains(&s.edge_width) {
                 return Err("輪郭線の幅が不正です".into());
             }

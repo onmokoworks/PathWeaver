@@ -3,6 +3,7 @@ pub mod appearance;
 pub mod appearance_assets;
 pub mod appearance_effects;
 pub mod appearance_paint;
+pub mod compound;
 pub mod corners;
 pub mod editing;
 pub mod model;
