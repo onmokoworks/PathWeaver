@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import {useMagicKeys, useRafFn} from '@vueuse/core'
 import {scalar, vec2} from 'linearly'
-import {computed, ref, useTemplateRef} from 'vue'
+import {computed, inject, ref, useTemplateRef} from 'vue'
 
 import {Icon} from '../Icon'
+import {InputNumberContextKey} from '../InputNumber/context'
 import {InputPositionProps} from '../InputPosition'
 import {Tooltip} from '../Tooltip'
 import {InputEmits} from '../types'
@@ -19,6 +20,10 @@ const props = withDefaults(
 	}
 )
 const emit = defineEmits<InputEmits>()
+
+// PathWeaver patch: drag speed per pixel from an ancestor (InputNumber/context.ts)
+const ctx = inject(InputNumberContextKey, null)
+const unitSpeed = () => ctx?.value.speed ?? 1
 
 const $button = useTemplateRef('$button')
 
@@ -49,7 +54,7 @@ useRafFn(() => {
 })
 
 const precision = computed(() => {
-	return precisionOf(speed.value)
+	return precisionOf(speed.value * unitSpeed())
 })
 
 const overlayLabelValues = computed(() => {
@@ -66,7 +71,7 @@ const {dragging: tweaking} = useDrag($button, {
 		emit('focus')
 	},
 	onDrag({delta}) {
-		const modelDelta = vec2.scale(delta, speed.value) as vec2.Mutable
+		const modelDelta = vec2.scale(delta, speed.value * unitSpeed()) as vec2.Mutable
 
 		if (x.value) {
 			modelDelta[1] = 0
