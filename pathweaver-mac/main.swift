@@ -584,6 +584,13 @@ final class Host: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMes
             item("すべてを選択", "selectAll", "a"),
         ])
         add("オブジェクト", [
+            item("左揃え", "alignLeft"), item("左右中央揃え", "alignHCenter"), item("右揃え", "alignRight"),
+            item("上揃え", "alignTop"), item("上下中央揃え", "alignVCenter"), item("下揃え", "alignBottom"),
+            item("左右中央で分布", "distributeHCenter"), item("上下中央で分布", "distributeVCenter"),
+            item("横の間隔を揃える", "distributeHGap"), item("縦の間隔を揃える", "distributeVGap"),
+            .separator(),
+            item("ロック", "lock", "2"), item("すべてのロックを解除", "unlockAll", "2", [.command, .option]),
+            .separator(),
             item("ブレンドを作成", "makeBlend", "b", [.command, .option]),
             item("ブレンドを解除", "releaseBlend", "b", [.command, .option, .shift]),
             item("ブレンドを拡張", "expandBlend"),
@@ -594,6 +601,7 @@ final class Host: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMes
         add("表示", [
             item("グリッドを表示して吸着", "snapGrid", "'"), item("ガイドに吸着", "snapGuides", ";"),
             item("接線に吸着", "snapTangent"), item("法線に吸着", "snapNormal"),
+            item("スマートガイド", "snapObjects", "u"),
             .separator(),
             item("ガイドを作成", "makeGuides", "5"), item("ガイドを解除", "releaseGuides", "5", [.command, .option]),
             .separator(),

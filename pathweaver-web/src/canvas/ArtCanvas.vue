@@ -13,8 +13,9 @@ import TextEditor from './TextEditor.vue'
 import ShapeAdjust from './ShapeAdjust.vue'
 import {placedHref} from '../core/knockout'
 
-type Flag = 'snap_guides' | 'snap_grid' | 'snap_tangent' | 'snap_normal'
+type Flag = 'snap_objects' | 'snap_guides' | 'snap_grid' | 'snap_tangent' | 'snap_normal'
 const snapFlags: [Flag, string, string][] = [
+  ['snap_objects', 'スマート', 'スマートガイド：移動・拡大縮小・アンカーのドラッグ中に、ほかの物やアートボードの端と中心に吸着（⌘U）'],
   ['snap_guides', 'ガイド', '定規から引き出したガイドと交点に吸着'],
   ['snap_grid', 'グリッド', 'グリッドを表示して交点に吸着'],
   ['snap_tangent', '接線', '他のアンカーの接線方向に吸着'],
@@ -75,6 +76,7 @@ const menuItems = computed<MenuItem[]>(() => {
   const any = sel.length > 0
   const guides = sel.filter(s => s.guide).length
   const one = sel.length === 1 ? sel[0] : null
+  const anyLocked = ed.doc.strokes.some(s => s.locked) || !!ed.doc.folders?.some(f => f.locked)
   return [
     {label: 'カット', shortcut: '⌘X', disabled: !any, action: () => emit('command', 'cut')},
     {label: 'コピー', shortcut: '⌘C', disabled: !any, action: () => emit('command', 'copy')},
@@ -84,6 +86,9 @@ const menuItems = computed<MenuItem[]>(() => {
     {label: '', separator: true},
     {label: 'ガイドを作成', shortcut: '⌘5', disabled: sel.length - guides === 0, action: () => ed.makeGuides(true)},
     {label: 'ガイドを解除', shortcut: '⌥⌘5', disabled: guides === 0, action: () => ed.makeGuides(false)},
+    {label: '', separator: true},
+    {label: 'ロック', shortcut: '⌘2', disabled: !any, action: () => emit('command', 'lock')},
+    {label: 'すべてのロックを解除', shortcut: '⌥⌘2', disabled: !anyLocked, action: () => emit('command', 'unlockAll')},
     {label: '', separator: true},
     {label: '最前面へ', disabled: !any, action: () => ed.arrange('front')},
     {label: '前面へ', disabled: !any, action: () => ed.arrange('forward')},
@@ -128,7 +133,7 @@ const showAnchors = computed(() => ed.tool !== 'select')
 const anchorStrokes = computed(() => {
   void ed.revision
   // Direct/convert tools show anchors of every editable path so any can be picked.
-  if (ed.tool === 'direct' || ed.tool === 'convert') return visible.value.filter(s => !s.contours)
+  if (ed.tool === 'direct' || ed.tool === 'convert') return visible.value.filter(s => !s.contours && !ed.locked(s))
   return selectedStrokes.value.filter(s => !s.contours)
 })
 
@@ -226,6 +231,19 @@ const pathFrameLines = computed(() => {
     a: S(sub(f.origin, scale(d, far))), b: S(add(f.origin, scale(d, far))), label,
     at: S(add(f.origin, scale(d, 40 / view.zoom))),
   }))
+})
+
+// Smart guides while dragging (screen coordinates).
+const smartLines = computed(() => cv.state.smart.map(g => ({a: S(g.a), b: S(g.b)})))
+// Align to a key object: the key gets a heavier outline (Illustrator).
+const keyBox = computed(() => {
+  void ed.revision
+  if (ed.tool !== 'select' || cv.state.alignTo !== 'key' || ed.selected.length < 2 || cv.state.drag) return null
+  const units = cv.arrangeUnits()
+  const k = units.length >= 2 ? cv.keyUnit(units) : undefined
+  if (!k) return null
+  const a = S({x: k.box.x0, y: k.box.y0}), c = S({x: k.box.x1, y: k.box.y1})
+  return {x: a.x, y: a.y, w: c.x - a.x, h: c.y - a.y}
 })
 
 const snapLine = computed(() => {
@@ -387,6 +405,11 @@ const cursor = computed(() => {
         </g>
       </g>
 
+      <rect v-if="keyBox" class="key-object" data-testid="key-object" :x="keyBox.x - 1" :y="keyBox.y - 1" :width="keyBox.w + 2" :height="keyBox.h + 2" />
+      <g v-if="smartLines.length" class="smart" data-testid="smart-guides">
+        <line v-for="(l, i) in smartLines" :key="i" :x1="l.a.x" :y1="l.a.y" :x2="l.b.x" :y2="l.b.y" />
+      </g>
+
       <g v-for="l in pathFrameLines" :key="l.label" class="path-frame">
         <line :x1="l.a.x" :y1="l.a.y" :x2="l.b.x" :y2="l.b.y" />
         <text :x="l.at.x + 6" :y="l.at.y - 6">{{ l.label }}</text>
@@ -421,7 +444,7 @@ const cursor = computed(() => {
       <span class="snap-title" aria-hidden="true" title="吸着"><Icon icon="mdi:magnet" /></span>
       <InputButtonToggle
         v-for="[f, label, hint] in snapFlags" :key="f" v-tooltip="{content: hint, placement: 'top'}"
-        :model-value="ed.doc[f]" :label="label" :aria-label="`${label}に吸着`" :data-snap="f"
+        :model-value="!!ed.doc[f]" :label="label" :aria-label="`${label}に吸着`" :data-snap="f"
         @update:model-value="v => toggleSnap(f, v)"
       />
     </div>
@@ -502,6 +525,8 @@ const cursor = computed(() => {
 .bbox .pivot line {stroke: var(--tq-color-accent); stroke-width: 1}
 .marquee {fill: color-mix(in srgb, var(--tq-color-accent) 10%, transparent); stroke: var(--tq-color-accent); stroke-dasharray: 3 2}
 .snap line {stroke: var(--pw-snap); stroke-width: 1}
+.smart line {stroke: var(--pw-snap); stroke-width: 1; shape-rendering: crispEdges}
+.key-object {fill: none; stroke: var(--tq-color-accent); stroke-width: 2.5}
 .path-frame line {stroke: var(--pw-snap); stroke-width: 1; stroke-dasharray: 5 4; opacity: .7}
 .path-frame text {fill: var(--pw-snap); font-size: 10px; pointer-events: none}
 .snap circle {fill: none; stroke: var(--pw-snap); stroke-width: 1.5}

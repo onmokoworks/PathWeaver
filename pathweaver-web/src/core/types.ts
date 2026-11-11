@@ -55,6 +55,8 @@ export interface Stroke {
   folder?: number | null
   /** A guide made from this path: a thin line to snap to, never painted or exported. */
   guide?: boolean
+  /** Locked: drawn and exported, but not picked or edited on the canvas. */
+  locked?: boolean
   start_cap?: Cap
   end_cap?: Cap
 }
@@ -107,6 +109,8 @@ export interface Document {
   snap_guides: boolean
   snap_tangent: boolean
   snap_normal: boolean
+  /** Smart guides: moving / scaling snaps to other objects' edges and centres. */
+  snap_objects: boolean
   guides: Guide[]
   angle_step: number
   appearance_presets: Preset[]
@@ -120,7 +124,7 @@ export interface Document {
 }
 /** An artboard (top-left x, y; size w, h in document units). */
 export interface Artboard {id: number; name: string; x: number; y: number; w: number; h: number}
-export interface Folder {id: number; name: string; visible: boolean; open: boolean; parent?: number | null}
+export interface Folder {id: number; name: string; visible: boolean; open: boolean; parent?: number | null; locked?: boolean}
 
 export interface Anchor {stroke: number; node: number}
 export interface RenderLayer {

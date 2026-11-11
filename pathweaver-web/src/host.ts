@@ -156,7 +156,7 @@ export function createHost(ed: Editor, commands: Record<string, () => void>) {
     const d = ed.doc
     post({
       type: 'menu', undo: ed.history.undo > 0, redo: ed.history.redo > 0, selection: ed.selected.length > 0 || ed.anchors.length > 0,
-      snap: {snapGrid: d.snap_grid, snapGuides: d.snap_guides, snapTangent: d.snap_tangent, snapNormal: d.snap_normal},
+      snap: {snapGrid: d.snap_grid, snapGuides: d.snap_guides, snapTangent: d.snap_tangent, snapNormal: d.snap_normal, snapObjects: d.snap_objects !== false},
     })
   }, {immediate: true})
   initLibrary(post as never, isNative())

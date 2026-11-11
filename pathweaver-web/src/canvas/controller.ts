@@ -13,6 +13,7 @@ import {settings, wheelZoom, type Paper} from '../core/settings'
 import type {Editor} from '../core/editor'
 import type {Anchor, Artboard, CornerWidget, Document, Frame, PathNode, SnapGuide, Stroke, Vec2, WidthHandle} from '../core/types'
 import {add, affine, Bounds, dist, inside, len, rectHitsRings, renderBounds, rings, scale, sub, ZERO} from './geometry'
+import {alignMoves, boxXs, boxYs, distributeMoves, smartSnap, snapTargets, union, type AlignKind, type AlignTo, type DistributeKind, type SmartGuide, type SnapTargets} from '../core/arrange'
 
 export interface View {panX: number; panY: number; zoom: number; width: number; height: number}
 export const RULER = 20
@@ -21,12 +22,12 @@ type Matrix = [number, number, number, number, number, number]
 type Drag =
   | {kind: 'pan'; last: Vec2}
   | {kind: 'marquee'; start: Vec2; current: Vec2; add: boolean; anchors: boolean}
-  | {kind: 'move'; start: Vec2; origin: Vec2; base: string; moved: boolean; duplicate: boolean}
-  | {kind: 'scale'; base: string; box: Bounds; corner: Vec2; fixed: Vec2}
+  | {kind: 'move'; start: Vec2; origin: Vec2; base: string; moved: boolean; duplicate: boolean; box: Bounds | null; targets: SnapTargets | null}
+  | {kind: 'scale'; base: string; box: Bounds; corner: Vec2; fixed: Vec2; targets: SnapTargets | null}
   | {kind: 'rotate'; base: string; center: Vec2; startAngle: number}
   | {kind: 'pivot'; box: Bounds}
   | {kind: 'artboard'; mode: 'create' | 'move' | 'resize'; id: number; start: Vec2; base: Artboard; handle: number}
-  | {kind: 'anchors'; start: Vec2; origin: Vec2; base: Map<string, Vec2>; moved: boolean}
+  | {kind: 'anchors'; start: Vec2; origin: Vec2; base: Map<string, Vec2>; moved: boolean; targets: SnapTargets | null}
   | {kind: 'handle'; at: Anchor; side: 'in' | 'out'}
   | {kind: 'pen'; at: Anchor; start: Vec2; moved: boolean; mode: 'new' | 'out' | 'close'}
   | {kind: 'convert'; at: Anchor; start: Vec2; moved: boolean}
@@ -61,6 +62,11 @@ function loadPivot(): Pivot {
 /** The nine points of the locator (corners, edge middles, centre). */
 export const PIVOT_POINTS: Pivot[] = [0, 0.5, 1].flatMap(v => [0, 0.5, 1].map(u => ({u, v})))
 export const pivotIn = (b: Bounds, q: Pivot): Vec2 => ({x: b.x0 + q.u * (b.x1 - b.x0), y: b.y0 + q.v * (b.y1 - b.y0)})
+
+function loadAlignTo(): AlignTo {
+  try { const v = localStorage.getItem('pw.alignTo'); if (v === 'selection' || v === 'key' || v === 'artboard') return v } catch { /* default */ }
+  return 'selection'
+}
 
 function loadShapeKind(): ShapeKind {
   try { const v = localStorage.getItem('pw.shape') as ShapeKind | null; if (v && shapeInfo(v)) return v } catch { /* default */ }
@@ -100,7 +106,14 @@ export function createCanvas(ed: Editor) {
     pivot: loadPivot(),
     // Artboard tool: the artboard being edited (its panel shows on the right).
     artboard: null as number | null,
+    // Align / distribute: what to line up with (a view setting, like the pivot).
+    alignTo: loadAlignTo(),
+    // Spacing used by 間隔を揃える with a key object (Illustrator's 分布間隔).
+    alignGap: 0,
+    // Smart guides shown during a move / resize (world segments).
+    smart: [] as SmartGuide[],
   })
+  watch(() => state.alignTo, v => { try { localStorage.setItem('pw.alignTo', v) } catch { /* preference only */ } })
   watch(() => [state.pivot.u, state.pivot.v], () => { try { localStorage.setItem('pw.pivot', JSON.stringify(state.pivot)) } catch { /* preference only */ } })
   function setPivot(q: Pivot) { state.pivot = {u: q.u, v: q.v} }
   let frames: Frame[] = []
@@ -113,6 +126,7 @@ export function createCanvas(ed: Editor) {
   watch(() => ed.generation, () => {
     state.drag = null
     state.snap = null
+    state.smart = []
     state.penPath = null
     state.pathFrame = null
     state.widthTarget = null
@@ -125,9 +139,10 @@ export function createCanvas(ed: Editor) {
   const toScreen = (p: Vec2): Vec2 => ({x: p.x * view.zoom + view.panX, y: p.y * view.zoom + view.panY})
   const tol = (px = 7) => px / view.zoom
   /** A 下絵 (tracing reference) stays put: only the layer list selects it. */
-  const pickable = (s: Stroke) => ed.shown(s) && !s.image?.reference && s.blend_of == null
+  const pickable = (s: Stroke) => ed.shown(s) && !s.image?.reference && s.blend_of == null && !ed.locked(s)
 
-  const editable = () => ed.doc.strokes.filter(s => ed.shown(s) && !s.contours && !s.guide && s.blend_of == null)
+  /** Paths whose anchors the tools may touch (locked ones are left alone). */
+  const editable = () => ed.doc.strokes.filter(s => ed.shown(s) && !s.contours && !s.guide && s.blend_of == null && !ed.locked(s))
   const pathGuides = () => ed.doc.strokes.filter(s => ed.shown(s) && s.guide && s.nodes.length > 1)
   const stroke = (id: number) => ed.findStroke(id)
   const nodeOf = (at: Anchor): PathNode | undefined => stroke(at.stroke)?.nodes.find(n => n.id === at.node)
@@ -171,7 +186,9 @@ export function createCanvas(ed: Editor) {
       // A blend step stands for its blend: picking it picks the first source.
       if (s.blend_of != null && ed.shown(s)) {
         const r = ed.renders.get(s.id)
-        if (r && inside(p, rings(r))) return ed.blendOf(s.id)?.a ?? null
+        const src = ed.blendOf(s.id)?.a
+        const a = src != null ? stroke(src) : undefined
+        if (r && a && !ed.locked(a) && inside(p, rings(r))) return a.id
         continue
       }
       if (!pickable(s)) continue
@@ -229,17 +246,13 @@ export function createCanvas(ed: Editor) {
   }
 
   // ---------- selection bounds (select tool) ----------
+  /** A path's own geometry bounds (what the selection box measures). */
+  function strokeBounds(s: Stroke): Bounds | null {
+    const r = ed.geometryRender(s)
+    return r ? renderBounds(r, s) : null
+  }
   function selectionBounds(): Bounds | null {
-    let b: Bounds | null = null
-    for (const id of ed.selected) {
-      const s = stroke(id)
-      const r = s && ed.geometryRender(s)
-      if (!s || !r) continue
-      const sb = renderBounds(r, s)
-      if (!sb) continue
-      b = b ? {x0: Math.min(b.x0, sb.x0), y0: Math.min(b.y0, sb.y0), x1: Math.max(b.x1, sb.x1), y1: Math.max(b.y1, sb.y1)} : sb
-    }
-    return b
+    return union(ed.selected.map(id => stroke(id)).filter((s): s is Stroke => !!s).map(strokeBounds).filter((b): b is Bounds => !!b))
   }
   function boxHandles(b: Bounds) {
     return [
@@ -331,6 +344,121 @@ export function createCanvas(ed: Editor) {
     if (!f || state.penPath === null) return null
     const s = stroke(state.penPath)
     return s && s.nodes.at(-1)?.id === f.node ? f : null
+  }
+
+  // ---------- smart guides ----------
+  // While moving or resizing, the selection's edges and centre snap to the
+  // edges and centres of everything else on show and of the artboards. The
+  // lines are gathered once when the drag starts.
+  const SMART_PX = 5
+  const smartOn = () => ed.doc.snap_objects !== false
+  function captureTargets(moving: Set<number>): SnapTargets | null {
+    if (!smartOn()) return null
+    const boxes: Bounds[] = []
+    for (const s of ed.doc.strokes) {
+      if (moving.has(s.id) || !ed.shown(s) || s.guide) continue
+      if (s.blend_of != null) { const b = ed.blendOf(s.id); if (b && (moving.has(b.a) || moving.has(b.b))) continue }
+      const b = strokeBounds(s)
+      if (b) boxes.push(b)
+    }
+    for (const a of boards()) boxes.push(boardBounds(a))
+    return boxes.length ? snapTargets(boxes) : null
+  }
+  /** The selected paths with their blend partners (they move together). */
+  function movingSet(ids: number[]) {
+    const out = new Set(ids)
+    for (const id of ids) { const b = ed.blendOf(id); if (b) { out.add(b.a); out.add(b.b) } }
+    return out
+  }
+
+  // ---------- align / distribute ----------
+  type Unit = {ids: number[]; box: Bounds}
+  /**
+   * What lines up as one: a folder whose shown paths are all selected (the
+   * outermost such folder), a blend with both sources selected, else each path.
+   */
+  function arrangeUnits(): Unit[] {
+    const sel = ed.selected.map(id => stroke(id)).filter((s): s is Stroke => !!s && ed.shown(s) && !ed.locked(s))
+    const chosen = new Set(sel.map(s => s.id))
+    const whole = new Map<number, boolean>()
+    const folderWhole = (id: number) => {
+      if (!whole.has(id)) whole.set(id, ed.doc.strokes.filter(v => v.blend_of == null && ed.shown(v) && ed.inFolder(v, id)).every(v => chosen.has(v.id)))
+      return whole.get(id)!
+    }
+    const units = new Map<string, number[]>()
+    for (const s of sel) {
+      let key = `p${s.id}`
+      let f = ed.folderOf(s.folder)
+      for (let depth = 0; f && depth < 64; depth++) {
+        if (folderWhole(f.id)) key = `f${f.id}`
+        f = ed.folderOf(f.parent)
+      }
+      const b = key.startsWith('p') ? ed.blendOf(s.id) : undefined
+      if (b && chosen.has(b.a) && chosen.has(b.b)) key = `b${b.id}`
+      ;(units.get(key) ?? units.set(key, []).get(key)!).push(s.id)
+    }
+    const out: Unit[] = []
+    for (const [key, ids] of units) {
+      // a blend's box includes its steps
+      const parts = key.startsWith('b') ? [...ids, ...ed.doc.strokes.filter(v => v.blend_of === +key.slice(1)).map(v => v.id)] : ids
+      const box = union(parts.map(id => stroke(id)).filter((v): v is Stroke => !!v).map(strokeBounds).filter((v): v is Bounds => !!v))
+      if (box) out.push({ids, box})
+    }
+    return out
+  }
+  /** The key object (Illustrator): the unit of the active path, the last one clicked. */
+  function keyUnit(units: Unit[] = arrangeUnits()): Unit | undefined {
+    const id = ed.active?.id
+    return id == null ? undefined : units.find(u => u.ids.includes(id))
+  }
+  /** The artboard to align with: the one under the selection's centre, else the edited one, else the first. */
+  function alignBoard(box: Bounds | null): Artboard | null {
+    const list = boards()
+    if (!list.length) return null
+    const c = box ? {x: (box.x0 + box.x1) / 2, y: (box.y0 + box.y1) / 2} : null
+    return (c && list.find(a => inBox(boardBounds(a), c))) || list.find(a => a.id === state.artboard) || list[0]
+  }
+  /** One item always lines up with the artboard. */
+  const alignMode = (units: Unit[]): AlignTo => (units.length < 2 ? 'artboard' : state.alignTo)
+  function moveUnits(units: Unit[], moves: Vec2[], label: string) {
+    const still = (m: Vec2) => Math.abs(m.x) < 1e-9 && Math.abs(m.y) < 1e-9
+    if (moves.every(still)) { ed.status = `${label}：すでに揃っています`; return }
+    ed.edit(d => {
+      units.forEach((u, i) => {
+        if (still(moves[i])) return
+        const r = call<{doc: Document}>('edit', {doc: d, kind: 'transform', ids: u.ids, matrix: [1, 0, 0, 1, moves[i].x, moves[i].y]})
+        d.strokes = r.doc.strokes
+      })
+    })
+    ed.status = label
+  }
+  const ALIGN_LABEL: Record<AlignKind, string> = {left: '左揃え', hcenter: '左右中央揃え', right: '右揃え', top: '上揃え', vcenter: '上下中央揃え', bottom: '下揃え'}
+  const DIST_LABEL: Record<DistributeKind, string> = {hcenter: '左右中央で分布', vcenter: '上下中央で分布', hgap: '横の間隔を揃える', vgap: '縦の間隔を揃える'}
+  function align(kind: AlignKind) {
+    const units = arrangeUnits()
+    if (!units.length) return
+    const mode = alignMode(units)
+    let to: Bounds | null = null
+    if (mode === 'artboard') { const a = alignBoard(union(units.map(u => u.box))); to = a ? boardBounds(a) : null }
+    else if (mode === 'key') to = keyUnit(units)?.box ?? null
+    else to = union(units.map(u => u.box))
+    if (!to) { ed.status = mode === 'artboard' ? 'アートボードがありません' : 'キーオブジェクトがありません'; return }
+    moveUnits(units, alignMoves(units.map(u => u.box), to, kind), ALIGN_LABEL[kind])
+  }
+  function distribute(kind: DistributeKind) {
+    const units = arrangeUnits()
+    if (units.length < 2) return
+    const mode = alignMode(units)
+    const boxes = units.map(u => u.box)
+    const board = mode === 'artboard' ? alignBoard(union(boxes)) : null
+    const k = mode === 'key' ? keyUnit(units) : undefined
+    const key = k ? units.indexOf(k) : -1
+    const opts = {
+      range: board ? boardBounds(board) : undefined,
+      key: key >= 0 ? key : undefined,
+      gap: key >= 0 && (kind === 'hgap' || kind === 'vgap') ? state.alignGap : undefined,
+    }
+    moveUnits(units, distributeMoves(boxes, kind, opts), DIST_LABEL[kind])
   }
 
   // ---------- helpers ----------
@@ -645,7 +773,7 @@ export function createCanvas(ed: Editor) {
         if (dist(hs[i], p) < tol(6)) {
           const opposite = hs[(i + 4) % 8]
           ed.begin()
-          state.drag = {kind: 'scale', base: JSON.stringify(ed.doc.strokes), box, corner: hs[i], fixed: opposite}
+          state.drag = {kind: 'scale', base: JSON.stringify(ed.doc.strokes), box, corner: hs[i], fixed: opposite, targets: captureTargets(movingSet(ed.selected))}
           return
         }
       }
@@ -675,7 +803,7 @@ export function createCanvas(ed: Editor) {
       if (e.altKey) ed.duplicateSelection()
       const origin = nearestSelectedAnchor(p) ?? p
       captureFrames(null, () => false)
-      state.drag = {kind: 'move', start: p, origin, base: JSON.stringify(ed.doc.strokes), moved: false, duplicate: e.altKey}
+      state.drag = {kind: 'move', start: p, origin, base: JSON.stringify(ed.doc.strokes), moved: false, duplicate: e.altKey, box: selectionBounds(), targets: captureTargets(movingSet(ed.selected))}
       return
     }
     const g = guideAt(p)
@@ -853,7 +981,7 @@ export function createCanvas(ed: Editor) {
     const base = new Map<string, Vec2>()
     for (const a of ed.anchors) { const n = nodeOf(a); if (n) base.set(akey(a), {...n.p}) }
     captureFrames(grab, a => ed.isAnchorSelected(a))
-    state.drag = {kind: 'anchors', start: p, origin: {...nodeOf(grab)!.p}, base, moved: false}
+    state.drag = {kind: 'anchors', start: p, origin: {...nodeOf(grab)!.p}, base, moved: false, targets: captureTargets(new Set(ed.anchors.map(a => a.stroke)))}
   }
 
   function convertDown(e: PointerEvent, p: Vec2) {
@@ -964,15 +1092,27 @@ export function createCanvas(ed: Editor) {
         if (!d.moved && dist(raw, d.start) < tol(2)) return
         d.moved = true
         let target = add(d.origin, sub(raw, d.start))
-        if (e.shiftKey) {
-          const v = sub(raw, d.start)
-          target = Math.abs(v.x) > Math.abs(v.y) ? add(d.origin, {x: v.x, y: 0}) : add(d.origin, {x: 0, y: v.y})
+        const v = sub(raw, d.start)
+        const along = e.shiftKey ? (Math.abs(v.x) > Math.abs(v.y) ? 'x' : 'y') : null
+        if (along) {
+          target = along === 'x' ? add(d.origin, {x: v.x, y: 0}) : add(d.origin, {x: 0, y: v.y})
         } else if (!e.ctrlKey && snapping()) {
           const r = call<{p: Vec2; guide: SnapGuide | null}>('snapTranslation', {doc: ed.doc, p: raw, start: d.start, origin: d.origin, frames, zoom: view.zoom})
           target = r.p
           state.snap = r.guide
         }
         const delta = sub(target, d.origin)
+        // Smart guides: the moved box's edges / centre onto other objects'.
+        state.smart = []
+        if (!e.ctrlKey && d.targets && d.box) {
+          const free = along === 'x' ? {x: v.x, y: 0} : along === 'y' ? {x: 0, y: v.y} : v
+          const b = {x0: d.box.x0 + free.x, y0: d.box.y0 + free.y, x1: d.box.x1 + free.x, y1: d.box.y1 + free.y}
+          const r = smartSnap(b, along === 'y' ? [] : boxXs(b), along === 'x' ? [] : boxYs(b), d.targets, tol(SMART_PX))
+          if (r.dx !== null) delta.x = free.x + r.dx
+          if (r.dy !== null) delta.y = free.y + r.dy
+          state.smart = r.guides
+          if (r.guides.length) state.snap = null
+        }
         restoreBase(d.base)
         transformSelected([1, 0, 0, 1, delta.x, delta.y])
         ed.changed()
@@ -980,8 +1120,21 @@ export function createCanvas(ed: Editor) {
       }
       case 'scale': {
         const fx = d.corner.x - d.fixed.x, fy = d.corner.y - d.fixed.y
-        let sx = Math.abs(fx) > 1e-9 ? (raw.x - d.fixed.x) / fx : 1
-        let sy = Math.abs(fy) > 1e-9 ? (raw.y - d.fixed.y) / fy : 1
+        let at = raw
+        // Smart guides: the dragged edge(s) onto other objects' edges / centres.
+        state.smart = []
+        if (!e.ctrlKey && d.targets) {
+          const mx = Math.abs(fx) > 1e-9, my = Math.abs(fy) > 1e-9
+          const b = {
+            x0: mx ? Math.min(d.fixed.x, raw.x) : d.box.x0, x1: mx ? Math.max(d.fixed.x, raw.x) : d.box.x1,
+            y0: my ? Math.min(d.fixed.y, raw.y) : d.box.y0, y1: my ? Math.max(d.fixed.y, raw.y) : d.box.y1,
+          }
+          const r = smartSnap(b, mx ? [raw.x] : [], my ? [raw.y] : [], d.targets, tol(SMART_PX))
+          at = {x: raw.x + (r.dx ?? 0), y: raw.y + (r.dy ?? 0)}
+          state.smart = r.guides
+        }
+        let sx = Math.abs(fx) > 1e-9 ? (at.x - d.fixed.x) / fx : 1
+        let sy = Math.abs(fy) > 1e-9 ? (at.y - d.fixed.y) / fy : 1
         if (Math.abs(fx) < 1e-9) sx = e.shiftKey ? sy : 1
         if (Math.abs(fy) < 1e-9) sy = e.shiftKey ? sx : 1
         if (e.shiftKey && Math.abs(fx) > 1e-9 && Math.abs(fy) > 1e-9) { const k = Math.max(Math.abs(sx), Math.abs(sy)); sx = Math.sign(sx || 1) * k; sy = Math.sign(sy || 1) * k }
@@ -1018,7 +1171,19 @@ export function createCanvas(ed: Editor) {
         if (e.shiftKey) {
           const v = sub(raw, d.start)
           target = Math.abs(v.x) > Math.abs(v.y) ? add(d.origin, {x: v.x, y: 0}) : add(d.origin, {x: 0, y: v.y})
-        } else target = snap(target, e.ctrlKey)
+        } else {
+          const free = target
+          target = snap(target, e.ctrlKey)
+          // Smart guides: the grabbed point onto other objects' edges / centres.
+          state.smart = []
+          if (!e.ctrlKey && d.targets) {
+            const r = smartSnap({x0: free.x, y0: free.y, x1: free.x, y1: free.y}, [free.x], [free.y], d.targets, tol(SMART_PX))
+            if (r.dx !== null) target = {...target, x: free.x + r.dx}
+            if (r.dy !== null) target = {...target, y: free.y + r.dy}
+            state.smart = r.guides
+            if (r.guides.length) state.snap = null
+          }
+        }
         const delta = sub(target, d.origin)
         for (const a of ed.anchors) {
           const n = nodeOf(a)
@@ -1189,6 +1354,7 @@ export function createCanvas(ed: Editor) {
     const d = state.drag
     state.drag = null
     state.snap = null
+    state.smart = []
     if (!d) return
     switch (d.kind) {
       case 'pan': return
@@ -1241,6 +1407,7 @@ export function createCanvas(ed: Editor) {
     if (state.drag.kind !== 'pan' && state.drag.kind !== 'marquee') ed.cancel()
     state.drag = null
     state.snap = null
+    state.smart = []
   }
 
   function wheel(e: WheelEvent, local: Vec2) {
@@ -1369,6 +1536,7 @@ export function createCanvas(ed: Editor) {
     view, state, toWorld, toScreen, down, move, up, wheel, zoomAt, fit, key, setTool, cancelDrag, setPaper,
     selectionBounds, boxHandles, widthHandles, widthGrips, finishPen, activePathFrame, cornerWidgets, widthVisible, setShowWidth, pathAt,
     editText, finishText, adjustShape, shapeAdjustable, setShapeKind, setPivot, deleteArtboard, artboardAt, showArtboard,
+    arrangeUnits, keyUnit, alignBoard, align, distribute, strokeBounds,
   })
 }
 export type Canvas = ReturnType<typeof createCanvas>

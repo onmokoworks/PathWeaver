@@ -191,6 +191,34 @@ function transformBase(m: number[]) {
 }
 function endTransform() { base = null; ed.commit() }
 
+// ---- align / distribute (Illustrator's Align panel) ----
+const units = computed(() => {
+  void ed.revision
+  return ed.tool === 'artboard' ? [] : props.canvas.arrangeUnits()
+})
+const hasBoards = computed(() => (ed.doc.artboards?.length ?? 0) > 0)
+/** Two or more things line up with each other; one thing with its artboard. */
+const showAlign = computed(() => units.value.length >= 2 || (units.value.length === 1 && hasBoards.value))
+const ALIGN = [
+  {kind: 'left', icon: 'material-symbols:align-horizontal-left', label: '左揃え'},
+  {kind: 'hcenter', icon: 'material-symbols:align-horizontal-center', label: '左右中央揃え'},
+  {kind: 'right', icon: 'material-symbols:align-horizontal-right', label: '右揃え'},
+  {kind: 'top', icon: 'material-symbols:align-vertical-top', label: '上揃え'},
+  {kind: 'vcenter', icon: 'material-symbols:align-vertical-center', label: '上下中央揃え'},
+  {kind: 'bottom', icon: 'material-symbols:align-vertical-bottom', label: '下揃え'},
+] as const
+const DISTRIBUTE = [
+  {kind: 'hcenter', icon: 'mdi:distribute-horizontal-center', label: '左右中央で分布：中心を等間隔に'},
+  {kind: 'vcenter', icon: 'mdi:distribute-vertical-center', label: '上下中央で分布：中心を等間隔に'},
+  {kind: 'hgap', icon: 'material-symbols:horizontal-distribute', label: '横の間隔を揃える：すき間を同じに'},
+  {kind: 'vgap', icon: 'material-symbols:vertical-distribute', label: '縦の間隔を揃える：すき間を同じに'},
+] as const
+const alignTo = computed(() => props.canvas.state.alignTo)
+function setAlignTo(v: string) {
+  if (v === 'artboard' && !hasBoards.value) { ed.status = 'アートボードがありません（⇧Oで作る）'; return }
+  props.canvas.state.alignTo = v as typeof props.canvas.state.alignTo
+}
+
 // ---- anchors ----
 const anchorNodes = computed(() => {
   void ed.revision
@@ -471,6 +499,32 @@ function setCap(end: 'start' | 'end', angle: number | null) {
           <InputAngle data-field="rotate" :model-value="turn" @focus="beginTransform" @update:model-value="setTurn" @confirm="endTurn" @blur="endTurn" />
         </Parameter>
       </ParameterGrid>
+      <ParameterGrid v-if="showAlign" data-testid="align">
+        <Parameter label="整列" :hint="units.length < 2 ? 'ひとつだけのときはアートボードに揃えます' : undefined">
+          <div class="icon-row">
+            <InputButton
+              v-for="a in ALIGN" :key="a.kind" subtle narrow :icon="a.icon" :aria-label="a.label" :tooltip="a.label" :data-align="a.kind"
+              @click="canvas.align(a.kind)"
+            />
+          </div>
+        </Parameter>
+        <template v-if="units.length >= 2">
+          <Parameter label="分布">
+            <div class="icon-row">
+              <InputButton
+                v-for="a in DISTRIBUTE" :key="a.kind" subtle narrow :icon="a.icon" :aria-label="a.label" :tooltip="a.label" :data-distribute="a.kind"
+                @click="canvas.distribute(a.kind)"
+              />
+            </div>
+          </Parameter>
+          <Parameter label="基準" hint="キー：最後にクリックしたもの（太枠）を動かさずに揃える。選択中のものをクリックし直すとキーが変わります">
+            <InputDropdown data-field="align-to" :model-value="alignTo" :options="['selection', 'key', 'artboard']" :labels="['選択範囲', 'キー', 'アートボード']" @update:model-value="v => setAlignTo(v as string)" />
+          </Parameter>
+          <Parameter v-if="alignTo === 'key'" label="間隔" hint="キーを基準に、すき間をこの幅にそろえる（間隔を揃えるボタン）">
+            <InputNumber data-field="align-gap" :model-value="canvas.state.alignGap" :bar="false" @update:model-value="v => { canvas.state.alignGap = v }" />
+          </Parameter>
+        </template>
+      </ParameterGrid>
       <div class="buttons">
         <InputButton v-if="!onlyImages" subtle class="wide" icon="material-symbols:account-tree-outline" :label="active.appearance ? '外観ノードを編集' : '外観ノードを開く'" @click="emit('openNodes')" />
         <InputButton subtle icon="material-symbols:content-copy-outline" label="複製" tooltip="⌘D" @click="ed.duplicateSelection()" />
@@ -496,6 +550,8 @@ function setCap(end: 'start' | 'end', angle: number | null) {
 .buttons .wide {grid-column: 1 / -1}
 .pathfinder {display: flex; gap: 2px; width: 100%}
 .pathfinder :deep(.TqInputButton) {flex: 1; font-size: 16px}
+.icon-row {display: flex; gap: 2px; width: 100%}
+.icon-row :deep(.TqInputButton) {flex: 1; min-width: 0; font-size: 16px}
 .cap {display: flex; gap: var(--tq-gap-related, 2px); width: 100%}
 .cap > :first-child {flex: 1; min-width: 0}
 .empty {color: var(--tq-color-text-mute); font-size: 12px; line-height: 1.7; margin: 8px 2px}

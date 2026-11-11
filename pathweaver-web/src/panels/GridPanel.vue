@@ -11,8 +11,9 @@ import type {Canvas} from '../canvas/controller'
 
 const props = defineProps<{ed: Editor; canvas: Canvas}>()
 const ed = props.ed
-type Flag = 'snap_grid' | 'snap_guides' | 'snap_tangent' | 'snap_normal'
+type Flag = 'snap_objects' | 'snap_grid' | 'snap_guides' | 'snap_tangent' | 'snap_normal'
 const flags: [Flag, string, string][] = [
+  ['snap_objects', 'スマートガイド', '移動・拡大縮小・アンカーのドラッグ中に、ほかの物やアートボードの端と中心に吸着（⌘U）'],
   ['snap_guides', 'ガイド', '定規から引き出したガイドと、その交点に吸着'],
   ['snap_grid', 'グリッド', 'グリッドを表示して交点に吸着'],
   ['snap_tangent', '接線', '他のアンカーの接線方向に吸着'],
@@ -27,7 +28,7 @@ function setNumber(key: 'grid_spacing' | 'angle_step', v: number) { ed.begin(); 
     <ParameterGrid>
       <ParameterHeading>吸着</ParameterHeading>
       <Parameter v-for="[f, label, hint] in flags" :key="f" :label="label" :hint="hint">
-        <InputCheckbox :model-value="ed.doc[f]" :aria-label="label" @update:model-value="v => toggle(f, v)" />
+        <InputCheckbox :model-value="!!ed.doc[f]" :aria-label="label" @update:model-value="v => toggle(f, v)" />
       </Parameter>
       <Parameter label="グリッド間隔">
         <InputNumber :model-value="ed.doc.grid_spacing" :min="1" :max="10000" :bar="false" @focus="ed.begin()" @update:model-value="v => setNumber('grid_spacing', v)" @confirm="ed.commit()" @blur="ed.commit()" />

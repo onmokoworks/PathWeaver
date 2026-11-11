@@ -88,7 +88,7 @@ const commands: Record<string, () => void> = {
   cut: () => { const t = ed.cutSelection(); if (t) navigator.clipboard?.writeText(t).catch(() => {}) },
   paste: () => { ed.paste() },
   duplicate: () => ed.duplicateSelection(),
-  selectAll: () => { if (typing(document.activeElement)) { (document.activeElement as HTMLInputElement).select?.(); return } ed.selected = ed.doc.strokes.filter(s => ed.shown(s)).map(s => s.id); ed.anchors = [] },
+  selectAll: () => { if (typing(document.activeElement)) { (document.activeElement as HTMLInputElement).select?.(); return } ed.selected = ed.doc.strokes.filter(s => ed.shown(s) && !ed.locked(s) && s.blend_of == null).map(s => s.id); ed.anchors = [] },
   fit: () => canvas.fit(),
   zoomIn: () => canvas.zoomAt({x: canvas.view.width / 2, y: canvas.view.height / 2}, 1.25),
   zoomOut: () => canvas.zoomAt({x: canvas.view.width / 2, y: canvas.view.height / 2}, 0.8),
@@ -107,6 +107,19 @@ const commands: Record<string, () => void> = {
   snapGuides: () => ed.edit(d => { d.snap_guides = !d.snap_guides }),
   snapTangent: () => ed.edit(d => { d.snap_tangent = !d.snap_tangent }),
   snapNormal: () => ed.edit(d => { d.snap_normal = !d.snap_normal }),
+  snapObjects: () => ed.edit(d => { d.snap_objects = !d.snap_objects }),
+  lock: () => { canvas.finishPen(); ed.lockSelection() },
+  unlockAll: () => ed.unlockAll(),
+  alignLeft: () => canvas.align('left'),
+  alignHCenter: () => canvas.align('hcenter'),
+  alignRight: () => canvas.align('right'),
+  alignTop: () => canvas.align('top'),
+  alignVCenter: () => canvas.align('vcenter'),
+  alignBottom: () => canvas.align('bottom'),
+  distributeHCenter: () => canvas.distribute('hcenter'),
+  distributeVCenter: () => canvas.distribute('vcenter'),
+  distributeHGap: () => canvas.distribute('hgap'),
+  distributeVGap: () => canvas.distribute('vgap'),
   toolSelect: () => canvas.setTool('select'),
   toolDirect: () => canvas.setTool('direct'),
   toolPen: () => canvas.setTool('pen'),
@@ -190,6 +203,10 @@ function onKeyDown(e: KeyboardEvent) {
   if (mod && e.key === ',') { settingsOpen.value = true; e.preventDefault(); return }
   if (mod && k === 'g') { (e.shiftKey ? commands.ungroup : commands.group)(); e.preventDefault(); return }
   if (mod && e.code === 'Digit5') { ed.makeGuides(!e.altKey); e.preventDefault(); return }
+  // ⌘2 lock the selection, ⌥⌘2 unlock everything (Illustrator)
+  if (mod && e.code === 'Digit2') { (e.altKey ? commands.unlockAll : commands.lock)(); e.preventDefault(); return }
+  // ⌘U smart guides (the Mac app's View menu has the same key)
+  if (mod && !e.shiftKey && !e.altKey && k === 'u' && !isNative()) { commands.snapObjects(); e.preventDefault(); return }
   // Paths on the clipboard (text fields keep their own copy/paste above).
   // ⌘ only: Ctrl+X belongs to the node editor (dissolve).
   if (e.metaKey && !e.shiftKey && (k === 'c' || k === 'x')) {
