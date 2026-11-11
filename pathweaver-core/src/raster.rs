@@ -721,7 +721,7 @@ pub fn picture(base64_png: &str, x: f64, y: f64, width: f64) -> Result<Image, St
     let scale = w as f64 / width.max(1e-6);
     Ok(Image::new(x, y, scale, w, h, rgba))
 }
-fn unbase64(s: &str) -> Option<Vec<u8>> {
+pub(crate) fn unbase64(s: &str) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(s.len() / 4 * 3);
     let (mut acc, mut bits) = (0u32, 0);
     for c in s.bytes() {
@@ -745,6 +745,18 @@ fn unbase64(s: &str) -> Option<Vec<u8>> {
 }
 /// Premultiplied RGBA8 from a PNG (what browsers produce from a canvas).
 fn decode_png(b: &[u8]) -> Result<(usize, usize, Vec<u8>), String> {
+    let (w, h, channels, px) = decode_png_pixels(b, MAX_PIXELS)?;
+    let mut rgba = Vec::with_capacity(w * h * 4);
+    for p in px.chunks_exact(channels) {
+        let a = if channels == 4 { p[3] } else { 255 };
+        let pre = |c: u8| ((c as u32 * a as u32 + 127) / 255) as u8;
+        rgba.extend_from_slice(&[pre(p[0]), pre(p[1]), pre(p[2]), a]);
+    }
+    Ok((w, h, rgba))
+}
+/// The unfiltered pixels of an 8-bit RGB / RGBA PNG, straight alpha:
+/// width, height, channels (3 or 4) and the rows, at most `max_pixels`.
+pub(crate) fn decode_png_pixels(b: &[u8], max_pixels: usize) -> Result<(usize, usize, usize, Vec<u8>), String> {
     const BAD: &str = "この画像は読み込めません（8bitのPNGに変換してください）";
     if b.len() < 8 || b[..8] != [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a] {
         return Err(BAD.into());
@@ -779,7 +791,13 @@ fn decode_png(b: &[u8]) -> Result<(usize, usize, Vec<u8>), String> {
         }
         i += 12 + len;
     }
-    check_size(w, h)?;
+    if max_pixels == MAX_PIXELS {
+        check_size(w, h)?;
+    } else if w == 0 || h == 0 {
+        return Err(BAD.into());
+    } else if w.saturating_mul(h) > max_pixels {
+        return Err(format!("画像が大きすぎます（{w}×{h}px）"));
+    }
     let raw = miniz_oxide::inflate::decompress_to_vec_zlib(&data).map_err(|_| BAD.to_string())?;
     let stride = w * channels;
     if raw.len() < (stride + 1) * h {
@@ -808,13 +826,7 @@ fn decode_png(b: &[u8]) -> Result<(usize, usize, Vec<u8>), String> {
             px[y * stride + x] = (src[x] as i32 + pred) as u8;
         }
     }
-    let mut rgba = Vec::with_capacity(w * h * 4);
-    for p in px.chunks_exact(channels) {
-        let a = if channels == 4 { p[3] } else { 255 };
-        let pre = |c: u8| ((c as u32 * a as u32 + 127) / 255) as u8;
-        rgba.extend_from_slice(&[pre(p[0]), pre(p[1]), pre(p[2]), a]);
-    }
-    Ok((w, h, rgba))
+    Ok((w, h, channels, px))
 }
 
 // ---- PNG (straight alpha, zlib via miniz_oxide) ----
@@ -870,7 +882,7 @@ fn crc32(bytes: &[u8]) -> u32 {
     }
     c ^ 0xffff_ffff
 }
-fn base64(bytes: &[u8]) -> String {
+pub(crate) fn base64(bytes: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut s = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for c in bytes.chunks(3) {
