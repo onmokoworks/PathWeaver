@@ -529,8 +529,7 @@ pub fn union(doc: &mut Document, ids: &[u64]) -> Result<u64, String> {
         }
         let first = paths[0];
         let mut result = Stroke::new(first.id, format!("{} / 合体", first.name));
-        result.fill = Some(first.fill.or(first.edge).unwrap_or([224; 3]));
-        result.edge = None;
+        result.take_fill_from(first);
         result.contours = Some(contours);
         let id = result.id;
         let position = d.strokes.iter().position(|s| s.id == id).unwrap();
@@ -571,17 +570,15 @@ pub fn pathfinder(doc: &mut Document, ids: &[u64], op: PathfinderOp) -> Result<V
             .iter()
             .map(|&i| outline::paint(&d.strokes[i]).map(|p| p.contours))
             .collect::<Result<_, _>>()?;
-        let color = |i: usize| {
-            let s = &d.strokes[order[i]];
-            s.fill.or(s.edge).unwrap_or([224; 3])
-        };
+        // The source whose paint a result takes (by stacking index).
+        let color = |i: usize| i;
         let union_of = |list: &[Vec<Vec<Point>>]| {
             let all: Vec<Vec<Point>> = list.iter().flatten().cloned().collect();
             outline::boolean_contours(&all, &[], OverlayRule::Subject)
         };
         let last = order.len() - 1;
         // (contours, colour, the source path whose place/folder it takes)
-        let mut results: Vec<(Vec<Vec<Point>>, [u8; 3], usize)> = match op {
+        let mut results: Vec<(Vec<Vec<Point>>, usize, usize)> = match op {
             PathfinderOp::Unite => vec![(union_of(&shapes), color(last), last)],
             PathfinderOp::MinusFront => vec![(
                 outline::boolean_contours(&shapes[0], &union_of(&shapes[1..]), OverlayRule::Difference),
@@ -656,8 +653,7 @@ pub fn pathfinder(doc: &mut Document, ids: &[u64], op: PathfinderOp) -> Result<V
             let id = if k == 0 { source_id } else { d.id() };
             let name = if k == 0 { format!("{source_name} / {label}") } else { format!("{source_name} / {label} {}", k + 1) };
             let mut s = Stroke::new(id, name);
-            s.fill = Some(color);
-            s.edge = None;
+            s.take_fill_from(&d.strokes[order[color]]);
             s.contours = Some(contours);
             s.folder = folder;
             new_strokes.push(s);

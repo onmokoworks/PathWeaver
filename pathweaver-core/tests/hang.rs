@@ -5,8 +5,8 @@ use kurbo::Point;
 fn rough_band() {
     let ring = |x: f64, y: f64, w: f64, h: f64| vec![Point::new(x, y), Point::new(x + w, y), Point::new(x + w, y + h), Point::new(x, y + h)];
     let original = vec![
-        Layer {color: [20, 20, 20], opacity: 1., contours: vec![ring(0., 0., 300., 80.)], image: None},
-        Layer {color: [200, 20, 20], opacity: 1., contours: vec![ring(40., 20., 120., 120.)], image: None},
+        Layer {color: [20, 20, 20], opacity: 1., contours: vec![ring(0., 0., 300., 80.)], image: None, gradient: None},
+        Layer {color: [200, 20, 20], opacity: 1., contours: vec![ring(40., 20., 120., 120.)], image: None, gradient: None},
     ];
     for b in [Kind::Band, Kind::Pucker, Kind::Simplify, Kind::Streak, Kind::Dissolve, Kind::Halftone, Kind::Mezzotint, Kind::Glow, Kind::Blur] {
         let mut g = Graph::default();

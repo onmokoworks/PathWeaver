@@ -157,6 +157,9 @@ pub fn knockout_asset(asset: &str, k: Knockout) -> String {
 fn default_one() -> f64 {
     1.
 }
+fn is_one(v: &f64) -> bool {
+    *v == 1.
+}
 impl Placed {
     pub fn rect(&self) -> Vec<Point> {
         let m = kurbo::Affine::new(self.matrix);
@@ -206,6 +209,17 @@ pub struct Stroke {
     pub edge: Option<[u8; 3]>,
     #[serde(default = "default_edge_width")]
     pub edge_width: f64,
+    /// Opacity of the fill / line paint (0..1). Older files omit it (= 1).
+    #[serde(default = "default_one", skip_serializing_if = "is_one")]
+    pub fill_opacity: f64,
+    #[serde(default = "default_one", skip_serializing_if = "is_one")]
+    pub edge_opacity: f64,
+    /// A gradient painting the fill / line instead of the solid colour, which
+    /// stays in `fill` / `edge` (`None` there still means no paint at all).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_gradient: Option<super::paint::Gradient>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge_gradient: Option<super::paint::Gradient>,
     #[serde(default)]
     pub frame_angle: f64,
     #[serde(default)]
@@ -234,6 +248,25 @@ pub struct Stroke {
     pub end_cap_locked: bool,
 }
 impl Stroke {
+    /// The paint a filled shape made from this path takes (its fill, or its
+    /// line when it has no fill): colour, opacity and gradient.
+    pub fn main_paint(&self) -> ([u8; 3], f64, Option<super::paint::Gradient>) {
+        match (self.fill, self.edge) {
+            (Some(c), _) => (c, self.fill_opacity, self.fill_gradient.clone()),
+            (None, Some(c)) => (c, self.edge_opacity, self.edge_gradient.clone()),
+            _ => ([224; 3], 1., None),
+        }
+    }
+    /// Paint a filled shape like `source` (see `main_paint`), with no line.
+    pub fn take_fill_from(&mut self, source: &Stroke) {
+        let (color, opacity, gradient) = source.main_paint();
+        self.fill = Some(color);
+        self.fill_opacity = opacity;
+        self.fill_gradient = gradient;
+        self.edge = None;
+        self.edge_opacity = 1.;
+        self.edge_gradient = None;
+    }
     /// Transform the editable centerline and its width vectors together.
     pub fn transformed(&self, matrix: kurbo::Affine, scale_widths: bool) -> Self {
         let vector = |v: Vec2| matrix * v.to_point() - matrix * Point::ZERO;
@@ -248,6 +281,9 @@ impl Stroke {
             for p in contours.iter_mut().flatten() {
                 *p = matrix * *p;
             }
+        }
+        for g in [&mut result.fill_gradient, &mut result.edge_gradient].into_iter().flatten() {
+            *g = g.transformed(matrix);
         }
         let axis = vector(Vec2::new(self.frame_angle.cos(), self.frame_angle.sin()));
         result.frame_angle = axis.y.atan2(axis.x);
@@ -313,6 +349,10 @@ impl Stroke {
             fill: None,
             edge: default_fill(),
             edge_width: default_edge_width(),
+            fill_opacity: 1.,
+            edge_opacity: 1.,
+            fill_gradient: None,
+            edge_gradient: None,
             frame_angle: 0.,
             corners: vec![],
             join: Join::Miter,
@@ -816,6 +856,12 @@ impl Document {
             if let Some(graph) = &s.appearance { graph.validate()?; }
             if !s.edge_width.is_finite() || !(0.0..=10000.0).contains(&s.edge_width) {
                 return Err("輪郭線の幅が不正です".into());
+            }
+            if [s.fill_opacity, s.edge_opacity].iter().any(|o| !o.is_finite() || !(0.0..=1.0).contains(o)) {
+                return Err("塗りまたは線の不透明度が不正です".into());
+            }
+            for g in [&s.fill_gradient, &s.edge_gradient].into_iter().flatten() {
+                g.validate()?;
             }
             if let Some(contours) = &s.contours {
                 if contours.iter().map(Vec::len).sum::<usize>() > 200000

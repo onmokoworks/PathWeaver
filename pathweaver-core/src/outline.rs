@@ -331,9 +331,11 @@ pub struct PaintLayer {
     pub outline: Outline,
     /// A bitmap from the raster stage; `outline` is then its rectangle.
     pub image: Option<std::sync::Arc<super::raster::Image>>,
+    /// Paints the outline instead of `color`.
+    pub gradient: Option<super::paint::Gradient>,
 }
 impl Default for PaintLayer {
-    fn default() -> Self { Self { color: [0; 3], opacity: 1., outline: Outline::default(), image: None } }
+    fn default() -> Self { Self { color: [0; 3], opacity: 1., outline: Outline::default(), image: None, gradient: None } }
 }
 #[derive(Clone, Default)]
 pub struct Outline {
@@ -724,9 +726,10 @@ pub fn paint_layers(s: &Stroke) -> Result<Vec<PaintLayer>, String> {
         };
         layers.push(PaintLayer {
             color,
-            opacity: 1.,
+            opacity: s.fill_opacity,
             outline: tessellate(contours, vec![], vec![])?,
             image: None,
+            gradient: s.fill_gradient.clone(),
         });
     }
     if let Some(color) = s.edge {
@@ -765,14 +768,15 @@ pub fn paint_layers(s: &Stroke) -> Result<Vec<PaintLayer>, String> {
         } else {
             build(s)?
         };
-        layers.push(PaintLayer { color, opacity: 1., outline, image: None });
+        layers.push(PaintLayer { color, opacity: s.edge_opacity, outline, image: None, gradient: s.edge_gradient.clone() });
     }
     if let Some(graph) = &s.appearance {
         let original = layers.iter().map(|layer| super::appearance::Layer {
             color: layer.color, opacity: layer.opacity, contours: layer.outline.contours.clone(), image: layer.image.clone(),
+            gradient: layer.gradient.clone(),
         }).collect::<Vec<_>>();
         layers = super::appearance::evaluate(graph, &original)?.into_iter().map(|layer| {
-            Ok(PaintLayer { color: layer.color, opacity: layer.opacity, outline: tessellate(layer.contours, vec![], vec![])?, image: layer.image })
+            Ok(PaintLayer { color: layer.color, opacity: layer.opacity, outline: tessellate(layer.contours, vec![], vec![])?, image: layer.image, gradient: layer.gradient })
         }).collect::<Result<Vec<_>, String>>()?;
     }
     Ok(layers)
@@ -841,6 +845,7 @@ pub fn svg(doc: &Document) -> Result<String, String> {
 pub fn svg_frame(doc: &Document, frame: Option<[f64; 4]>, background: Option<[u8; 3]>, margin: f64) -> Result<String, String> {
     // Export the normalized contours shared with the canvas and expansion.
     let mut paths = String::new();
+    let mut gradients = 0usize;
     let mut min = Point::new(f64::INFINITY, f64::INFINITY);
     let mut max = Point::new(f64::NEG_INFINITY, f64::NEG_INFINITY);
     for s in doc.strokes.iter().filter(|s| doc.shown(s) && !s.guide) {
@@ -880,10 +885,12 @@ pub fn svg_frame(doc: &Document, frame: Option<[f64; 4]>, background: Option<[u8
                 ));
                 continue;
             }
-            let [r, g, b] = layer.color;
-            paths.push_str(&format!(
-                "  <path fill=\"#{r:02x}{g:02x}{b:02x}\" fill-opacity=\"{:.6}\" fill-rule=\"nonzero\" d=\"", layer.opacity.clamp(0., 1.)
-            ));
+            gradients += layer.gradient.is_some() as usize;
+            let (def, fill) = super::paint::fill_attrs(layer.color, layer.opacity, layer.gradient.as_ref(), &format!("pw-gradient-{gradients}"));
+            if !def.is_empty() {
+                paths.push_str(&format!("  {def}\n"));
+            }
+            paths.push_str(&format!("  <path {fill} fill-rule=\"nonzero\" d=\""));
             for contour in &layer.outline.contours {
                 for (i, p) in contour.iter().enumerate() {
                     min.x = min.x.min(p.x);
@@ -1691,5 +1698,61 @@ mod tests {
         let mut d = line();
         d.strokes[0].nodes[1].p = Point::ZERO;
         assert!(build(&d.strokes[0]).unwrap().ring.is_empty());
+    }
+    fn stops() -> Vec<crate::paint::GradientStop> {
+        vec![
+            crate::paint::GradientStop { offset: 0., color: [255, 0, 0], opacity: 1. },
+            crate::paint::GradientStop { offset: 1., color: [0, 0, 255], opacity: 0.25 },
+        ]
+    }
+    #[test]
+    fn paint_opacity_and_gradients_reach_layers_svg_and_transforms() {
+        let mut d = line();
+        let s = &mut d.strokes[0];
+        s.edge_opacity = 0.5;
+        s.edge_gradient = Some(crate::paint::Gradient::linear(Point::new(0., 0.), Point::new(200., 0.), stops()));
+        d.validate().unwrap();
+        let layers = paint_layers(&d.strokes[0]).unwrap();
+        assert_eq!(layers[0].opacity, 0.5);
+        assert!(layers[0].gradient.is_some());
+        let svg = svg(&d).unwrap();
+        assert!(svg.contains("<linearGradient id=\"pw-gradient-1\""));
+        assert!(svg.contains("fill=\"url(#pw-gradient-1)\" fill-opacity=\"0.500000\""));
+        assert!(svg.contains("stop-opacity=\"0.250000\""));
+        // moving / scaling the path carries its gradient
+        let moved = d.strokes[0].transformed(kurbo::Affine::translate((50., 10.)) * kurbo::Affine::scale(2.), true);
+        let g = moved.edge_gradient.unwrap();
+        assert_eq!(g.start(), Point::new(50., 10.));
+        assert_eq!(g.end(), Point::new(450., 10.));
+        // saved files only mention the new fields when used
+        let plain = serde_json::to_string(&line().strokes[0]).unwrap();
+        assert!(!plain.contains("opacity") && !plain.contains("gradient"));
+        let mut bad = d.clone();
+        bad.strokes[0].fill_opacity = 1.5;
+        assert!(bad.validate().is_err());
+    }
+    #[test]
+    fn fill_node_replaces_a_gradient_and_rasterize_paints_it() {
+        use crate::appearance::{Graph, Kind};
+        let mut d = line();
+        let s = &mut d.strokes[0];
+        s.set_line_width(40.);
+        s.edge_gradient = Some(crate::paint::Gradient::linear(Point::new(0., 0.), Point::new(200., 0.), stops()));
+        let mut g = Graph::default();
+        let fill = g.add(Kind::Fill, [0., 0.]).unwrap();
+        g.connect(1, fill, 0).unwrap();
+        g.connect(fill, g.output, 0).unwrap();
+        s.appearance = Some(g);
+        let out = paint_layers(s).unwrap();
+        assert!(out[0].gradient.is_none());
+        let original = vec![crate::appearance::Layer {
+            color: [0; 3], opacity: 1., contours: build(s).unwrap().contours, image: None,
+            gradient: s.edge_gradient.clone(),
+        }];
+        let img = crate::raster::rasterize(&original, 1., 0.).unwrap().unwrap();
+        let px = |x: f64| { let i = ((img.height / 2) * img.width + ((x - img.x0) as usize)) * 4; [img.rgba[i], img.rgba[i + 2], img.rgba[i + 3]] };
+        let (left, right) = (px(5.), px(195.));
+        assert!(left[0] > 200 && left[1] < 30 && left[2] > 240, "{left:?}");
+        assert!(right[1] > right[0] && right[2] < 100, "{right:?}");
     }
 }

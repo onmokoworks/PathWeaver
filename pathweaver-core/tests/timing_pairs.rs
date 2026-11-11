@@ -6,8 +6,8 @@ fn timing_pairs() {
     std::panic::set_hook(Box::new(|i| eprintln!("PANIC {i}")));
     let ring = |x: f64, y: f64, w: f64, h: f64| vec![Point::new(x, y), Point::new(x + w, y), Point::new(x + w, y + h), Point::new(x, y + h)];
     let original = vec![
-        Layer {color: [20, 20, 20], opacity: 1., contours: vec![ring(0., 0., 300., 80.)], image: None},
-        Layer {color: [200, 20, 20], opacity: 1., contours: vec![ring(40., 20., 120., 120.)], image: None},
+        Layer {color: [20, 20, 20], opacity: 1., contours: vec![ring(0., 0., 300., 80.)], image: None, gradient: None},
+        Layer {color: [200, 20, 20], opacity: 1., contours: vec![ring(40., 20., 120., 120.)], image: None, gradient: None},
     ];
     let heavy: Vec<Kind> = match std::env::var("PW_HEAVY").as_deref() { Ok("mezzotint") => vec![Kind::Mezzotint], _ => vec![Kind::Mezzotint, Kind::Halftone, Kind::Dissolve, Kind::Glow, Kind::Blur, Kind::Rough] };
     let all = [Kind::Rough, Kind::Zigzag, Kind::Transform, Kind::Offset, Kind::Round, Kind::Band, Kind::Pucker, Kind::Simplify, Kind::Streak,

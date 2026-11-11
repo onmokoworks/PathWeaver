@@ -118,6 +118,7 @@ pub fn shadow(
         opacity: 1.,
         contours: offset_contours(&silhouette(&shapes), spread, OffsetJoin::Round)?,
         image: None,
+        gradient: None,
     }];
     source.extend(layers.iter().filter(|l| l.image.is_some()).cloned());
     let source = moved(&source, d)?;
@@ -178,7 +179,7 @@ mod tests {
                 Point::new(100., 100.),
                 Point::new(0., 100.),
             ]],
-            image: None,
+            image: None, gradient: None,
         }
     }
     fn contains(rings: &[Vec<Point>], p: Point) -> bool {

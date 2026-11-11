@@ -76,7 +76,7 @@ impl Image {
     }
     pub fn layer(self, opacity: f64) -> Layer {
         let contours = vec![self.rect()];
-        Layer { color: [0; 3], opacity, contours, image: Some(Arc::new(self)) }
+        Layer { color: [0; 3], opacity, contours, image: Some(Arc::new(self)), gradient: None }
     }
 }
 
@@ -256,7 +256,15 @@ pub fn rasterize(layers: &[Layer], scale: f64, pad: f64) -> Result<Option<Image>
         for (i, c) in cov.iter().enumerate() {
             let a = c.min(1.) * o;
             if a > 0. {
-                over(&mut rgba, i, r * a, g * a, b * a, a);
+                if let Some(gradient) = &layer.gradient {
+                    // The gradient at the pixel centre, in document units.
+                    let at = Point::new(x0 + ((i % w) as f64 + 0.5) / scale, y0 + ((i / w) as f64 + 0.5) / scale);
+                    let ([r, g, b], ga) = gradient.sample(at);
+                    let a = a * ga;
+                    over(&mut rgba, i, r * a, g * a, b * a, a);
+                } else {
+                    over(&mut rgba, i, r * a, g * a, b * a, a);
+                }
             }
         }
     }
@@ -637,6 +645,7 @@ pub fn trace(img: &Image, level: f64, tolerance: f64, smooth: usize, min_area: f
         opacity: 1.,
         contours,
         image: None,
+        gradient: None,
     })
 }
 
@@ -979,7 +988,7 @@ mod tests {
             color: [200, 40, 20],
             opacity: 1.,
             contours: vec![vec![Point::new(x, y), Point::new(x + s, y), Point::new(x + s, y + s), Point::new(x, y + s)]],
-            image: None,
+            image: None, gradient: None,
         }
     }
     fn area(rings: &[Vec<Point>]) -> f64 {
