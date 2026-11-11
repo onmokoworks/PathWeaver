@@ -180,7 +180,7 @@ ol.legend li b {display: block; color: var(--fg); font-weight: 600}
       </ul>
       <h2>まとめる</h2>
       <ul>
-        <li><a href="#organize">レイヤー・ガイド・吸着</a></li>
+        <li><a href="#organize">レイヤー・吸着・整列</a></li>
         <li><a href="#combine">パスファインダー・ブレンド</a></li>
         <li><a href="#place">読み込み・画像</a></li>
         <li><a href="#export">アートボード・書き出し</a></li>
@@ -288,8 +288,9 @@ ol.legend li b {display: block; color: var(--fg); font-weight: 600}
             <tr><td>クリックして打つ</td><td>クリックした所が1行目の基準線。日本語入力もそのまま使えます</td></tr>
             <tr><td><kbd>Esc</kbd> / ほかをクリック</td><td>確定。空なら何も残らない</td></tr>
             <tr><td>選択ツールで文字をダブルクリック</td><td>打ち直す</td></tr>
-            <tr><td>右パネル</td><td>フォント（検索できる）・サイズ・行送り</td></tr>
-            <tr><td><kbd>⇧</kbd><kbd>⌘</kbd><kbd>O</kbd></td><td>アウトライン化（ただの形になり、打ち直せなくなる）</td></tr>
+            <tr><td>右パネル</td><td>フォント（検索できる）・サイズ・行送り・揃え（左・中央・右・均等）・字送り（1/1000 em）・ベースライン・カーニング</td></tr>
+            <tr><td>文字ツールでパスの線をクリック</td><td>パスに沿って打つ。文字とパスを選んで「パスに沿わせる」でも。パスを直すと文字もついてくる。右パネルで「パス上の位置」と「反対側」、「パスから外す」で普通の文字に戻る（パスを消しても戻る）</td></tr>
+            <tr><td><kbd>⇧</kbd><kbd>⌘</kbd><kbd>O</kbd></td><td>アウトライン化。文字ごとに複合パスになり、アンカーとハンドルを直せる（o や 8 の中は穴）。打ち直せなくなる</td></tr>
           </tbody></table></div>
           <p>文字の形にも塗り・線・外観ノードがそのまま効きます。</p>
         </div>
@@ -403,6 +404,9 @@ ol.legend li b {display: block; color: var(--fg); font-weight: 600}
             <tr><td>右パネルの「塗り」「線」</td><td>色見本と16進の欄。「なし — 追加」で付ける、<kbd>−</kbd> でなしにする</td></tr>
             <tr><td>色見本をクリック</td><td>色のパレット（色の面・色相・プリセット）</td></tr>
             <tr><td>色見本をドラッグ</td><td>その場で色の面が出て、離すと決まる。ドラッグ中に <kbd>H</kbd> <kbd>S</kbd> <kbd>V</kbd> <kbd>R</kbd> <kbd>G</kbd> <kbd>B</kbd> で動かす成分を切り替え</td></tr>
+            <tr><td>色の欄の「%」</td><td>その色の不透明度（塗りと線で別々）</td></tr>
+            <tr><td>「単色・線形・円形」</td><td>グラデーションにする。帯をクリックで色を足す、色の点を左右にドラッグで位置、下へドラッグで消す。「分岐点」で選んだ点の色と不透明度、「角度」で向き</td></tr>
+            <tr><td>ダイレクト選択（<kbd>A</kbd>）でパスを1つ選ぶ</td><td>キャンバスにグラデーションのつまみが出る。線形は始点・終点、円形は中心と半径をドラッグ（<kbd>Shift</kbd> で角度を刻む）。パスを動かす・回すとグラデーションもついてくる</td></tr>
           </tbody></table></div>
         </div>
         <p>数値の欄はどれも、左右にドラッグして値を変えられます。<kbd>Option</kbd> で1/10の細かさ、<kbd>Shift</kbd> で10倍。クリックすれば数字や式を打てます。</p>
@@ -467,7 +471,7 @@ ol.legend li b {display: block; color: var(--fg); font-weight: 600}
       </section>
 
       <section id="organize">
-        <header><p class="eyebrow">まとめる</p><h2>レイヤー・ガイド・吸着</h2></header>
+        <header><p class="eyebrow">まとめる</p><h2>レイヤー・吸着・整列</h2></header>
         <div class="block">
           <div class="head"><h3>レイヤーとフォルダ</h3></div>
           <div class="scroll"><table><tbody>
@@ -475,6 +479,7 @@ ol.legend li b {display: block; color: var(--fg); font-weight: 600}
             <tr><td>行をドラッグ</td><td>重ね順を変える・フォルダへ出し入れ（フォルダの中にフォルダも置ける）</td></tr>
             <tr><td>行をダブルクリック</td><td>名前を変える</td></tr>
             <tr><td>目のマーク</td><td>表示・非表示（非表示は書き出されない）</td></tr>
+            <tr><td>鍵のマーク（目の隣）/ <kbd>⌘</kbd><kbd>2</kbd> / <kbd>⌥</kbd><kbd>⌘</kbd><kbd>2</kbd></td><td>ロック / すべて解除。ロックした物は描かれ書き出されるが、キャンバスで選ぶ・動かす・直すことはできない。フォルダのロックは中身すべてに効く</td></tr>
             <tr><td>右クリック →「重ね順」</td><td>最前面・前面・背面・最背面</td></tr>
           </tbody></table></div>
         </div>
@@ -483,10 +488,19 @@ ol.legend li b {display: block; color: var(--fg); font-weight: 600}
           <div class="scroll"><table><tbody>
             <tr><td>定規からキャンバスへドラッグ</td><td>ガイドを引く。定規へ戻すと消える</td></tr>
             <tr><td><kbd>⌘</kbd><kbd>5</kbd> / <kbd>⌥</kbd><kbd>⌘</kbd><kbd>5</kbd></td><td>選んだパスをガイドにする / 戻す（細い線で表示され、書き出されない）</td></tr>
-            <tr><td>吸着バー（キャンバス左下）</td><td>ガイド・グリッド・接線・法線に吸着するか</td></tr>
+            <tr><td>吸着バー（キャンバス左下）</td><td>スマート・ガイド・グリッド・接線・法線に吸着するか</td></tr>
+            <tr><td>スマートガイド <kbd>⌘</kbd><kbd>U</kbd></td><td>動かす・拡大縮小・アンカーを引くとき、ほかの物やアートボードの端と中心に吸い付き、マゼンタの線が出る</td></tr>
             <tr><td><kbd>⌘</kbd><kbd>'</kbd> / <kbd>⌘</kbd><kbd>;</kbd></td><td>グリッドを表示して吸着 / ガイドに吸着</td></tr>
             <tr><td>ドラッグ中に <kbd>Ctrl</kbd></td><td>一時的に吸着しない</td></tr>
             <tr><td>右パネルの「グリッド・ガイド」タブ</td><td>グリッドの間隔、<kbd>Shift</kbd> で刻む角度</td></tr>
+          </tbody></table></div>
+        </div>
+        <div class="block">
+          <div class="head"><h3>整列・分布</h3></div>
+          <div class="scroll"><table><tbody>
+            <tr><td>右パネル「位置とサイズ」の下</td><td>整列（左・左右中央・右・上・上下中央・下）と分布（中心を等間隔・間を等しく）。1回で取り消せる</td></tr>
+            <tr><td>基準</td><td>選択範囲 / キー（最後にクリックした物。枠が太くなる。「間隔」で隙間を数値で） / アートボード。1つだけ選んでいるときはアートボードに揃える</td></tr>
+            <tr><td>まとまりで動くもの</td><td>中身を全部選んだフォルダ、両端を選んだブレンド、複合パス</td></tr>
           </tbody></table></div>
         </div>
       </section>
@@ -494,7 +508,8 @@ ol.legend li b {display: block; color: var(--fg); font-weight: 600}
       <section id="combine">
         <header><p class="eyebrow">まとめる</p><h2>パスファインダー・ブレンド</h2></header>
         <div class="grid2">
-          <div class="cell"><h3>パスファインダー</h3><p>2本以上選ぶと右パネルに6つのボタン：合体・前面で型抜き・背面で型抜き・交差・中マド・分割。前後は重ね順で決まり、外観は焼き込まれます。</p></div>
+          <div class="cell"><h3>パスファインダー</h3><p>2本以上選ぶと右パネルに6つのボタン：合体・前面で型抜き・背面で型抜き・交差・中マド・分割。前後は重ね順で決まり、外観は焼き込まれます。結果は曲線のパスになり、穴があれば複合パスになります（アンカーを直せます）。</p></div>
+          <div class="cell"><h3>複合パス <kbd>⌘</kbd><kbd>8</kbd></h3><p>選んだ閉じたパスを1つの形にまとめ、重なりを穴にします。解除は <kbd>⌥</kbd><kbd>⇧</kbd><kbd>⌘</kbd><kbd>8</kbd>。選択ツールでは全体、ダイレクト選択では1本ずつ直せます。色や外観は全員で共有。右パネル「穴」で、重なりで穴にする（evenodd）か向きで決める（nonzero）かを選べます。前の版で作った折れ線の形は「編集できるパスにする」で曲線のパスになります。</p></div>
           <div class="cell"><h3>ブレンド <kbd>⌥</kbd><kbd>⌘</kbd><kbd>B</kbd></h3><p>2つのパスの間に段（標準5）を作ります。端の形・色・太さを変えると間も作り直されます。段数は右パネル。解除は <kbd>⌥</kbd><kbd>⇧</kbd><kbd>⌘</kbd><kbd>B</kbd>、「拡張」で普通のパスになります。</p></div>
         </div>
       </section>
@@ -504,7 +519,7 @@ ol.legend li b {display: block; color: var(--fg); font-weight: 600}
         <div class="block">
           <div class="scroll"><table><tbody>
             <tr><td><kbd>⇧</kbd><kbd>⌘</kbd><kbd>P</kbd> / ファイルをキャンバスへドロップ / 画像をペースト</td><td>SVG と画像（PNG・JPEG・HEIC など）を配置</td></tr>
-            <tr><td>SVG</td><td>形は編集できるパスに、文字は打ち直せる文字に。ファイル名のフォルダに入り、1回で取り消せる</td></tr>
+            <tr><td>SVG</td><td>形は編集できるパスに（穴のある形は複合パス）、文字は打ち直せる文字に。グラデーション・不透明度もそのまま。ファイル名のフォルダに入り、1回で取り消せる</td></tr>
             <tr><td>画像：右パネル「不透明度」</td><td>透かす</td></tr>
             <tr><td>画像：右パネル「抜き」</td><td>黒：暗いところほど透ける（光や炎の素材、Unmult）。白：白い紙が透けて線だけ残る（スキャンした線画）。元の画素はそのまま</td></tr>
             <tr><td>画像：右パネル「下絵にする」</td><td>なぞるための画像に。書き出されず、キャンバスでは選ばれない（レイヤー一覧から選ぶ）</td></tr>
@@ -529,7 +544,7 @@ ol.legend li b {display: block; color: var(--fg); font-weight: 600}
           <ol class="legend">
             <li data-key="target"><span><b>範囲</b>アートボード・選択・絵全体</span></li>
             <li data-key="boards"><span><b>書き出すアートボード</b>チェックしたものを1枚ずつ</span></li>
-            <li data-key="format"><span><b>形式</b>SVG・PNG・JPEG</span></li>
+            <li data-key="format"><span><b>形式</b>SVG・PDF・PNG・JPEG</span></li>
             <li data-key="scale"><span><b>倍率</b>1単位を何ピクセルにするか</span></li>
             <li data-key="background"><span><b>背景</b>透明・白（JPEG は白）</span></li>
             <li data-key="run"><span><b>出来上がりの大きさと書き出す</b>ピクセル数を確かめてから書き出す</span></li>
@@ -549,7 +564,9 @@ ol.legend li b {display: block; color: var(--fg); font-weight: 600}
           <div class="head"><h3>書き出し</h3><span class="key"><kbd>⌘</kbd><kbd>E</kbd></span></div>
           <div class="scroll"><table><tbody>
             <tr><td>範囲</td><td>アートボード（チェックしたものを1枚ずつ）・選択・絵全体。選択と絵全体は光彩などの効果まで含めた広さ</td></tr>
-            <tr><td>形式</td><td>SVG・PNG・JPEG</td></tr>
+            <tr><td>形式</td><td>SVG・PDF・PNG・JPEG。PDF はアートボードごとに1ページの1ファイル（大きさは 1単位＝1pt）</td></tr>
+            <tr><td>SVG と PDF の中身</td><td>パスは曲線のまま。太さが一定の線は線のまま（太さ・切り口・角の形も）、強弱のある線は輪郭を曲線で。フォルダはグループ（Illustrator・Inkscape ではレイヤー）。外観ノードを使ったパスは見た目どおりの形と画像。グラデーションと不透明度も入る</td></tr>
+            <tr><td>線（SVG・PDF）</td><td>線のまま / 輪郭にする（すべて塗りの形にする。どのソフトでも同じ見た目）</td></tr>
             <tr><td>倍率</td><td>1×〜4×（1単位を何ピクセルにするか）。下に出来上がりのピクセル数</td></tr>
             <tr><td>背景</td><td>透明・白（JPEG は白）</td></tr>
             <tr><td>保存先</td><td>1ファイルなら保存パネル、複数ならフォルダを選ぶ。名前は「ファイル名-アートボード名」</td></tr>
@@ -568,6 +585,7 @@ ol.legend li b {display: block; color: var(--fg); font-weight: 600}
             <tr><td><kbd>⌘</kbd><kbd>+</kbd> / <kbd>⌘</kbd><kbd>−</kbd></td><td>拡大 / 縮小</td></tr>
             <tr><td><kbd>⌥</kbd><kbd>⌘</kbd><kbd>N</kbd></td><td>ノードパネルを表示 / 隠す</td></tr>
             <tr><td><kbd>⌘</kbd><kbd>,</kbd></td><td>設定：ズームの速さと向き、ホイール（移動 / ズーム）、自動保存、テーマ、作品の背景、太さのつまみの常時表示</td></tr>
+            <tr><td>単位（定規の左上の角 / 設定「単位」）</td><td>pt・px・mm・cm・in・pc。書類ごとに保存され、新しい書類の単位は設定で決める。長さの欄・定規・アートボードが変わる。欄には 10mm や 1in + 2pt のように単位つきの式も打てる。1pt＝1px（72ppi）、文字サイズは pt のまま</td></tr>
             <tr><td>設定「自動保存」</td><td>間隔（オフ・1分・5分・10分）。保存していない変更を復元用のコピーに残し、アプリが落ちても次に開いたときに復元できる。「保存済みのファイルにも上書き保存する」をオンにすると、ファイル自体も自動で保存</td></tr>
           </tbody></table></div>
         </div>
@@ -601,6 +619,9 @@ ol.legend li b {display: block; color: var(--fg); font-weight: 600}
               <tr><td><kbd>⇧</kbd><kbd>⌘</kbd><kbd>O</kbd></td><td>アウトライン化</td></tr>
               <tr><td><kbd>⌥</kbd><kbd>⌘</kbd><kbd>B</kbd></td><td>ブレンドを作成</td></tr>
               <tr><td><kbd>⌘</kbd><kbd>5</kbd></td><td>ガイドにする</td></tr>
+              <tr><td><kbd>⌘</kbd><kbd>8</kbd> <kbd>⌥</kbd><kbd>⇧</kbd><kbd>⌘</kbd><kbd>8</kbd></td><td>複合パスを作成・解除</td></tr>
+              <tr><td><kbd>⌘</kbd><kbd>2</kbd> <kbd>⌥</kbd><kbd>⌘</kbd><kbd>2</kbd></td><td>ロック・すべて解除</td></tr>
+              <tr><td><kbd>⌘</kbd><kbd>U</kbd></td><td>スマートガイド</td></tr>
             </tbody></table></div>
           </div>
         </div>
@@ -611,12 +632,12 @@ ol.legend li b {display: block; color: var(--fg); font-weight: 600}
         <p>使う前に知っておくと困らないことです。どれも今後の改善の候補です。</p>
         <div class="note"><b>保存</b><span>自動保存は既定で5分ごとに「復元用のコピー」を残します。ファイル自体は <kbd>⌘</kbd><kbd>S</kbd> するまで変わりません（設定でファイルへの上書きも選べます）。</span></div>
         <ul class="plain">
-          <li>パスファインダーの結果・アウトライン化した文字・穴のある SVG の形は、細かい折れ線の形になり、アンカーを直せません。</li>
-          <li>SVG の書き出しは見た目どおりの輪郭（塗りの形）で出ます。曲線・線の設定・フォルダの構造は残りません。PDF の書き出しはありません。</li>
-          <li>整列・分布、ロック、他の物への吸着（スマートガイド）はまだありません。</li>
-          <li>色ごとの不透明度とグラデーションはありません（不透明度は外観ノードで付けられます）。SVG のグラデーションは最初の色で読み込まれます。</li>
-          <li>文字の設定はフォント・サイズ・行送りだけです（揃え・字送り・パス上文字はありません）。</li>
-          <li>大きさの単位は1種類（1単位＝1pt／1px）です。</li>
+          <li>PDF の中の文字は輪郭の形です（打ち直せる文字としては入りません）。PDF では、線のグラデーションは最初の色になり、グラデーションの途中の不透明度は平均になります。</li>
+          <li>SVG の読み込みで、グラデーションの繰り返し（reflect・repeat）、円形の焦点、パターンには対応していません。</li>
+          <li>パス上文字は、パスの角丸を無視してアンカーとハンドルに沿います。パスの端を越えた文字はまっすぐ続きます。打ち直しは、パスの始まりに出るまっすぐな欄で行います。</li>
+          <li>複合パス同士のブレンドはできません。</li>
+          <li>スマートガイドは、ペンで描いている途中・アートボードの移動・回転では効きません。距離の表示はありません。</li>
+          <li>外観ノードの長さ（オフセット・ぼかしなど）は単位の切り替えに関係なく、書類の単位（pt）のままです。</li>
         </ul>
       </section>
 
@@ -624,7 +645,7 @@ ol.legend li b {display: block; color: var(--fg); font-weight: 600}
   </main>
 </div>
 
-<!-- regions:start --><script type="application/json" id="regions">{"overview":{"w":1400,"h":900,"regions":[{"key":"topbar","x":0,"y":0,"w":100,"h":4},{"key":"palette","x":2,"y":7.11,"w":2.71,"h":27.22},{"key":"canvas","x":2.86,"y":8.44,"w":74.21,"h":51},{"key":"snap","x":2,"y":59.44,"w":15.7,"h":3.33},{"key":"zoom","x":71.19,"y":60.56,"w":8.17,"h":2.44},{"key":"layers","x":80,"y":4,"w":20,"h":22.22},{"key":"inspector","x":80,"y":29.56,"w":20,"h":56.78},{"key":"nodes","x":0,"y":64,"w":79.93,"h":33.33},{"key":"status","x":0,"y":97.33,"w":100,"h":2.67}]},"tools":{"w":86,"h":293,"regions":[{"key":"select","x":33.72,"y":19.11,"w":32.56,"h":9.56},{"key":"direct","x":33.72,"y":29.35,"w":32.56,"h":9.56},{"key":"pen","x":33.72,"y":39.59,"w":32.56,"h":9.56},{"key":"shape","x":33.72,"y":49.83,"w":32.56,"h":9.56},{"key":"convert","x":33.72,"y":60.07,"w":32.56,"h":9.56},{"key":"text","x":33.72,"y":70.31,"w":32.56,"h":9.56},{"key":"artboard","x":33.72,"y":80.55,"w":32.56,"h":9.56}]},"width":{"w":600,"h":330,"regions":[{"key":"grip","x":5.93,"y":75.12,"w":4,"h":7.27},{"key":"core","x":72.29,"y":43.18,"w":3.33,"h":6.06},{"key":"end","x":87.67,"y":65.45,"w":4.67,"h":8.48},{"key":"anchor","x":45.17,"y":24.55,"w":3,"h":5.45},{"key":"handle","x":60.17,"y":18.48,"w":3,"h":5.45}]},"selection":{"w":294,"h":294,"regions":[{"key":"handle","x":81.63,"y":81.63,"w":6.12,"h":6.12},{"key":"rotate","x":86.05,"y":86.05,"w":6.8,"h":6.8},{"key":"pivot","x":47.28,"y":47.28,"w":5.44,"h":5.44}]},"position":{"w":280,"h":155,"regions":[{"key":"picker","x":85.36,"y":8.39,"w":12.14,"h":21.94},{"key":"position","x":29.29,"y":31.61,"w":67.14,"h":15.48},{"key":"size","x":29.29,"y":52.9,"w":67.14,"h":15.48},{"key":"rotate","x":29.29,"y":74.19,"w":67.14,"h":15.48}]},"nodes":{"w":1119,"h":300,"regions":[{"key":"picker","x":1.7,"y":5.33,"w":18.41,"h":6.67},{"key":"add","x":20.91,"y":5.33,"w":4.68,"h":6.67},{"key":"card","x":31.32,"y":23.67,"w":17.69,"h":8},{"key":"bypass","x":46.87,"y":24.5,"w":1.61,"h":6},{"key":"param","x":32.22,"y":41,"w":15.91,"h":8},{"key":"socket","x":48.3,"y":24.5,"w":1.61,"h":6},{"key":"output","x":50.98,"y":23.67,"w":17.69,"h":8}]},"artboards":{"w":1400,"h":456,"regions":[{"key":"name","x":0,"y":0,"w":4.54,"h":2.58},{"key":"frame","x":67.93,"y":101.1,"w":1.29,"h":3.95},{"key":"list","x":80,"y":6.14,"w":20,"h":37.72},{"key":"fields","x":85.86,"y":59.87,"w":13,"h":26.97},{"key":"add","x":81.57,"y":91.23,"w":9.91,"h":5.26}]},"export":{"w":466,"h":344,"regions":[{"key":"target","x":21.24,"y":22.67,"w":72.96,"h":6.98},{"key":"boards","x":6.44,"y":32.27,"w":87.77,"h":15.12},{"key":"format","x":21.24,"y":50,"w":72.96,"h":6.98},{"key":"scale","x":21.24,"y":59.59,"w":72.96,"h":6.98},{"key":"background","x":21.24,"y":69.19,"w":72.96,"h":6.98},{"key":"run","x":5.79,"y":86.92,"w":88.41,"h":6.98}]}}</script><!-- regions:end -->
+<!-- regions:start --><script type="application/json" id="regions">{"overview":{"w":1400,"h":900,"regions":[{"key":"topbar","x":0,"y":0,"w":100,"h":4},{"key":"palette","x":2,"y":7.11,"w":2.71,"h":27.22},{"key":"canvas","x":2.86,"y":8.44,"w":74.21,"h":51},{"key":"snap","x":2,"y":59.44,"w":19.89,"h":3.33},{"key":"zoom","x":71.19,"y":60.56,"w":8.17,"h":2.44},{"key":"layers","x":80,"y":4,"w":20,"h":22.22},{"key":"inspector","x":80,"y":29.56,"w":20,"h":60.11},{"key":"nodes","x":0,"y":64,"w":79.93,"h":33.33},{"key":"status","x":0,"y":97.33,"w":100,"h":2.67}]},"tools":{"w":86,"h":293,"regions":[{"key":"select","x":33.72,"y":19.11,"w":32.56,"h":9.56},{"key":"direct","x":33.72,"y":29.35,"w":32.56,"h":9.56},{"key":"pen","x":33.72,"y":39.59,"w":32.56,"h":9.56},{"key":"shape","x":33.72,"y":49.83,"w":32.56,"h":9.56},{"key":"convert","x":33.72,"y":60.07,"w":32.56,"h":9.56},{"key":"text","x":33.72,"y":70.31,"w":32.56,"h":9.56},{"key":"artboard","x":33.72,"y":80.55,"w":32.56,"h":9.56}]},"width":{"w":600,"h":330,"regions":[{"key":"grip","x":5.93,"y":75.12,"w":4,"h":7.27},{"key":"core","x":72.29,"y":43.18,"w":3.33,"h":6.06},{"key":"end","x":87.67,"y":65.45,"w":4.67,"h":8.48},{"key":"anchor","x":45.17,"y":24.55,"w":3,"h":5.45},{"key":"handle","x":60.17,"y":18.48,"w":3,"h":5.45}]},"selection":{"w":294,"h":294,"regions":[{"key":"handle","x":81.63,"y":81.63,"w":6.12,"h":6.12},{"key":"rotate","x":86.05,"y":86.05,"w":6.8,"h":6.8},{"key":"pivot","x":47.28,"y":47.28,"w":5.44,"h":5.44}]},"position":{"w":280,"h":155,"regions":[{"key":"picker","x":85.36,"y":8.39,"w":12.14,"h":21.94},{"key":"position","x":29.29,"y":31.61,"w":67.14,"h":15.48},{"key":"size","x":29.29,"y":52.9,"w":67.14,"h":15.48},{"key":"rotate","x":29.29,"y":74.19,"w":67.14,"h":15.48}]},"nodes":{"w":1119,"h":300,"regions":[{"key":"picker","x":1.7,"y":5.33,"w":18.41,"h":6.67},{"key":"add","x":20.91,"y":5.33,"w":4.68,"h":6.67},{"key":"card","x":31.32,"y":23.67,"w":17.69,"h":8},{"key":"bypass","x":46.87,"y":24.5,"w":1.61,"h":6},{"key":"param","x":32.22,"y":41,"w":15.91,"h":8},{"key":"socket","x":48.3,"y":24.5,"w":1.61,"h":6},{"key":"output","x":50.98,"y":23.67,"w":17.69,"h":8}]},"artboards":{"w":1400,"h":456,"regions":[{"key":"name","x":0,"y":0,"w":4.54,"h":2.58},{"key":"frame","x":67.93,"y":101.1,"w":1.29,"h":3.95},{"key":"list","x":80,"y":6.14,"w":20,"h":37.72},{"key":"fields","x":85.86,"y":59.87,"w":13,"h":26.97},{"key":"add","x":81.57,"y":91.23,"w":9.91,"h":5.26}]},"export":{"w":466,"h":344,"regions":[{"key":"target","x":21.24,"y":22.67,"w":72.96,"h":6.98},{"key":"boards","x":6.44,"y":32.27,"w":87.77,"h":15.12},{"key":"format","x":21.24,"y":50,"w":72.96,"h":6.98},{"key":"scale","x":21.24,"y":59.59,"w":72.96,"h":6.98},{"key":"background","x":21.24,"y":69.19,"w":72.96,"h":6.98},{"key":"run","x":5.79,"y":86.92,"w":88.41,"h":6.98}]}}</script><!-- regions:end -->
 <script>
 // numbered markers from the measured regions; hovering a marker or a list item lights both
 (() => {
