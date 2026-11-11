@@ -42,8 +42,8 @@ body .TqInputRotary .circle:hover,
 body .TqInputRotary.tweaking .circle {fill: var(--tq-color-accent)}
 
 /* The 2D position pad's button and the size chain: quiet until touched */
-body .TqInputTranslate {background: var(--tq-color-input)}
-body .TqInputTranslate:hover {background: var(--tq-color-input-hover)}
+body .TqInputTranslate.TqInputTranslate {background: var(--tq-color-input)}
+body .TqInputTranslate.TqInputTranslate:hover {background: var(--tq-color-input-hover)}
 body .TqInputTranslate .grid-icon {color: var(--tq-color-text-mute)}
 body .TqInputSize .chain {color: var(--tq-color-text-mute)}
 body .TqInputSize .chain:hover {color: var(--tq-color-text)}

@@ -1,3 +1,4 @@
+<meta charset="utf-8">
 <title>PathWeaver の使い方</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -112,6 +113,34 @@ ul.plain {margin: 0; padding-left: 1.2em; color: var(--fg-2); display: flex; fle
 .fig-lead {stroke: var(--fg-mute); stroke-width: 1}
 .fig-label {font-size: 13px; fill: var(--fg-2); font-family: var(--font-body)}
 
+/* annotated screenshots: numbered markers on the picture, the same numbers in the list */
+.shot {display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); gap: 20px; align-items: start}
+.shot.wide {grid-template-columns: minmax(0, 1fr)}
+.shot.narrow {grid-template-columns: 112px minmax(0, 1fr)}
+.shot.narrow .pic {max-width: 112px}
+.shot .pic {position: relative; margin: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: #fff; line-height: 0}
+.shot .pic img {display: block; width: 100%; height: auto}
+.shot .area {position: absolute; border: 2px solid var(--accent); border-radius: 4px; background: var(--accent-soft); opacity: 0; transition: opacity .12s; pointer-events: none}
+.shot .area.hot {opacity: 1}
+.shot .pin {
+  position: absolute; transform: translate(-50%, -50%); width: 22px; height: 22px; border-radius: 50%; border: 2px solid #fff;
+  background: var(--accent); color: #fff; font: 600 11px/18px var(--font-mono); text-align: center; padding: 0; cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .3); z-index: 2;
+}
+.shot .pin.hot {background: var(--fg); color: var(--surface)}
+ol.legend {list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; counter-reset: n}
+ol.legend li {
+  counter-increment: n; display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 10px; padding: 8px 10px; border-radius: 6px;
+  font-size: 14px; line-height: 1.6; color: var(--fg-2); cursor: default;
+}
+ol.legend li::before {
+  content: counter(n); width: 22px; height: 22px; border-radius: 50%; background: var(--accent); color: #fff;
+  font: 600 11px/22px var(--font-mono); text-align: center; margin-top: 1px;
+}
+ol.legend li.hot {background: var(--accent-soft)}
+ol.legend li b {display: block; color: var(--fg); font-weight: 600}
+.shot.wide ol.legend {display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2px 16px}
+
 .nodes {display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px}
 .nodes .cell ul {margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 6px}
 
@@ -121,7 +150,8 @@ ul.plain {margin: 0; padding-left: 1.2em; color: var(--fg-2); display: flex; fle
   .side nav ul {flex-direction: row; flex-wrap: wrap; gap: 4px}
   .side nav a {background: var(--raised)}
   .side h2 {display: none}
-  .grid2, .nodes {grid-template-columns: minmax(0, 1fr)}
+  .grid2, .nodes, .shot, .shot.wide ol.legend {grid-template-columns: minmax(0, 1fr)}
+  .shot.narrow {grid-template-columns: 96px minmax(0, 1fr)}
   td:first-child {width: 44%}
   th, td {padding-inline: 14px}
 }
@@ -198,25 +228,37 @@ ul.plain {margin: 0; padding-left: 1.2em; color: var(--fg-2); display: flex; fle
 
       <section id="screen">
         <header><p class="eyebrow">はじめに</p><h2>画面の見方</h2></header>
-        <div class="block">
-          <div class="scroll"><table>
-            <thead><tr><th>場所</th><th>何があるか</th></tr></thead>
-            <tbody>
-              <tr><td>上のバー</td><td>ファイル名（未保存なら点）、開く・保存・書き出し、取り消し・やり直し、ノードパネルの開閉、設定。バーはドラッグでウィンドウを動かせ、ダブルクリックで拡大します。</td></tr>
-              <tr><td>ツールパレット（キャンバス左上）</td><td>選択・ダイレクト選択・ペン・図形・アンカーポイント・文字・アートボード。上のつまみでドラッグして好きな場所へ、ダブルクリックで縦横を切り替えます。</td></tr>
-              <tr><td>キャンバス</td><td>上と左に定規。左下に吸着バー（ガイド・グリッド・接線・法線）。右下に「外観」ボタンと倍率。</td></tr>
-              <tr><td>右上：レイヤー</td><td>パスとフォルダの一覧。目のマークで表示、行のドラッグで重ね順とフォルダの出し入れ。外観のアイコンを開くとノードも並びます。</td></tr>
-              <tr><td>右下：プロパティ</td><td>選んだ物の設定。何も選んでいないときは「次に描くパス」の塗り・線・線幅。タブで「グリッド・ガイド」に切り替えます。</td></tr>
-              <tr><td>下：ノードエディター</td><td>選んだパスの外観ノード。上部のバーで外観の選択・追加。</td></tr>
-              <tr><td>いちばん下：ステータス</td><td>いまのツールの使い方と、操作の結果やエラー。</td></tr>
-            </tbody>
-          </table></div>
+        <div class="shot wide" data-scene="overview">
+          <figure class="pic"><img src="img/overview.png" alt="PathWeaver の画面全体" loading="lazy"></figure>
+          <ol class="legend">
+            <li data-key="topbar"><span><b>上のバー</b>ファイル名（保存していなければ点）、開く・保存・書き出し、取り消し・やり直し、ノードパネル、設定。ドラッグでウィンドウを動かし、ダブルクリックで拡大</span></li>
+            <li data-key="palette"><span><b>ツールパレット</b>描く・選ぶ道具。上のつまみで好きな場所へ動かせて、ダブルクリックで縦横を切り替え</span></li>
+            <li data-key="canvas"><span><b>キャンバス</b>描く場所。上と左に定規。選んだ物には枠と基準点の十字が出る</span></li>
+            <li data-key="snap"><span><b>吸着バー</b>ガイド・グリッド・接線・法線に吸い付くかどうか</span></li>
+            <li data-key="zoom"><span><b>外観・倍率</b>「外観」で全部の外観ノードを表示だけオフ（重いときに）。倍率を押すと100%</span></li>
+            <li data-key="layers"><span><b>レイヤー</b>パスとフォルダの一覧。目で表示、ドラッグで重ね順、外観のアイコンでノードも並ぶ</span></li>
+            <li data-key="inspector"><span><b>プロパティ</b>選んだ物の設定（名前・塗り・線・太さ・切り口・位置とサイズ）。何も選んでいなければ「次に描くパス」</span></li>
+            <li data-key="nodes"><span><b>ノードエディター</b>選んだパスの外観ノード。上のバーで外観の選択・追加</span></li>
+            <li data-key="status"><span><b>ステータス</b>いまのツールの使い方と、操作の結果やエラー</span></li>
+          </ol>
         </div>
         <p>どのパネルも見出しの <span class="tag">⌄</span> でたたみ、「切り離す」で浮かせられます。<kbd>Ctrl</kbd><kbd>Space</kbd> でポインターの下のエリアだけを大きく表示します（もう一度押すと戻る）。</p>
       </section>
 
       <section id="draw">
         <header><p class="eyebrow">作る</p><h2>描く</h2></header>
+        <div class="shot narrow" data-scene="tools">
+          <figure class="pic"><img src="img/tools.png" alt="ツールパレット" loading="lazy"></figure>
+          <ol class="legend">
+            <li data-key="select"><span><b>選択 <kbd>V</kbd></b>物を選んで動かす・拡大縮小・回転</span></li>
+            <li data-key="direct"><span><b>ダイレクト選択 <kbd>A</kbd></b>アンカーとハンドル、太さのつまみ、角丸</span></li>
+            <li data-key="pen"><span><b>ペン <kbd>P</kbd></b>クリックで角、ドラッグで曲線</span></li>
+            <li data-key="shape"><span><b>図形 <kbd>M</kbd> <kbd>L</kbd> <kbd>\</kbd></b>もう一度押す（右クリック）と10種類の一覧。絵は次に描く図形</span></li>
+            <li data-key="convert"><span><b>アンカーポイント <kbd>⇧</kbd><kbd>C</kbd></b>角⇄スムーズの切り替え</span></li>
+            <li data-key="text"><span><b>文字 <kbd>T</kbd></b>クリックして打つ</span></li>
+            <li data-key="artboard"><span><b>アートボード <kbd>⇧</kbd><kbd>O</kbd></b>ドラッグで書き出しの枠を作る</span></li>
+          </ol>
+        </div>
         <div class="block">
           <div class="head"><h3>ペン</h3><span class="key"><kbd>P</kbd></span></div>
           <div class="scroll"><table><tbody>
@@ -266,6 +308,23 @@ ul.plain {margin: 0; padding-left: 1.2em; color: var(--fg-2); display: flex; fle
             <tr><td>右クリック</td><td>カット・コピー・複製・重ね順・ガイド化・フォルダ・ブレンドなどのメニュー</td></tr>
           </tbody></table></div>
         </div>
+        <div class="shot" data-scene="selection">
+          <figure class="pic"><img src="img/selection.png" alt="選択ツールで円を選んだところ" loading="lazy"></figure>
+          <ol class="legend">
+            <li data-key="handle"><span><b>枠の四角</b>ドラッグで拡大縮小。<kbd>Shift</kbd> で比率を保つ、<kbd>Option</kbd> で基準点から</span></li>
+            <li data-key="rotate"><span><b>角のすぐ外</b>ドラッグで基準点を中心に回す</span></li>
+            <li data-key="pivot"><span><b>基準点の十字</b>ドラッグで動かす（9点に吸い付く）。ダブルクリックで中心へ。パスと重なるときは <kbd>⌘</kbd></span></li>
+          </ol>
+        </div>
+        <div class="shot" data-scene="position">
+          <figure class="pic"><img src="img/position.png" alt="プロパティの位置とサイズ" loading="lazy"></figure>
+          <ol class="legend">
+            <li data-key="picker"><span><b>基準点の9つの点</b>位置・サイズ・回転の軸を選ぶ</span></li>
+            <li data-key="position"><span><b>位置</b>基準点の座標。左の点の格子をドラッグすると縦横に一度に動く</span></li>
+            <li data-key="size"><span><b>サイズ</b>鎖のマークで縦横比を固定</span></li>
+            <li data-key="rotate"><span><b>回転</b>つまみを回すと基準点を中心に回る。終わると0に戻る</span></li>
+          </ol>
+        </div>
         <div class="block">
           <div class="head"><h3>基準点</h3></div>
           <p>位置・サイズ・回転は「基準点」を軸に変わります。最初は中心です。</p>
@@ -298,6 +357,16 @@ ul.plain {margin: 0; padding-left: 1.2em; color: var(--fg-2); display: flex; fle
       <section id="width">
         <header><p class="eyebrow">作る</p><h2>太さ・切り口・角</h2></header>
         <p>ダイレクト選択・ペン・アンカーポイントのツールでは、線の両側にオレンジの太さのつまみが出ます（設定で常時表示をオフにでき、そのときは <kbd>⌘</kbd> を押している間だけ出ます）。</p>
+        <div class="shot" data-scene="width">
+          <figure class="pic"><img src="img/width.png" alt="ダイレクト選択で線を選んだところ" loading="lazy"></figure>
+          <ol class="legend">
+            <li data-key="grip"><span><b>太さのつまみ</b>ドラッグで両側、<kbd>Option</kbd> で片側だけ</span></li>
+            <li data-key="core"><span><b>芯</b><kbd>⌘</kbd>＋クリックで、そこに幅点を足す</span></li>
+            <li data-key="end"><span><b>端点</b><kbd>⌘</kbd>＋ドラッグで切り口の角度を回す</span></li>
+            <li data-key="anchor"><span><b>アンカー</b>ドラッグで形を直す</span></li>
+            <li data-key="handle"><span><b>ハンドル</b>曲がり方を変える。<kbd>Shift</kbd> で角度を刻む</span></li>
+          </ol>
+        </div>
         <div class="block">
           <div class="head"><h3>太さ</h3></div>
           <div class="scroll"><table><tbody>
@@ -342,6 +411,18 @@ ul.plain {margin: 0; padding-left: 1.2em; color: var(--fg-2); display: flex; fle
       <section id="looks">
         <header><p class="eyebrow">作る</p><h2>外観ノード</h2></header>
         <p>パスを選んで下のノードエディターで「追加」（または <kbd>Shift</kbd><kbd>A</kbd>）すると、元の外観 → ノード → 出力 の形で外観が始まります。パスの形は変えずに、見た目だけを作ります。</p>
+        <div class="shot wide" data-scene="nodes">
+          <figure class="pic"><img src="img/nodes.png" alt="ノードエディター" loading="lazy"></figure>
+          <ol class="legend">
+            <li data-key="picker"><span><b>外観の選択</b>▾ でこのファイルの外観・ライブラリから選ぶ。名前を変えられる</span></li>
+            <li data-key="add"><span><b>追加</b>ノードを足す（<kbd>Shift</kbd><kbd>A</kbd> と同じ）</span></li>
+            <li data-key="card"><span><b>ノード</b>見出しをドラッグで動かす。リンクの上に落とすと間に入る</span></li>
+            <li data-key="bypass"><span><b>電源ボタン</b>このノードだけ止める（<kbd>M</kbd>）</span></li>
+            <li data-key="param"><span><b>値</b>左右にドラッグ、またはクリックして打つ。バーは「ふだん使う範囲」</span></li>
+            <li data-key="socket"><span><b>出力のソケット</b>ドラッグして次のノードへつなぐ。空白で離すと追加メニュー</span></li>
+            <li data-key="output"><span><b>出力</b>ここに届いたものがパスの見た目になる</span></li>
+          </ol>
+        </div>
         <div class="block">
           <div class="head"><h3>つなぐ・並べる</h3></div>
           <div class="scroll"><table><tbody>
@@ -433,6 +514,27 @@ ul.plain {margin: 0; padding-left: 1.2em; color: var(--fg-2); display: flex; fle
 
       <section id="export">
         <header><p class="eyebrow">まとめる</p><h2>アートボード・書き出し</h2></header>
+        <div class="shot wide" data-scene="artboards">
+          <figure class="pic"><img src="img/artboards.png" alt="アートボードツールを使っているところ" loading="lazy"></figure>
+          <ol class="legend">
+            <li data-key="name"><span><b>アートボードの名前</b>キャンバスの枠の上に出る</span></li>
+            <li data-key="frame"><span><b>枠の四角</b>ドラッグで大きさ。中をドラッグで移動</span></li>
+            <li data-key="list"><span><b>一覧</b>押すとそのアートボードを編集</span></li>
+            <li data-key="fields"><span><b>名前・位置・サイズ・定型</b>A4・はがき・1920×1080 などから選べる</span></li>
+            <li data-key="add"><span><b>アートボードを追加</b>選んだ物（なければ絵全体）を囲んで作る</span></li>
+          </ol>
+        </div>
+        <div class="shot" data-scene="export">
+          <figure class="pic"><img src="img/export.png" alt="書き出しの画面" loading="lazy"></figure>
+          <ol class="legend">
+            <li data-key="target"><span><b>範囲</b>アートボード・選択・絵全体</span></li>
+            <li data-key="boards"><span><b>書き出すアートボード</b>チェックしたものを1枚ずつ</span></li>
+            <li data-key="format"><span><b>形式</b>SVG・PNG・JPEG</span></li>
+            <li data-key="scale"><span><b>倍率</b>1単位を何ピクセルにするか</span></li>
+            <li data-key="background"><span><b>背景</b>透明・白（JPEG は白）</span></li>
+            <li data-key="run"><span><b>出来上がりの大きさと書き出す</b>ピクセル数を確かめてから書き出す</span></li>
+          </ol>
+        </div>
         <div class="block">
           <div class="head"><h3>アートボード</h3><span class="key"><kbd>⇧</kbd><kbd>O</kbd></span></div>
           <div class="scroll"><table><tbody>
@@ -520,7 +622,44 @@ ul.plain {margin: 0; padding-left: 1.2em; color: var(--fg-2); display: flex; fle
   </main>
 </div>
 
+<!-- regions:start --><script type="application/json" id="regions">{"overview":{"w":1400,"h":900,"regions":[{"key":"topbar","x":0,"y":0,"w":100,"h":4},{"key":"palette","x":2,"y":7.11,"w":2.71,"h":27.22},{"key":"canvas","x":2.86,"y":8.44,"w":74.21,"h":51},{"key":"snap","x":2,"y":59.44,"w":15.7,"h":3.33},{"key":"zoom","x":71.19,"y":60.56,"w":8.17,"h":2.44},{"key":"layers","x":80,"y":4,"w":20,"h":22.22},{"key":"inspector","x":80,"y":29.56,"w":20,"h":56.78},{"key":"nodes","x":0,"y":64,"w":79.93,"h":33.33},{"key":"status","x":0,"y":97.33,"w":100,"h":2.67}]},"tools":{"w":86,"h":293,"regions":[{"key":"select","x":33.72,"y":19.11,"w":32.56,"h":9.56},{"key":"direct","x":33.72,"y":29.35,"w":32.56,"h":9.56},{"key":"pen","x":33.72,"y":39.59,"w":32.56,"h":9.56},{"key":"shape","x":33.72,"y":49.83,"w":32.56,"h":9.56},{"key":"convert","x":33.72,"y":60.07,"w":32.56,"h":9.56},{"key":"text","x":33.72,"y":70.31,"w":32.56,"h":9.56},{"key":"artboard","x":33.72,"y":80.55,"w":32.56,"h":9.56}]},"width":{"w":600,"h":330,"regions":[{"key":"grip","x":5.93,"y":75.12,"w":4,"h":7.27},{"key":"core","x":72.29,"y":43.18,"w":3.33,"h":6.06},{"key":"end","x":87.67,"y":65.45,"w":4.67,"h":8.48},{"key":"anchor","x":45.17,"y":24.55,"w":3,"h":5.45},{"key":"handle","x":60.17,"y":18.48,"w":3,"h":5.45}]},"selection":{"w":294,"h":294,"regions":[{"key":"handle","x":81.63,"y":81.63,"w":6.12,"h":6.12},{"key":"rotate","x":86.05,"y":86.05,"w":6.8,"h":6.8},{"key":"pivot","x":47.28,"y":47.28,"w":5.44,"h":5.44}]},"position":{"w":280,"h":155,"regions":[{"key":"picker","x":85.36,"y":8.39,"w":12.14,"h":21.94},{"key":"position","x":29.29,"y":31.61,"w":67.14,"h":15.48},{"key":"size","x":29.29,"y":52.9,"w":67.14,"h":15.48},{"key":"rotate","x":29.29,"y":74.19,"w":67.14,"h":15.48}]},"nodes":{"w":1119,"h":300,"regions":[{"key":"picker","x":1.7,"y":5.33,"w":18.41,"h":6.67},{"key":"add","x":20.91,"y":5.33,"w":4.68,"h":6.67},{"key":"card","x":31.32,"y":23.67,"w":17.69,"h":8},{"key":"bypass","x":46.87,"y":24.5,"w":1.61,"h":6},{"key":"param","x":32.22,"y":41,"w":15.91,"h":8},{"key":"socket","x":48.3,"y":24.5,"w":1.61,"h":6},{"key":"output","x":50.98,"y":23.67,"w":17.69,"h":8}]},"artboards":{"w":1400,"h":515,"regions":[{"key":"name","x":0,"y":0,"w":4.54,"h":2.29},{"key":"frame","x":67.93,"y":89.51,"w":1.29,"h":3.5},{"key":"list","x":80.93,"y":53.01,"w":17.93,"h":9.71},{"key":"fields","x":85.86,"y":64.47,"w":13,"h":23.88},{"key":"add","x":81.57,"y":92.23,"w":9.91,"h":4.66}]},"export":{"w":466,"h":344,"regions":[{"key":"target","x":21.24,"y":22.67,"w":72.96,"h":6.98},{"key":"boards","x":6.44,"y":32.27,"w":87.77,"h":15.12},{"key":"format","x":21.24,"y":50,"w":72.96,"h":6.98},{"key":"scale","x":21.24,"y":59.59,"w":72.96,"h":6.98},{"key":"background","x":21.24,"y":69.19,"w":72.96,"h":6.98},{"key":"run","x":5.79,"y":86.92,"w":88.41,"h":6.98}]}}</script><!-- regions:end -->
 <script>
+// numbered markers from the measured regions; hovering a marker or a list item lights both
+(() => {
+  let data = {}
+  try { data = JSON.parse(document.getElementById('regions').textContent || '{}') } catch { /* no markers */ }
+  for (const shot of document.querySelectorAll('.shot[data-scene]')) {
+    const scene = data[shot.dataset.scene]
+    const pic = shot.querySelector('.pic')
+    const items = [...shot.querySelectorAll('ol.legend li[data-key]')]
+    if (!scene) continue
+    items.forEach((li, i) => {
+      const r = scene.regions.find(v => v.key === li.dataset.key)
+      if (!r) return
+      const area = document.createElement('div')
+      area.className = 'area'
+      Object.assign(area.style, {left: r.x + '%', top: r.y + '%', width: r.w + '%', height: r.h + '%'})
+      const pin = document.createElement('button')
+      pin.type = 'button'
+      pin.className = 'pin'
+      pin.textContent = i + 1
+      pin.setAttribute('aria-label', `${i + 1}：${li.querySelector('b')?.textContent ?? ''}`)
+      // small targets: the number sits just above-left; large areas: inside their corner
+      const big = r.w > 12 && r.h > 12
+      Object.assign(pin.style, {left: (big ? r.x + 1.6 : r.x) + '%', top: (big ? r.y + 1.6 * (scene.w / scene.h) : r.y) + '%'})
+      pic.append(area, pin)
+      const on = v => { area.classList.toggle('hot', v); pin.classList.toggle('hot', v); li.classList.toggle('hot', v) }
+      for (const el of [pin, li]) {
+        el.addEventListener('pointerenter', () => on(true))
+        el.addEventListener('pointerleave', () => on(false))
+      }
+      pin.addEventListener('focus', () => on(true))
+      pin.addEventListener('blur', () => on(false))
+      pin.addEventListener('click', () => li.scrollIntoView({block: 'nearest', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth'}))
+    })
+  }
+})()
+
 // highlight the section in view in the sidebar
 (() => {
   const links = [...document.querySelectorAll('.side nav a')]

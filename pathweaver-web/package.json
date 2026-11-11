@@ -6,6 +6,7 @@
   "scripts": {
     "predev": "npm run prepare-assets",
     "prebuild": "npm run prepare-assets",
+    "guide-shots": "node scripts/guide-shots.mjs",
     "prepare-assets": "bash scripts/build-wasm.sh && node scripts/icons.mjs",
     "dev": "vite",
     "build": "vite build",
