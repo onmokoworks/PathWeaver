@@ -18,7 +18,7 @@ function input(v: string) {
 </script>
 
 <template>
-  <div class="paint" :data-paint="label">
+  <div class="paint" :data-paint="label" :data-opaque="(props.opacity ?? 1) >= 1 || undefined">
     <template v-if="props.value">
       <InputColor
         class="color" :model-value="hexAlpha(props.value, props.opacity ?? 1)" :alpha="props.opacity !== undefined" :aria-label="label"

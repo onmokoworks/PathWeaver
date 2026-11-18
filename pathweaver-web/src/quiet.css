@@ -60,3 +60,5 @@ body .TqInputColorPad .default-button {outline: 1px solid color-mix(in srgb, var
 /* Paint opacity (%) and gradient stop position: the amount as a grey bar, not a blue one */
 body .TqInputColor .alpha .bar,
 body [data-paint-stop-offset] .bar {background: var(--pw-chip)}
+/* at 100% there is nothing to show: a full bar read as a pressed button */
+body [data-opaque] .TqInputColor .alpha .bar {background: transparent}

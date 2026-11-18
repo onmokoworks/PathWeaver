@@ -29,4 +29,6 @@ background-checkerboard(color = currentColor)
 		linear-gradient(135deg, transparent 75%, #ddd 75%)
 		
 	background-position 0 0, 0 0, size 0, size (-1 * size), 0px size
-	background-size 2 * size 2 * size
+	// PathWeaver: the colour layer is one piece; tiled, WebKit showed the white
+	// base through the seams as a dotted line across the swatch
+	background-size 100% 100%, (2 * size) (2 * size), (2 * size) (2 * size), (2 * size) (2 * size), (2 * size) (2 * size)
